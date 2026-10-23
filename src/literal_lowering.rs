@@ -9,7 +9,14 @@ pub(crate) fn literal_to_rust(lit: &Literal) -> String {
         Literal::Float(value) => format!("{value}f32"),
         Literal::Double(value) => format!("{value}f64"),
         Literal::String(value) => format!("{value:?}.to_string()"),
-        Literal::Char(value) => format!("{value:?}"),
+        Literal::Char(value) => format!("JavaCodeUnit({}u16)", *value as u32),
+        Literal::CharUtf16(value) => format!("JavaCodeUnit({value}u16)"),
+        // The scalar-only backend is still in migration. Keep this boundary
+        // loud rather than corrupting values preserved by the IR.
+        Literal::StringUtf16(_) => {
+            "compile_error!(\"unsupported Java UTF-16 literal requires lossless text storage\")"
+                .to_string()
+        }
     }
 }
 
@@ -29,6 +36,17 @@ mod tests {
             literal_to_rust(&Literal::String("name".to_string())),
             "\"name\".to_string()"
         );
-        assert_eq!(literal_to_rust(&Literal::Char('x')), "'x'");
+        assert_eq!(literal_to_rust(&Literal::Char('x')), "JavaCodeUnit(120u16)");
+    }
+
+    #[test]
+    fn char_literals_retain_surrogates_while_scalar_string_storage_stays_explicit() {
+        assert_eq!(
+            literal_to_rust(&Literal::CharUtf16(0xd800)),
+            "JavaCodeUnit(55296u16)"
+        );
+        let value = literal_to_rust(&Literal::StringUtf16(vec![0xdfff]));
+        assert!(value.contains("compile_error!"));
+        assert!(value.contains("lossless text storage"));
     }
 }

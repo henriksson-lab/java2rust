@@ -65,7 +65,7 @@ impl JavaMapKey for Key {
     fn java_map_key_identity_eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(&self.0, &other.0) }
     fn java_map_key_eq_result(&self, _: &Self) -> Result<bool, JavaException> {
         self.1.set(self.1.get() + 1);
-        Err(JavaException::new("IllegalStateException", "equals".into()))
+        Err(JavaException::new("IllegalStateException", "equals"))
     }
 }
 #[test] fn identity_shortcut_forwards_through_nullable_and_borrowed_keys() {

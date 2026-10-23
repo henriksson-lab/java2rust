@@ -2387,51 +2387,6 @@ impl JavaIntoInputStream for Option<InputStream> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaException {
-    pub class_name: &'static str,
-    pub message: String,
-    pub cause: Option<Box<JavaException>>,
-}
-
-impl JavaException {
-    pub fn new(class_name: &'static str, message: String) -> JavaException {
-        JavaException { class_name, message, cause: None }
-    }
-
-    pub fn with_cause(
-        class_name: &'static str,
-        message: String,
-        cause: JavaException,
-    ) -> JavaException {
-        JavaException { class_name, message, cause: Some(Box::new(cause)) }
-    }
-
-    pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
-        JavaException { class_name, message: err.to_string(), cause: None }
-    }
-
-    pub fn is_instance(&self, class_names: &[&str]) -> bool {
-        class_names.iter().any(|name| self.class_name == *name)
-    }
-
-    pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
-        if self.cause.as_ref().is_some_and(|cause| cause.is_instance(class_names)) {
-            *self.cause.take().expect("checked Java exception cause")
-        } else {
-            self
-        }
-    }
-
-    pub fn get_message(&self) -> Option<String> {
-        Some(self.message.clone())
-    }
-
-    pub fn get_localized_message(&self) -> Option<String> {
-        self.get_message()
-    }
-}
-
 impl InputStream {
     pub fn read_0(&self) -> Result<i32, JavaException> {
         let Some(bytes) = self.bytes.as_ref() else {
@@ -2493,12 +2448,6 @@ impl InputStream {
             closed.set(true);
         }
         Ok(())
-    }
-}
-
-impl std::fmt::Display for JavaException {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.class_name, self.message)
     }
 }
 
@@ -2594,11 +2543,10 @@ RUST
   printf "JavaClass\nProtectionDomain\nCodeSource\n" >> "$shared_support_types_path"
 fi
 
-# These declarations are used by the root JavaClass facade and by the erased
-# display helpers that remain attached to a generated source module.  They are
-# intentionally small shared identities: concrete display implementations stay
-# with their source module, while every module imports these names below.
-if grep -R -q 'JavaErasedCollectionDisplayElement\|JavaErasedOptionalDisplayElement\|ClassLoader' "$generated_dir"; then
+# The root JavaClass facade uses ClassLoader. Logical text traits, macros and
+# implementations are promoted from producer output by the shared merger;
+# maintaining scalar copies here forks their selected String representation.
+if grep -R -q 'ClassLoader' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ClassLoader;
@@ -2617,82 +2565,14 @@ impl ClassLoader {
     }
 }
 
-pub trait JavaErasedCollectionDisplayElement {
-    fn java_erased_collection_display(&self) -> String;
-}
-
-pub trait JavaErasedOptionalDisplayElement {
-    fn java_erased_optional_display(&self) -> String;
-}
-
-macro_rules! impl_java_erased_display_primitives {
-    ($trait_name:ident, $method:ident) => {
-        impl $trait_name for bool { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for i8 { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for i16 { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for i32 { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for i64 { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for char { fn $method(&self) -> String { self.to_string() } }
-        impl $trait_name for String { fn $method(&self) -> String { self.to_string() } }
-    };
-}
-impl_java_erased_display_primitives!(JavaErasedCollectionDisplayElement, java_erased_collection_display);
-impl_java_erased_display_primitives!(JavaErasedOptionalDisplayElement, java_erased_optional_display);
-
-impl JavaErasedCollectionDisplayElement for f32 {
-    fn java_erased_collection_display(&self) -> String { java_float_to_string(*self) }
-}
-impl JavaErasedCollectionDisplayElement for f64 {
-    fn java_erased_collection_display(&self) -> String { java_double_to_string(*self) }
-}
-impl JavaErasedOptionalDisplayElement for f32 {
-    fn java_erased_optional_display(&self) -> String { java_float_to_string(*self) }
-}
-impl JavaErasedOptionalDisplayElement for f64 {
-    fn java_erased_optional_display(&self) -> String { java_double_to_string(*self) }
-}
-impl JavaErasedOptionalDisplayElement for Box<dyn std::any::Any> {
-    fn java_erased_optional_display(&self) -> String { java_erased_any_to_string(self.as_ref()) }
-}
-impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement for Option<T> {
-    fn java_erased_collection_display(&self) -> String {
-        self.as_ref().map(JavaErasedCollectionDisplayElement::java_erased_collection_display)
-            .unwrap_or_else(|| "null".to_string())
-    }
-}
-impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> {
-    fn java_erased_optional_display(&self) -> String { java_erased_collection_to_string(self) }
-}
-fn java_normalize_scientific_string(rendered: String) -> String {
-    let Some((mantissa, exponent)) = rendered.split_once('e') else { return rendered; };
-    let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
-    let exponent = exponent.parse::<i32>().expect("Rust scientific exponent");
-    format!("{mantissa}E{exponent}")
-}
-
-pub fn java_double_to_string(value: f64) -> String {
-    if value.is_nan() { return "NaN".to_string(); }
-    if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
-    let magnitude = value.abs();
-    if magnitude != 0.0 && !(1e-3..1e7).contains(&magnitude) {
-        return java_normalize_scientific_string(format!("{value:e}"));
-    }
-    if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
-    value.to_string()
-}
-
-pub fn java_float_to_string(value: f32) -> String {
-    if value.is_nan() { return "NaN".to_string(); }
-    if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
-    let magnitude = value.abs();
-    if magnitude != 0.0 && !(1e-3f32..1e7f32).contains(&magnitude) {
-        return java_normalize_scientific_string(format!("{value:e}"));
-    }
-    if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
-    value.to_string()
-}
 RUST
-  printf "ClassLoader\nJavaErasedCollectionDisplayElement\nJavaErasedOptionalDisplayElement\njava_erased_collection_to_string\njava_erased_optional_to_string\njava_erased_any_to_string\njava_normalize_scientific_string\njava_float_to_string\njava_double_to_string\n" >> "$shared_support_types_path"
+  # Use the same factory as per-unit emission, including its private helpers.
+  # A matching producer is required; do not silently combine a frozen old
+  # producer with a different current runtime implementation.
+  focused_emit_runtime_support "$translation_producer_binary" "$translation_producer_sha256" \
+    floating-point-display "$out_dir/producer-runtime-floating-point-display.rs" \
+    >> "$shared_support_path" || exit 1
+  printf "ClassLoader\njava_normalize_scientific_string\njava_floating_scientific_string\njava_float_to_string\njava_double_to_string\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct AtomicInteger' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
@@ -3516,17 +3396,15 @@ text = text.replace(
 path.write_text(text)
 PY
 
-# The private erased-display traits have one crate-wide identity.  Their two
-# generic implementations are therefore emitted once above, rather than once
-# per translated Java source module.
+# The scalar comparison fallback above has one crate-wide identity. Other
+# trait implementations follow their producer-selected declaration/alias owner
+# through the normal merger instead of being stripped and reconstructed here.
 python3 - "$generated_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 patterns = (
-    re.compile(r"^impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement for Option<T> \{"),
-    re.compile(r"^impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> \{"),
     re.compile(r"^impl<T: AsRef<str> \+ \?Sized> JavaStringComparisonHelper for T \{"),
 )
 for path in Path(sys.argv[1]).glob("*.rs"):

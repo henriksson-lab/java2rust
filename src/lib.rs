@@ -7,7 +7,35 @@ mod array_plan;
 pub mod binding_id;
 pub mod call_lowering;
 pub mod call_plan;
+
+/// Producer-owned runtime snippets needed by package assemblers as well as
+/// individual translation units. Assemblers must not maintain forked bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeSupport {
+    FloatingPointDisplay,
+    LosslessJavaText,
+}
+
+impl RuntimeSupport {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "floating-point-display" => Some(Self::FloatingPointDisplay),
+            "lossless-java-text" => Some(Self::LosslessJavaText),
+            _ => None,
+        }
+    }
+
+    pub fn emit_rust(self) -> String {
+        let item = match self {
+            Self::FloatingPointDisplay => stdlib::java_floating_point_display_support_item(),
+            Self::LosslessJavaText => stdlib::java_utf16_string_support_item(),
+        };
+        emit::emit_file(&rust_ir::RustFile { items: vec![item] })
+    }
+}
+
 mod callable_analysis;
+mod class_initialization;
 pub mod coercion;
 pub mod constructor_plan;
 mod control_flow_lowering;
@@ -30,10 +58,31 @@ mod graph;
 mod inherited_members;
 mod inner_class_capture;
 mod item_assembly;
+mod java_append_plan;
+mod java_float_parse;
+// Staged lossless payload; activated only with a coherent String/char consumer
+// migration. Until then the existing emitted representation is unchanged.
 mod java_hash_plan;
 pub mod java_ir;
+mod java_literal;
 mod java_naming;
 mod java_signature;
+#[allow(dead_code)]
+mod java_string_identity;
+#[cfg(test)]
+mod java_string_identity_tests;
+#[allow(dead_code)]
+mod java_text;
+#[cfg(test)]
+mod java_text_tests;
+#[allow(dead_code)]
+mod java_utf16_string {
+    use crate::java_string_identity::JavaStringIdentity;
+    use crate::java_text::{
+        JavaCodeUnit, JavaStringSearchNeedle, JavaTextBounds, JavaTextView, JavaUtf16,
+    };
+    include!("java_utf16_string.rs");
+}
 mod java_type_substitution;
 mod javalibs;
 mod lattice;
@@ -47,9 +96,11 @@ pub mod member_access_plan;
 mod method_reference_lowering;
 mod method_reference_plan;
 mod method_reference_shape;
+mod null_diagnostic;
 mod nullability_plan;
 pub mod object_model;
 pub mod operator_lowering;
+mod outer_field_capture;
 pub mod output_markers;
 pub mod parser;
 pub mod representation;
@@ -415,6 +466,7 @@ pub fn translate_source(source: &str) -> Translation {
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let mut parsed = parser::parse_java_source(source);
     prepare_program_after_parse(&mut parsed.program, source);
+    qualify_duplicate_program_type_names(&mut [&mut parsed.program]);
     let mut effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
     let translation = translate_parsed_source_with_context(
         parsed,
@@ -437,6 +489,7 @@ pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Tr
         effective_external_facts.java_string_identity_representation = true;
         let mut parsed = parser::parse_java_source(source);
         prepare_program_after_parse(&mut parsed.program, source);
+        qualify_duplicate_program_type_names(&mut [&mut parsed.program]);
         return translate_parsed_source_with_context(
             parsed,
             None,
@@ -1221,6 +1274,8 @@ fn count_type_fields(ty: &java_ir::TypeDecl) -> usize {
 fn count_facts(facts: &FactSet) -> usize {
     facts.notes.len()
         + facts.captures.owners.len()
+        + facts.captures.outer_field_plans.len()
+        + usize::from(facts.captures.has_lifetime_observers)
         + facts.hierarchy_overrides.len()
         + facts.closed_hierarchy_facts.len()
         + facts.sealed_permits_facts.len()
@@ -1892,7 +1947,14 @@ fn qualify_duplicate_program_type_names(programs: &mut [&mut Program]) {
     order.sort_by_key(|index| {
         !plans[*index].package.is_empty() && !plans[*index].old_name.contains('.')
     });
-    let mut occupied_rust_names: BTreeMap<String, String> = BTreeMap::new();
+    // These linked runtime facades also support unrelated APIs (PrintStream,
+    // CharSequence). A source lookalike cannot suppress that runtime bundle.
+    // Reuse the ordinary declaration/reference collision repair instead.
+    let mut occupied_rust_names: BTreeMap<String, String> =
+        crate::java_append_plan::NATIVE_BUILDER_TYPES
+            .into_iter()
+            .map(|name| (name.to_string(), format!("<native runtime {name}>")))
+            .collect();
     for index in order {
         let mut attempt = 0;
         loop {
@@ -1956,7 +2018,7 @@ fn source_type_qualified_name(package: Option<&str>, name: &str) -> String {
 }
 
 fn disambiguated_merge_type_name(package: &str, type_name: &str, attempt: usize) -> Option<String> {
-    if package.is_empty() || type_name.contains('.') {
+    if type_name.contains('.') {
         return None;
     }
     let marker = if attempt == 0 {
@@ -1964,7 +2026,11 @@ fn disambiguated_merge_type_name(package: &str, type_name: &str, attempt: usize)
     } else {
         format!("JavaType{attempt}")
     };
-    Some(format!("{package}.{marker}.{type_name}"))
+    Some(if package.is_empty() {
+        format!("{marker}.{type_name}")
+    } else {
+        format!("{package}.{marker}.{type_name}")
+    })
 }
 
 fn rewrite_type_references_in_program(program: &mut Program, old_name: &str, new_name: &str) {
@@ -2155,6 +2221,22 @@ fn rewrite_type_name_in_switch_label(label: &mut SwitchLabel, old_name: &str, ne
 }
 
 fn rewrite_type_name_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
+    // Qualified type receivers are field-access paths in the parsed AST, not
+    // necessarily one Var containing dots. Rewrite the complete owner before
+    // descending, otherwise merged Rust-name collision repairs miss it.
+    fn is_path(expr: &Expr, path: &str) -> bool {
+        match expr {
+            Expr::Var(name) => name == path,
+            Expr::FieldAccess(owner, member) => path
+                .rsplit_once('.')
+                .is_some_and(|(prefix, tail)| tail == member && is_path(owner, prefix)),
+            _ => false,
+        }
+    }
+    if old_name.contains('.') && is_path(expr, old_name) {
+        *expr = Expr::Var(new_name.to_string());
+        return;
+    }
     match expr {
         Expr::Literal(_) | Expr::This | Expr::Super | Expr::Raw(_) | Expr::Unsupported { .. } => {}
         Expr::Var(name) => {
@@ -3169,6 +3251,14 @@ public class UseAB {
         );
         assert_eq!(root.program.types[0].name, "ABC");
         assert_eq!(ab.program.types[0].name, "a.b.JavaType.C");
+        assert_eq!(
+            ab.program.types[0].source_names.as_ref().unwrap().canonical,
+            "a.b.C"
+        );
+        assert_eq!(
+            ab.program.types[0].source_names.as_ref().unwrap().binary,
+            "a.b.C"
+        );
         assert_eq!(x.program.types[0].name, "x.C");
         assert_eq!(
             rust_names,
@@ -3430,7 +3520,7 @@ public class HeaderUse {
                     &built.context.representations,
                 )
             ),
-            "JavaLinkedHashMap<String, HeaderLineValue>",
+            "JavaLinkedHashMap<JavaString, HeaderLineValue>",
             "{:?}",
             indexed.shape()
         );

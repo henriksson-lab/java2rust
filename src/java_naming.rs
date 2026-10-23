@@ -2,6 +2,60 @@ use std::collections::{HashMap, HashSet};
 
 use crate::java_ir::{FieldDecl, Member, Modifier, Program, TypeDecl};
 
+/// Checked implementation of the compiler-provided source enum lookup method.
+/// Resolver identity and exception propagation must refer to the same body.
+pub(crate) const ENUM_VALUE_OF_RESULT_METHOD: &str = "__java_value_of_result";
+
+/// All runtime class-token producers share original binary source identity.
+pub(crate) fn source_binary_class_name(ty: &TypeDecl, package: Option<&str>) -> String {
+    if let Some(names) = &ty.source_names {
+        return names.binary.clone();
+    }
+    if ty.name.contains('.') {
+        return ty.name.clone();
+    }
+    package
+        .filter(|package| !package.is_empty())
+        .map(|package| format!("{package}.{}", ty.name))
+        .unwrap_or_else(|| ty.name.clone())
+}
+
+/// Capture named-declaration runtime identity before qualification, merging or
+/// Rust-name collision repair. Java canonical and binary nesting are distinct;
+/// a dollar sign inside a source identifier must not be mistaken for nesting.
+pub(crate) fn record_source_type_names(package: Option<&str>, types: &mut [TypeDecl]) {
+    fn record(ty: &mut TypeDecl, canonical_owner: &str, binary_owner: &str, nested: bool) {
+        let canonical = if canonical_owner.is_empty() {
+            ty.name.clone()
+        } else {
+            format!("{canonical_owner}.{}", ty.name)
+        };
+        let binary = if binary_owner.is_empty() {
+            ty.name.clone()
+        } else {
+            format!(
+                "{binary_owner}{}{}",
+                if nested { "$" } else { "." },
+                ty.name
+            )
+        };
+        let names = ty
+            .source_names
+            .get_or_insert(crate::java_ir::SourceTypeNames { canonical, binary });
+        let canonical = names.canonical.clone();
+        let binary = names.binary.clone();
+        for member in &mut ty.members {
+            if let Member::Type(child) = member {
+                record(child, &canonical, &binary, true);
+            }
+        }
+    }
+    let package = package.unwrap_or_default();
+    for ty in types {
+        record(ty, package, package, false);
+    }
+}
+
 /// Reconcile relative and already-qualified declarations without duplicating
 /// the lexical owner. Shared by emission inventories and declaration lookup.
 pub(crate) fn source_type_name_in_owner(name: &str, enclosing: Option<&str>) -> String {
@@ -165,6 +219,48 @@ pub(crate) fn source_instance_field_rust_names(ty: &TypeDecl) -> HashMap<String,
     source_field_rust_names(ty, |field| !field.modifiers.contains(&Modifier::Static))
 }
 
+/// Enum fields are projected through methods, so their getters share Rust's
+/// method namespace even though Java fields and methods have separate names.
+/// Reserve other field spellings as well, to keep collision repair stable.
+pub(crate) fn source_enum_field_accessor_name(ty: &TypeDecl, field_name: &str) -> String {
+    let base = crate::parser::to_snake_case(
+        source_instance_field_decl(ty, field_name)
+            .map(|field| field.name.as_str())
+            .unwrap_or(field_name),
+    );
+    let mut occupied = [
+        "name",
+        "ordinal",
+        "values",
+        "value_of",
+        ENUM_VALUE_OF_RESULT_METHOD,
+        "to_string",
+        "get_class",
+        "__java_enum_constant",
+        "__java_publish",
+        "__java_payloads",
+        "__java_values_ready",
+        "__java_class_init",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<HashSet<_>>();
+    occupied.extend(ty.members.iter().filter_map(|member| match member {
+        Member::Method(method) => Some(crate::java_signature::source_method_rust_name(method)),
+        _ => None,
+    }));
+    if !occupied.contains(&base) && !rust_keyword_needs_rename(&base) {
+        return base;
+    }
+    occupied.extend(ty.members.iter().filter_map(|member| match member {
+        Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+            Some(crate::parser::to_snake_case(&field.name))
+        }
+        _ => None,
+    }));
+    allocate_rust_ident(&base, &occupied)
+}
+
 pub(crate) fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
     let field_name = source_instance_field_decl(ty, field_name)
         .map(|field| field.name.as_str())
@@ -302,6 +398,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parsed_runtime_names_preserve_packages_nesting_and_literal_dollars() {
+        let parsed = crate::parser::parse_java_source(
+            "package left.side; class Outer { static class Mid { enum Choice { ONE } } } class Cash$Value {}",
+        );
+        let outer = &parsed.program.types[0];
+        let Member::Type(mid) = &outer.members[0] else {
+            panic!("nested class");
+        };
+        let Member::Type(choice) = &mid.members[0] else {
+            panic!("nested enum");
+        };
+        let names = choice.source_names.as_ref().unwrap();
+        assert_eq!(names.canonical, "left.side.Outer.Mid.Choice");
+        assert_eq!(names.binary, "left.side.Outer$Mid$Choice");
+        assert_eq!(
+            parsed.program.types[1]
+                .source_names
+                .as_ref()
+                .unwrap()
+                .binary,
+            "left.side.Cash$Value"
+        );
+        let mut rewritten = parsed.program.clone();
+        rewritten.types[0].name = "synthetic.JavaType.Outer".into();
+        assert_eq!(rewritten.types[0].source_names, outer.source_names);
+    }
+
+    #[test]
     fn declaration_paths_distinguish_same_leaf_nested_summary_types() {
         let parsed = crate::parser::parse_java_source(
             "class First { enum Part { ONE } } class Second { enum Part { TWO } }",
@@ -337,6 +461,7 @@ mod tests {
 
     fn test_type(members: Vec<Member>) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: "NameCollision".to_string(),
             type_params: Vec::new(),

@@ -90,11 +90,15 @@ impl UniformRandomProvider for TraceRng {
     fn clone_box(&self) -> Box<dyn UniformRandomProvider> {
         Box::new(self.clone())
     }
-    fn to_string(&self) -> String {
-        "trace".into()
+    fn to_string(&self) -> JavaString {
+        JavaString::fresh("trace")
     }
 }
-fn display(label: &str, text: String) {
+fn display(label: &str, text: JavaString) {
+    // Explicit host-output boundary; never silently replace invalid Java units.
+    let text = text
+        .scalar_string()
+        .expect("sampler labels are scalar text");
     // A mismatch remains an explicit comparator failure while allowing the
     // rest of the numeric/state observations to be collected in one run.
     let result = if text.contains("rng=") && text.ends_with(']') {

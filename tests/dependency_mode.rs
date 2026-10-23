@@ -3036,6 +3036,7 @@ class UsesSummary {
             mode: ExternalLibraryMode::ExternalFactModel,
             coverage: ExternalApiCoverage::Semantic,
             rust_target: Some("crate::external::summary".to_string()),
+            string_abi: Default::default(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
     provider_facts
@@ -3105,6 +3106,7 @@ class UsesQualifiedProviderFact {
             mode: ExternalLibraryMode::ExternalFactModel,
             coverage: ExternalApiCoverage::Semantic,
             rust_target: Some("crate::external::summary".to_string()),
+            string_abi: Default::default(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
     provider_facts
@@ -3415,6 +3417,7 @@ class UsesBadProvider {
             mode: ExternalLibraryMode::ExternalFactModel,
             coverage: ExternalApiCoverage::Semantic,
             rust_target: Some("crate::external::dep_boundary".to_string()),
+            string_abi: Default::default(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
     provider_facts

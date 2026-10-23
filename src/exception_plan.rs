@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::facts::FactSet;
 use crate::java_ir::{
     BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Modifier, Program, Stmt,
-    SwitchCase, SwitchLabel, TypeDecl,
+    SwitchCase, SwitchLabel, TypeDecl, TypeKind,
 };
 use crate::java_signature::{JavaCallableSlotKey, source_method_rust_name};
 use crate::types::TypeEnv;
@@ -53,10 +53,12 @@ pub struct CallableFallibility {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallibilityReason {
+    /// Compiler-provided enum lookup rejects unknown names and null inputs.
+    EnumLookupThrow,
     /// Integer `/` or `%` can throw ArithmeticException on a zero divisor.
     IntegerDivRemThrow,
     /// Math integer helpers can throw ArithmeticException.
-    MathToIntExactThrow,
+    CheckedNativeArithmeticThrow,
     /// A nullable Java reference was dereferenced as a receiver and can throw
     /// NullPointerException.
     NullReceiverThrow,
@@ -72,6 +74,9 @@ pub enum FallibilityReason {
     RetainedNativeCollectionThrow,
     /// A retained functional value has an open runtime callback body.
     StoredCallbackThrow,
+    /// Public/protected invocation-only callback parameters admit callers
+    /// outside this translation unit, whose bodies are not proven infallible.
+    OpenCallbackParameterThrow,
     /// Implicit Java iteration invokes an open, checked iterator protocol.
     IteratorProtocolThrow,
     /// Open Java Object dispatch (toString/hashCode) can execute an overriding body.
@@ -221,7 +226,7 @@ pub(crate) fn program_uses_java_exception_with_facts(program: &Program, facts: &
         || !facts.catch_facts.is_empty()
         || program_has_lowerable_try_scope(program)
         || program_has_integer_div_rem_expr(program)
-        || program_has_math_to_int_exact_call(program)
+        || program_has_checked_native_arithmetic_call(program)
 }
 
 pub fn plan_java_exception_support(program: &Program, facts: &FactSet) -> JavaExceptionSupportPlan {
@@ -540,24 +545,28 @@ fn expr_has_throwing_integer_div_rem_expr(expr: &Expr, env: &TypeEnv) -> bool {
                 || args
                     .iter()
                     .any(|arg| expr_has_throwing_integer_div_rem_expr(arg, env))
-                // Anonymous members have their own parameter/local environments.
-                // Keep the older conservative scan for those nested callables.
+                // Initialization executes at creation; method bodies belong
+                // to their synthetic callable identities and execute later.
                 || body.as_ref().is_some_and(|members| {
+                    let mut initializer_env = env.clone();
+                    initializer_env.enter_anonymous_field_scope(members.iter().filter_map(|member| match member {
+                        Member::Field(field) => Some((field.name.clone(), field.ty.clone())),
+                        _ => None,
+                    }));
                     members.iter().any(|member| match member {
-                        Member::Method(method) => method
+                        Member::Method(method) if crate::class_initialization::is_initializer(method) => method
                             .body
                             .as_ref()
-                            .is_some_and(block_has_integer_div_rem_expr),
+                            .is_some_and(|body| block_has_unhandled_integer_div_rem_with_env(body, &initializer_env)),
                         Member::Constructor(constructor) => constructor
                             .body
                             .as_ref()
-                            .is_some_and(block_has_integer_div_rem_expr),
+                            .is_some_and(|body| block_has_unhandled_integer_div_rem_with_env(body, &initializer_env)),
                         Member::Field(field) => field
                             .initializer
                             .as_ref()
-                            .is_some_and(expr_has_integer_div_rem_expr),
-                        Member::Type(nested) => type_has_integer_div_rem_expr(nested),
-                        Member::Unsupported { .. } => false,
+                            .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, &initializer_env)),
+                        _ => false,
                     })
                 })
         }
@@ -599,12 +608,7 @@ fn expr_has_throwing_integer_div_rem_expr(expr: &Expr, env: &TypeEnv) -> bool {
                 })
         }
         Expr::InstanceOf { expr, .. } => expr_has_throwing_integer_div_rem_expr(expr, env),
-        Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => {
-                expr_has_throwing_integer_div_rem_expr(expr, env)
-            }
-            crate::java_ir::LambdaBody::Block(block) => block_has_integer_div_rem_expr(block),
-        },
+        Expr::Lambda { .. } => false,
         Expr::MethodReference { .. }
         | Expr::Literal(_)
         | Expr::Var(_)
@@ -623,31 +627,37 @@ fn switch_label_has_integer_div_rem_expr(label: &crate::java_ir::SwitchLabel) ->
     }
 }
 
-fn program_has_math_to_int_exact_call(program: &Program) -> bool {
-    program.types.iter().any(type_has_math_to_int_exact_call)
+fn program_has_checked_native_arithmetic_call(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(type_has_checked_native_arithmetic_call)
 }
 
-fn type_has_math_to_int_exact_call(ty: &TypeDecl) -> bool {
+fn type_has_checked_native_arithmetic_call(ty: &TypeDecl) -> bool {
     ty.members.iter().any(|member| match member {
         Member::Method(method) => method
             .body
             .as_ref()
-            .is_some_and(block_has_math_to_int_exact_call),
+            .is_some_and(block_has_checked_native_arithmetic_call),
         Member::Constructor(constructor) => constructor
             .body
             .as_ref()
-            .is_some_and(block_has_math_to_int_exact_call),
+            .is_some_and(block_has_checked_native_arithmetic_call),
         Member::Field(field) => field
             .initializer
             .as_ref()
-            .is_some_and(expr_has_math_to_int_exact_call),
-        Member::Type(nested) => type_has_math_to_int_exact_call(nested),
+            .is_some_and(expr_has_checked_native_arithmetic_call),
+        Member::Type(nested) => type_has_checked_native_arithmetic_call(nested),
         Member::Unsupported { .. } => false,
     })
 }
 
-fn block_has_math_to_int_exact_call(block: &Block) -> bool {
-    block.statements.iter().any(stmt_has_math_to_int_exact_call)
+fn block_has_checked_native_arithmetic_call(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .any(stmt_has_checked_native_arithmetic_call)
 }
 
 /// The **only** producer of `MethodExceptionPlan`.
@@ -721,6 +731,60 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             (key, fallibility)
         })
         .collect::<HashMap<_, _>>();
+    let callback_plan;
+    let callbacks = if let Some(signatures) = signatures {
+        signatures.source_callback_plan()
+    } else {
+        callback_plan = crate::source_callbacks::SourceCallbackPlan::build(program, facts);
+        &callback_plan
+    };
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    for ty in types {
+        if ty.kind == TypeKind::Enum {
+            let key = CallableKey::method_identity(
+                ty.name.clone(),
+                crate::java_naming::ENUM_VALUE_OF_RESULT_METHOD,
+            );
+            let entry = callables.entry(key).or_default();
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::EnumLookupThrow);
+        }
+        for member in &ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if !method
+                .modifiers
+                .iter()
+                .any(|m| matches!(m, Modifier::Public | Modifier::Protected))
+            {
+                continue;
+            }
+            for index in 0..method.params.len() {
+                if !callbacks.is_inline(ty, method, index) {
+                    continue;
+                }
+                let key = CallableKey::CallbackParameter {
+                    owner: Box::new(CallableKey::source_method_for_type(ty, method)),
+                    index,
+                };
+                // Retained callbacks use a separate owning/value ABI. The
+                // borrowed FnMut optimization is the boundary handled here.
+                if callbacks.retains_callback(&key) {
+                    continue;
+                }
+                if let Some(entry) = callables.get_mut(&key) {
+                    entry.returns_result = true;
+                    entry
+                        .reasons
+                        .push(FallibilityReason::OpenCallbackParameterThrow);
+                }
+            }
+        }
+    }
     // Declared throw facts are recorded under the Java name as well as the Rust
     // name. Seeding both here means the fallibility plan is the single store;
     // `MethodExceptionPlan` no longer needs its own parallel lookup.
@@ -742,11 +806,13 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             entry.reasons.push(FallibilityReason::IntegerDivRemThrow);
         }
     }
-    for key in math_to_int_exact_callables(program) {
+    for key in checked_native_arithmetic_callables(program) {
         let entry = callables.entry(key).or_default();
         if !entry.returns_result {
             entry.returns_result = true;
-            entry.reasons.push(FallibilityReason::MathToIntExactThrow);
+            entry
+                .reasons
+                .push(FallibilityReason::CheckedNativeArithmeticThrow);
         }
     }
     for key in nullable_receiver_throw_callables(program, signatures, facts) {
@@ -767,7 +833,7 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
                 Expr::Call { .. } | Expr::New { .. } | Expr::ArrayAccess(..) | Expr::Cast { .. }
             )
         },
-        None,
+        Some(|body| !switch_selector_sites(body).is_empty()),
         block_has_unhandled_shaped_call_null_check,
     ) {
         let entry = callables.entry(key).or_default();
@@ -912,10 +978,11 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         representations,
         |expr| {
             matches!(expr, Expr::Call { receiver: Some(_), name, args, .. }
-            if args.is_empty() && matches!(name.as_str(), "toString" | "to_string"))
+            if (args.is_empty() && matches!(name.as_str(), "toString" | "to_string"))
+                || (args.len() == 1 && name == "equals") || name == "format")
         },
         None,
-        block_has_unhandled_virtual_object_string,
+        block_has_unhandled_virtual_object_dispatch,
     ) {
         let entry = callables.entry(key).or_default();
         entry.returns_result = true;
@@ -954,6 +1021,20 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         let fallback_signatures = crate::signature::SignaturePlan::default();
         let reasons = [
             (
+                block_has_unhandled_virtual_object_dispatch(
+                    body,
+                    &cast_env,
+                    crate::expr_shape::ExprShapeContext::new(
+                        signatures,
+                        representations,
+                        Some(facts),
+                    ),
+                    &[],
+                    signatures.unwrap_or(&fallback_signatures),
+                ),
+                FallibilityReason::VirtualObjectDispatchThrow,
+            ),
+            (
                 block_has_unhandled_native_array_copy_effect(
                     body,
                     &cast_env,
@@ -990,8 +1071,8 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
                 FallibilityReason::IntegerDivRemThrow,
             ),
             (
-                block_has_unhandled_math_to_int_exact(body),
-                FallibilityReason::MathToIntExactThrow,
+                block_has_unhandled_checked_native_arithmetic(body),
+                FallibilityReason::CheckedNativeArithmeticThrow,
             ),
             (
                 !nullable_params.is_empty()
@@ -1542,7 +1623,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
     keys
 }
 
-fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
+fn checked_native_arithmetic_callables(program: &Program) -> Vec<CallableKey> {
     let mut types = Vec::new();
     for ty in &program.types {
         collect_type_decls(ty, &mut types);
@@ -1555,7 +1636,7 @@ fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
                     if method
                         .body
                         .as_ref()
-                        .is_some_and(block_has_unhandled_math_to_int_exact)
+                        .is_some_and(block_has_unhandled_checked_native_arithmetic)
                     {
                         keys.push(CallableKey::source_method_for_type(ty, method));
                     }
@@ -1564,7 +1645,7 @@ fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
                     if constructor
                         .body
                         .as_ref()
-                        .is_some_and(block_has_unhandled_math_to_int_exact)
+                        .is_some_and(block_has_unhandled_checked_native_arithmetic)
                     {
                         keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
@@ -1576,14 +1657,14 @@ fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
     keys
 }
 
-fn block_has_unhandled_math_to_int_exact(block: &Block) -> bool {
+fn block_has_unhandled_checked_native_arithmetic(block: &Block) -> bool {
     block
         .statements
         .iter()
-        .any(stmt_has_unhandled_math_to_int_exact)
+        .any(stmt_has_unhandled_checked_native_arithmetic)
 }
 
-fn stmt_has_unhandled_math_to_int_exact(stmt: &Stmt) -> bool {
+fn stmt_has_unhandled_checked_native_arithmetic(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Try {
             resources,
@@ -1593,25 +1674,27 @@ fn stmt_has_unhandled_math_to_int_exact(stmt: &Stmt) -> bool {
         } => {
             let guarded_counts = !catches_arithmetic_exception(catches);
             (guarded_counts
-                && (resources.iter().any(stmt_has_unhandled_math_to_int_exact)
-                    || block_has_unhandled_math_to_int_exact(body)))
+                && (resources
+                    .iter()
+                    .any(stmt_has_unhandled_checked_native_arithmetic)
+                    || block_has_unhandled_checked_native_arithmetic(body)))
                 || catches
                     .iter()
-                    .any(|catch| block_has_unhandled_math_to_int_exact(&catch.body))
+                    .any(|catch| block_has_unhandled_checked_native_arithmetic(&catch.body))
                 || finally_block
                     .as_ref()
-                    .is_some_and(block_has_unhandled_math_to_int_exact)
+                    .is_some_and(block_has_unhandled_checked_native_arithmetic)
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            expr_has_math_to_int_exact_call(condition)
-                || block_has_unhandled_math_to_int_exact(then_block)
+            expr_has_checked_native_arithmetic_call(condition)
+                || block_has_unhandled_checked_native_arithmetic(then_block)
                 || else_block
                     .as_ref()
-                    .is_some_and(block_has_unhandled_math_to_int_exact)
+                    .is_some_and(block_has_unhandled_checked_native_arithmetic)
         }
         Stmt::While {
             condition, body, ..
@@ -1619,8 +1702,8 @@ fn stmt_has_unhandled_math_to_int_exact(stmt: &Stmt) -> bool {
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            expr_has_math_to_int_exact_call(condition)
-                || block_has_unhandled_math_to_int_exact(body)
+            expr_has_checked_native_arithmetic_call(condition)
+                || block_has_unhandled_checked_native_arithmetic(body)
         }
         Stmt::For {
             init,
@@ -1629,58 +1712,63 @@ fn stmt_has_unhandled_math_to_int_exact(stmt: &Stmt) -> bool {
             body,
             ..
         } => {
-            init.iter().any(stmt_has_unhandled_math_to_int_exact)
+            init.iter()
+                .any(stmt_has_unhandled_checked_native_arithmetic)
                 || condition
                     .as_ref()
-                    .is_some_and(expr_has_math_to_int_exact_call)
-                || update.iter().any(expr_has_math_to_int_exact_call)
-                || block_has_unhandled_math_to_int_exact(body)
+                    .is_some_and(expr_has_checked_native_arithmetic_call)
+                || update.iter().any(expr_has_checked_native_arithmetic_call)
+                || block_has_unhandled_checked_native_arithmetic(body)
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_has_math_to_int_exact_call(iterable) || block_has_unhandled_math_to_int_exact(body)
+            expr_has_checked_native_arithmetic_call(iterable)
+                || block_has_unhandled_checked_native_arithmetic(body)
         }
         Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
-            block_has_unhandled_math_to_int_exact(body)
+            block_has_unhandled_checked_native_arithmetic(body)
         }
         Stmt::Switch { selector, cases } => {
-            expr_has_math_to_int_exact_call(selector)
+            expr_has_checked_native_arithmetic_call(selector)
                 || cases.iter().any(|case| {
                     case.labels
                         .iter()
-                        .any(switch_label_has_math_to_int_exact_call)
+                        .any(switch_label_has_checked_native_arithmetic_call)
                         || case
                             .statements
                             .iter()
-                            .any(stmt_has_unhandled_math_to_int_exact)
+                            .any(stmt_has_unhandled_checked_native_arithmetic)
                 })
         }
-        _ => stmt_has_math_to_int_exact_call(stmt),
+        _ => stmt_has_checked_native_arithmetic_call(stmt),
     }
 }
 
-fn stmt_has_math_to_int_exact_call(stmt: &Stmt) -> bool {
+fn stmt_has_checked_native_arithmetic_call(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::VarDecl { initializer, .. } => initializer
             .as_ref()
-            .is_some_and(expr_has_math_to_int_exact_call),
+            .is_some_and(expr_has_checked_native_arithmetic_call),
         Stmt::Assign { target, value } => {
-            expr_has_math_to_int_exact_call(target) || expr_has_math_to_int_exact_call(value)
+            expr_has_checked_native_arithmetic_call(target)
+                || expr_has_checked_native_arithmetic_call(value)
         }
-        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => expr_has_math_to_int_exact_call(expr),
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+            expr_has_checked_native_arithmetic_call(expr)
+        }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
-        Stmt::Throw(expr) => expr_has_math_to_int_exact_call(expr),
+        Stmt::Throw(expr) => expr_has_checked_native_arithmetic_call(expr),
         _ => false,
     }
 }
 
-fn switch_label_has_math_to_int_exact_call(label: &crate::java_ir::SwitchLabel) -> bool {
+fn switch_label_has_checked_native_arithmetic_call(label: &crate::java_ir::SwitchLabel) -> bool {
     match label {
         crate::java_ir::SwitchLabel::Default => false,
-        crate::java_ir::SwitchLabel::Expr(expr) => expr_has_math_to_int_exact_call(expr),
+        crate::java_ir::SwitchLabel::Expr(expr) => expr_has_checked_native_arithmetic_call(expr),
     }
 }
 
-fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
+fn expr_has_checked_native_arithmetic_call(expr: &Expr) -> bool {
     match expr {
         Expr::Call {
             receiver,
@@ -1688,38 +1776,41 @@ fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
             args,
             ..
         } => {
-            call_is_math_to_int_exact(receiver.as_deref(), name, args.len())
+            call_is_checked_native_arithmetic(receiver.as_deref(), name, args.len())
                 || receiver
                     .as_ref()
-                    .is_some_and(|receiver| expr_has_math_to_int_exact_call(receiver))
-                || args.iter().any(expr_has_math_to_int_exact_call)
+                    .is_some_and(|receiver| expr_has_checked_native_arithmetic_call(receiver))
+                || args.iter().any(expr_has_checked_native_arithmetic_call)
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_has_math_to_int_exact_call(condition)
-                || expr_has_math_to_int_exact_call(then_expr)
-                || expr_has_math_to_int_exact_call(else_expr)
+            expr_has_checked_native_arithmetic_call(condition)
+                || expr_has_checked_native_arithmetic_call(then_expr)
+                || expr_has_checked_native_arithmetic_call(else_expr)
         }
         Expr::Switch { selector, cases } => {
-            expr_has_math_to_int_exact_call(selector)
+            expr_has_checked_native_arithmetic_call(selector)
                 || cases.iter().any(|case| {
-                    expr_has_math_to_int_exact_call(&case.value)
+                    expr_has_checked_native_arithmetic_call(&case.value)
                         || case
                             .labels
                             .iter()
-                            .any(switch_label_has_math_to_int_exact_call)
+                            .any(switch_label_has_checked_native_arithmetic_call)
                 })
         }
         Expr::FieldAccess(receiver, _)
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
-        | Expr::InstanceOf { expr: receiver, .. } => expr_has_math_to_int_exact_call(receiver),
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            expr_has_checked_native_arithmetic_call(receiver)
+        }
         Expr::Binary { left, right, .. } => {
-            expr_has_math_to_int_exact_call(left) || expr_has_math_to_int_exact_call(right)
+            expr_has_checked_native_arithmetic_call(left)
+                || expr_has_checked_native_arithmetic_call(right)
         }
         Expr::New {
             qualifier,
@@ -1729,37 +1820,39 @@ fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
         } => {
             qualifier
                 .as_ref()
-                .is_some_and(|qualifier| expr_has_math_to_int_exact_call(qualifier))
-                || args.iter().any(expr_has_math_to_int_exact_call)
+                .is_some_and(|qualifier| expr_has_checked_native_arithmetic_call(qualifier))
+                || args.iter().any(expr_has_checked_native_arithmetic_call)
                 || body.as_ref().is_some_and(|members| {
                     members.iter().any(|member| match member {
                         Member::Method(method) => method
                             .body
                             .as_ref()
-                            .is_some_and(block_has_math_to_int_exact_call),
+                            .is_some_and(block_has_checked_native_arithmetic_call),
                         Member::Constructor(constructor) => constructor
                             .body
                             .as_ref()
-                            .is_some_and(block_has_math_to_int_exact_call),
+                            .is_some_and(block_has_checked_native_arithmetic_call),
                         Member::Field(field) => field
                             .initializer
                             .as_ref()
-                            .is_some_and(expr_has_math_to_int_exact_call),
-                        Member::Type(nested) => type_has_math_to_int_exact_call(nested),
+                            .is_some_and(expr_has_checked_native_arithmetic_call),
+                        Member::Type(nested) => type_has_checked_native_arithmetic_call(nested),
                         Member::Unsupported { .. } => false,
                     })
                 })
         }
-        Expr::ArrayInitializer(args) => args.iter().any(expr_has_math_to_int_exact_call),
+        Expr::ArrayInitializer(args) => args.iter().any(expr_has_checked_native_arithmetic_call),
         Expr::ArrayCreation {
             dimensions,
             initializer,
             ..
         } => {
-            dimensions.iter().any(expr_has_math_to_int_exact_call)
+            dimensions
+                .iter()
+                .any(expr_has_checked_native_arithmetic_call)
                 || initializer
                     .as_ref()
-                    .is_some_and(|items| items.iter().any(expr_has_math_to_int_exact_call))
+                    .is_some_and(|items| items.iter().any(expr_has_checked_native_arithmetic_call))
         }
         Expr::Lambda { .. }
         | Expr::MethodReference { .. }
@@ -1773,10 +1866,31 @@ fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
     }
 }
 
-fn call_is_math_to_int_exact(receiver: Option<&Expr>, name: &str, arg_count: usize) -> bool {
+fn call_is_checked_native_arithmetic(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+) -> bool {
     (matches!(name, "toIntExact" | "to_int_exact") && arg_count == 1
-        || matches!(name, "floorDiv" | "floor_div" | "floorMod" | "floor_mod") && arg_count == 2)
+        || matches!(
+            name,
+            "floorDiv"
+                | "floor_div"
+                | "floorMod"
+                | "floor_mod"
+                | "multiplyExact"
+                | "multiply_exact"
+        ) && arg_count == 2)
         && receiver.is_none_or(expr_is_math_static_owner)
+        || matches!(
+            name,
+            "divideUnsigned" | "divide_unsigned" | "remainderUnsigned" | "remainder_unsigned"
+        ) && arg_count == 2
+            && receiver.is_none_or(|receiver| match receiver {
+                Expr::Var(owner) => matches!(owner.rsplit('.').next(), Some("Integer" | "Long")),
+                Expr::FieldAccess(_, owner) => matches!(owner.as_str(), "Integer" | "Long"),
+                _ => false,
+            })
 }
 
 fn expr_is_math_static_owner(expr: &Expr) -> bool {
@@ -1926,6 +2040,10 @@ fn shaped_immediate_effect_callables(
             };
             let mut env = solved_env.unwrap_or_else(|| {
                 let mut env = crate::expr_shape::ShapeEnv::new();
+                if ty.kind == crate::java_ir::TypeKind::Interface
+                    && !matches!(member, Member::Method(method) if method.modifiers.contains(&Modifier::Static)) {
+                    env.bind_this_type(ty);
+                }
                 for (index, name) in ty.type_params.iter().enumerate() {
                     env.insert_type_param_declaration(
                         name.clone(),
@@ -2019,6 +2137,25 @@ fn shaped_immediate_effect_callables(
                     });
                 env.insert_field_shape(field.name.clone(), shape);
             }
+            // Enclosing-instance fields are lexical bindings too. Use the
+            // same stored slots and hiding policy as lowering; otherwise a
+            // nullable outer receiver gets an infallible signature and its
+            // required null projection cannot propagate a Java exception.
+            if let Some(outer) = facts.captures.outer_this_type_for_type(&ty.name)
+                && let Some(outer_decl) = crate::inherited_members::find_type_decl_for_owner_context(
+                    program, &ty.name, outer,
+                )
+            {
+                let mut outer_env =
+                    crate::expr_shape::shape_env_for_type(outer_decl, signature_plan);
+                crate::expr_shape::seed_inherited_instance_fields(
+                    &mut outer_env,
+                    outer_decl,
+                    signature_plan,
+                    program,
+                );
+                env.seed_lexical_outer_instance_fields(&outer_env);
+            }
             if check(body, &env, ctx, locals, signature_plan) {
                 keys.push(key);
             }
@@ -2035,6 +2172,23 @@ pub(crate) fn enhanced_for_iterable_sites(body: &Block) -> HashSet<*const Expr> 
     crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| {
         if let Stmt::EnhancedFor { iterable, .. } = stmt {
             sites.insert(iterable as *const Expr);
+        }
+    });
+    sites
+}
+
+/// A switch performs a null check even when its selector is just a variable
+/// and its body has no method call. Addresses identify only this body walk.
+fn switch_selector_sites(body: &Block) -> HashSet<*const Expr> {
+    let mut sites = HashSet::new();
+    crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| {
+        if let Stmt::Switch { selector, .. } = stmt {
+            sites.insert(selector as *const Expr);
+        }
+    });
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        if let Expr::Switch { selector, .. } = expr {
+            sites.insert(selector.as_ref() as *const Expr);
         }
     });
     sites
@@ -2072,7 +2226,7 @@ fn block_has_unhandled_checked_hash(
     )
 }
 
-fn block_has_unhandled_virtual_object_string(
+fn block_has_unhandled_virtual_object_dispatch(
     body: &Block,
     env: &crate::expr_shape::ShapeEnv,
     ctx: crate::expr_shape::ExprShapeContext<'_>,
@@ -2088,6 +2242,9 @@ fn block_has_unhandled_virtual_object_string(
     let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
         let mut found = false;
         crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            if crate::java_append_plan::plan_object_append(expr, env.type_env(), facts).is_some() {
+                found = true;
+            }
             let Expr::Call {
                 receiver: Some(receiver),
                 name,
@@ -2098,22 +2255,24 @@ fn block_has_unhandled_virtual_object_string(
             else {
                 return;
             };
-            found |= args.is_empty()
-                && matches!(name.as_str(), "toString" | "to_string")
-                && matches!(
-                    crate::call_plan::plan_call_target_with_facts_and_arity(
-                        Some(receiver),
-                        name,
-                        0,
-                        resolved.as_ref(),
-                        facts,
-                        env.type_env(),
-                    ),
-                    crate::call_plan::CallTargetPlan::NativeJavaInstance {
-                        method: crate::call_plan::NativeJavaInstanceMethod::VirtualObjectToString,
-                        ..
-                    }
-                );
+            found |= matches!(
+                crate::call_plan::plan_call_target_with_facts_and_arity(
+                    Some(receiver),
+                    name,
+                    args.len(),
+                    resolved.as_ref(),
+                    facts,
+                    env.type_env(),
+                ),
+                crate::call_plan::CallTargetPlan::NativeJavaInstance {
+                    method: crate::call_plan::NativeJavaInstanceMethod::VirtualObjectToString
+                        | crate::call_plan::NativeJavaInstanceMethod::SourceObjectToString
+                        | crate::call_plan::NativeJavaInstanceMethod::VirtualObjectEquals,
+                    ..
+                } | crate::call_plan::CallTargetPlan::NativeJavaStatic {
+                    method: crate::call_plan::NativeJavaStaticMethod::StringFormat,
+                }
+            );
         });
         found
     };
@@ -2446,6 +2605,7 @@ fn block_has_unhandled_retained_native_effect(
                     receiver: Some(receiver),
                     name,
                     args,
+                    resolved,
                     ..
                 } = expr
                 else {
@@ -2518,6 +2678,7 @@ fn block_has_unhandled_shaped_call_null_check(
     locals: &[crate::signature::LocalPlan],
     signatures: &crate::signature::SignaturePlan,
 ) -> bool {
+    let switch_selectors = switch_selector_sites(body);
     let Some(facts) = ctx.facts() else {
         return false;
     };
@@ -2544,6 +2705,10 @@ fn block_has_unhandled_shaped_call_null_check(
         let mut found = false;
         crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
             if found {
+                return;
+            }
+            if switch_selectors.contains(&(node as *const Expr)) && nullable(node, env) {
+                found = true;
                 return;
             }
             let (args, shapes) = match node {
@@ -2573,7 +2738,7 @@ fn block_has_unhandled_shaped_call_null_check(
                             return;
                         }
                     }
-                    // No nullable value means no unboxing null check. Avoid
+                    // No nullable value means no argument null check. Avoid
                     // constructing a complete argument plan for those calls.
                     if !args.iter().any(|arg| nullable(arg, env)) {
                         return;
@@ -2587,23 +2752,26 @@ fn block_has_unhandled_shaped_call_null_check(
                         facts,
                         env.type_env(),
                     );
-                    let primitive = |shape: crate::slot_shape::RustSlotShape| {
-                        matches!(shape.java_ty, JavaType::Primitive(_))
-                    };
                     let shapes = match plan {
                         crate::call_plan::ArgumentLoweringPlan::Shaped(shapes) => {
-                            shapes.into_iter().map(primitive).collect::<Vec<_>>()
+                            shapes.into_iter().map(Some).collect::<Vec<_>>()
                         }
                         crate::call_plan::ArgumentLoweringPlan::Slotted(slots) => slots
                             .into_iter()
                             .map(|slot| match slot {
                                 crate::conversion_plan::Slot::Argument(shape)
-                                | crate::conversion_plan::Slot::Assignment(shape) => {
-                                    primitive(shape)
+                                | crate::conversion_plan::Slot::Assignment(shape) => Some(shape),
+                                crate::conversion_plan::Slot::Index => {
+                                    Some(crate::slot_shape::RustSlotShape::for_storage(
+                                        JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+                                    ))
                                 }
-                                crate::conversion_plan::Slot::Index
-                                | crate::conversion_plan::Slot::Condition => true,
-                                _ => false,
+                                crate::conversion_plan::Slot::Condition => {
+                                    Some(crate::slot_shape::RustSlotShape::for_storage(
+                                        JavaType::Primitive(crate::java_ir::PrimitiveType::Boolean),
+                                    ))
+                                }
+                                _ => None,
                             })
                             .collect(),
                         _ => Vec::new(),
@@ -2639,7 +2807,11 @@ fn block_has_unhandled_shaped_call_null_check(
                         args,
                         call.params
                             .iter()
-                            .map(|param| matches!(param.ty, JavaType::Primitive(_)))
+                            .map(|param| {
+                                matches!(param.ty, JavaType::Primitive(_)).then(|| {
+                                    crate::slot_shape::RustSlotShape::for_storage(param.ty.clone())
+                                })
+                            })
                             .collect(),
                     )
                 }
@@ -2656,10 +2828,19 @@ fn block_has_unhandled_shaped_call_null_check(
                 }
                 _ => return,
             };
-            found = args
-                .iter()
-                .zip(shapes)
-                .any(|(arg, primitive)| primitive && nullable(arg, env));
+            found = args.iter().zip(shapes).any(|(arg, target)| {
+                let Some(target) = target else {
+                    return false;
+                };
+                let actual = crate::expr_shape::infer_expr_shape_with_context(arg, env, ctx);
+                actual.optional_element_type().is_some()
+                    && matches!(
+                        crate::conversion_plan::optional_shape_coercion_policy_with_facts(
+                            &actual, &target, facts,
+                        ),
+                        crate::conversion_plan::OptionalShapeCoercionPolicy::Unwrap { .. }
+                    )
+            });
         });
         found
     };
@@ -2761,9 +2942,10 @@ fn nullable_receiver_throw_callables(
                     let nullable_params = signatures
                         .and_then(|signatures| signatures.method_signature(ty, method))
                         .map(|signature| {
-                            nullable_reference_param_names_with_shapes(
+                            nullable_reference_binding_names_with_shapes(
                                 &method.params,
                                 signature.params().iter().map(|param| param.shape()),
+                                signature.locals(),
                             )
                         })
                         .unwrap_or_else(|| nullable_reference_param_names(&method.params));
@@ -2804,9 +2986,10 @@ fn nullable_receiver_throw_callables(
                     let nullable_params = signatures
                         .and_then(|signatures| signatures.constructor_signature(ty, constructor))
                         .map(|signature| {
-                            nullable_reference_param_names_with_shapes(
+                            nullable_reference_binding_names_with_shapes(
                                 &constructor.params,
                                 signature.params().iter().map(|param| param.shape()),
+                                signature.locals(),
                             )
                         })
                         .unwrap_or_else(|| nullable_reference_param_names(&constructor.params));
@@ -3199,9 +3382,10 @@ fn nullable_reference_param_names(params: &[crate::java_ir::Param]) -> HashSet<S
     names
 }
 
-fn nullable_reference_param_names_with_shapes<'a>(
+fn nullable_reference_binding_names_with_shapes<'a>(
     params: &[crate::java_ir::Param],
     shapes: impl IntoIterator<Item = &'a crate::slot_shape::RustSlotShape>,
+    locals: &[crate::signature::LocalPlan],
 ) -> HashSet<String> {
     let mut names = HashSet::new();
     for (param, shape) in params.iter().zip(shapes) {
@@ -3210,6 +3394,17 @@ fn nullable_reference_param_names_with_shapes<'a>(
             names.insert(param.source_name.clone());
         }
     }
+    // A solved nullable local dereference throws just like a nullable formal.
+    // Use the existing signature proof rather than guessing from an initializer
+    // spelling, so conditionals, aliases and source-return contracts agree.
+    names.extend(
+        locals
+            .iter()
+            .filter(|local| {
+                local.shape().optional_element_type().is_some() && !local.proven_non_null()
+            })
+            .map(|local| local.name().to_string()),
+    );
     names
 }
 
@@ -3635,6 +3830,23 @@ fn seed_callable_fallibility(key: &CallableKey, facts: &FactSet) -> CallableFall
                         .is_some_and(|fact| !fact.thrown.is_empty())
                         .then_some(FallibilityReason::ExternalThrowFact)
                 })
+        })
+        .or_else(|| {
+            if let CallableKey::ExternalConstructor {
+                type_name,
+                arg_count,
+            } = key
+            {
+                return facts
+                    .external_constructor_rust_result_for(type_name, *arg_count)
+                    .is_some_and(|fact| fact.returns_result)
+                    .then_some(FallibilityReason::ExternalThrowFact);
+            }
+            let (receiver, method, arity) = key.external_method_parts()?;
+            facts
+                .external_rust_result_for_receiver(receiver, method, Some(arity))
+                .is_some_and(|fact| fact.returns_result)
+                .then_some(FallibilityReason::ExternalThrowFact)
         })
         .or_else(|| {
             let (Some(owner), method, arity) = key.external_method_parts()? else {
@@ -4172,6 +4384,73 @@ pub(crate) fn exception_class_name(class_ty: &JavaType) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anonymous_creation_keeps_initializer_effects_but_not_deferred_division() {
+        let parsed = parse_java_source(
+            r#"
+interface Op { int apply(int value); }
+class Factory {
+    static Op lazy() { return new Op() { public int apply(int value) { return 42 / value; } }; }
+    static Op eager(int divisor) { return new Op() {
+        int initial = 42 / divisor;
+        public int apply(int value) { return initial; }
+    }; }
+    static Op floating(double divisor) { return new Op() {
+        double initial = 1.0 / divisor;
+        public int apply(int value) { return (int) initial; }
+    }; }
+    static Op lambda() { return value -> 42 / value; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility(&resolved.program, &graph, &resolved.facts);
+        for (name, expected) in [
+            ("lazy", false),
+            ("eager", true),
+            ("floating", false),
+            ("lambda", false),
+        ] {
+            let key = crate::usage::CallableKey::method_identity("Factory", name);
+            assert_eq!(
+                plan.returns_result(&key),
+                expected,
+                "{name}: {:?}",
+                plan.callable(&key)
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_result_abis_seed_foreign_method_and_constructor_fallibility() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.value dep.Value rust-crate-mapping mapped target=value_runtime\nexternal-pack-constructor dep.value dep.Value 1 mapped rust-type=Value rust=new rust-result=true\nexternal-pack-api dep.value dep.Value read mapped getter read-only definitely-non-null args=0 return=int rust=read rust-result=true\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        for key in [
+            crate::usage::CallableKey::external_constructor("dep.Value", 1),
+            crate::usage::CallableKey::external_method(Some("dep.Value"), "read", 0),
+        ] {
+            assert!(
+                super::seed_callable_fallibility(&key, parsed.facts()).returns_result(),
+                "{key:?}"
+            );
+        }
+        assert!(
+            !super::seed_callable_fallibility(
+                &crate::usage::CallableKey::external_constructor("dep.Value", 2),
+                parsed.facts(),
+            )
+            .returns_result()
+        );
+    }
+
     use super::*;
     use crate::diagnostics::Span;
     use crate::java_ir::{Literal, Modifier, PrimitiveType, TypeKind};
@@ -4713,8 +4992,70 @@ class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input,
         );
     }
 
+    #[test]
+    fn returned_and_stored_source_sams_share_invocation_abi_without_executing_at_creation() {
+        let parsed = parse_java_source(
+            r#"
+            interface TextFunction { int apply(String value); }
+            class Factory {
+                static int checked(String value) {
+                    if (value == null) throw new IllegalArgumentException();
+                    return value.length();
+                }
+                static int checked(int value) { return value + 1; }
+                static TextFunction returned() { return value -> checked(value); }
+                static TextFunction referenced() { return Factory::checked; }
+                static TextFunction stored() { TextFunction value = item -> checked(item); return value; }
+                static TextFunction assigned() { TextFunction value = null; value = Factory::checked; return value; }
+                static TextFunction branch(boolean choose) { return choose ? item -> checked(item) : Factory::checked; }
+                static TextFunction clean() { return value -> 7; }
+                static int use() { return returned().apply("x"); }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let graph = crate::usage::build_call_graph_with_source_callbacks(
+            &resolved.program,
+            &resolved.facts,
+            signatures.source_callback_plan(),
+        );
+        let plan = plan_program_fallibility_with_signatures(
+            &resolved.program,
+            &graph,
+            &semantic.facts,
+            Some(&signatures),
+        );
+        for owner in &resolved.program.types {
+            for member in &owner.members {
+                let Member::Method(method) = member else {
+                    continue;
+                };
+                let expected = method.name == "apply"
+                    || method.name == "use"
+                    || (method.name == "checked" && method.params[0].ty == JavaType::String);
+                let key = CallableKey::source_method_for_type(owner, method);
+                assert_eq!(plan.returns_result(&key), expected, "{key:?}: {:?}", plan);
+            }
+        }
+    }
+
     fn test_type(name: &str) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),
@@ -4781,7 +5122,7 @@ class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input,
     }
 
     #[test]
-    fn math_to_int_exact_scan_sees_qualified_new_receiver() {
+    fn checked_native_arithmetic_scan_sees_qualified_new_receiver() {
         let expr = qualified_new_expr(Expr::Call {
             type_args: Vec::new(),
             receiver: Some(Box::new(Expr::Var("Math".to_string()))),
@@ -4790,7 +5131,7 @@ class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input,
             resolved: None,
         });
 
-        assert!(expr_has_math_to_int_exact_call(&expr));
+        assert!(expr_has_checked_native_arithmetic_call(&expr));
     }
 
     #[test]

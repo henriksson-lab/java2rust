@@ -271,7 +271,29 @@ pub(crate) fn cargo_verify_generated_modules_with_edition(
     cargo_command: &str,
     edition: &str,
 ) {
-    let run = cargo_run_generated_modules_with_edition(crate_name, modules, cargo_command, edition);
+    cargo_verify_generated_modules_with_dependencies(
+        crate_name,
+        modules,
+        cargo_command,
+        edition,
+        &[],
+    );
+}
+
+pub(crate) fn cargo_verify_generated_modules_with_dependencies(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+    edition: &str,
+    dependencies: &[(&str, &Path)],
+) {
+    let run = cargo_run_generated_modules_with_dependencies(
+        crate_name,
+        modules,
+        cargo_command,
+        edition,
+        dependencies,
+    );
     let timeout = generated_crate_verify_timeout();
     let Some(status) = run.output.status else {
         panic!(
@@ -309,6 +331,16 @@ fn cargo_run_generated_modules_with_edition(
     cargo_command: &str,
     edition: &str,
 ) -> GeneratedCrateRun {
+    cargo_run_generated_modules_with_dependencies(crate_name, modules, cargo_command, edition, &[])
+}
+
+fn cargo_run_generated_modules_with_dependencies(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+    edition: &str,
+    dependencies: &[(&str, &Path)],
+) -> GeneratedCrateRun {
     assert!(matches!(edition, "2021" | "2024"));
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -317,10 +349,17 @@ fn cargo_run_generated_modules_with_edition(
     let crate_dir = std::env::temp_dir().join(format!("new_java2rust_{crate_name}_{unique}"));
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir).unwrap();
+    let mut dependency_manifest = String::new();
+    if !dependencies.is_empty() {
+        dependency_manifest.push_str("\n[dependencies]\n");
+        for (name, path) in dependencies {
+            dependency_manifest.push_str(&format!("{name} = {{ path = {:?} }}\n", path));
+        }
+    }
     fs::write(
         crate_dir.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"new-java2rust-{crate_name}-{unique}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\n\n[lib]\npath = \"src/lib.rs\"\n"
+            "[package]\nname = \"new-java2rust-{crate_name}-{unique}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\n\n[lib]\npath = \"src/lib.rs\"\n{dependency_manifest}"
         ),
     )
     .unwrap();
@@ -377,4 +416,79 @@ fn cargo_run_generated_modules_with_edition(
 /// it became obvious.
 pub(crate) fn keep_sources_discard_build_artifacts(crate_dir: &std::path::Path) {
     let _ = fs::remove_dir_all(crate_dir.join("target"));
+}
+/// Compile and execute the same self-checking Java fixture before translating
+/// it. A zero Java result is the independent oracle, not a copied Rust algorithm.
+pub(crate) fn verify_java_fixture_zero_contract(
+    crate_name: &str,
+    java_class: &str,
+    relative_path: &str,
+    source: &str,
+    tests: &'static str,
+) {
+    verify_java_sources_zero_contract(java_class, &[(relative_path, source)]);
+    let translated = new_java2rust::translate_source(source);
+    assert!(
+        !translated.diagnostics.has_errors(),
+        "{:?}",
+        translated.diagnostics
+    );
+    cargo_verify_generated_modules_with_edition(
+        crate_name,
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translated.rust,
+            tests,
+        }],
+        "test",
+        "2021",
+    );
+}
+
+pub(crate) fn verify_java_sources_zero_contract(java_class: &str, sources: &[(&str, &str)]) {
+    use std::process::Command;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let scratch = std::env::temp_dir().join(format!(
+        "java2rust-java-fixture-oracle-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let source_paths = sources
+        .iter()
+        .map(|(relative_path, source)| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), *source);
+            path
+        })
+        .collect::<Vec<_>>();
+    let compiled = run_with_watchdog(
+        Command::new("javac")
+            .arg("-d")
+            .arg(&scratch)
+            .args(source_paths),
+        Duration::from_secs(30),
+    );
+    assert!(
+        compiled.status.is_some_and(|status| status.success()),
+        "{}",
+        compiled.stderr
+    );
+    let oracle = run_with_watchdog(
+        Command::new("java")
+            .arg("-Xmx128m")
+            .arg("-cp")
+            .arg(&scratch)
+            .arg(java_class),
+        Duration::from_secs(30),
+    );
+    assert!(
+        oracle.status.is_some_and(|status| status.success()),
+        "{}",
+        oracle.stderr
+    );
+    assert_eq!(oracle.stdout.trim(), "0");
+    std::fs::remove_dir_all(scratch).unwrap();
 }

@@ -1,0 +1,51 @@
+Compiled from "Primes.java"
+public final class org.apache.commons.numbers.primes.Primes {
+  static final java.lang.String NUMBER_TOO_SMALL;
+    descriptor: Ljava/lang/String;
+  private org.apache.commons.numbers.primes.Primes();
+    descriptor: ()V
+
+  public static boolean isPrime(int);
+    descriptor: (I)Z
+
+  public static int nextPrime(int);
+    descriptor: (I)I
+
+  public static java.util.List<java.lang.Integer> primeFactors(int);
+    descriptor: (I)Ljava/util/List;
+}
+Compiled from "SmallPrimes.java"
+final class org.apache.commons.numbers.primes.SmallPrimes {
+  static final int[] PRIMES;
+    descriptor: [I
+  static final int PRIMES_LAST;
+    descriptor: I
+  static final java.util.Map$Entry<java.util.Set<java.lang.Integer>, int[]> PRIME_NUMBERS_AND_COPRIME_EQUIVALENCE_CLASSES;
+    descriptor: Ljava/util/Map$Entry;
+  private org.apache.commons.numbers.primes.SmallPrimes();
+    descriptor: ()V
+
+  static int smallTrialDivision(int, java.util.List<java.lang.Integer>);
+    descriptor: (ILjava/util/List;)I
+
+  static void boundedTrialDivision(int, int, java.util.List<java.lang.Integer>);
+    descriptor: (IILjava/util/List;)V
+
+  static java.util.List<java.lang.Integer> trialDivision(int);
+    descriptor: (I)Ljava/util/List;
+
+  static boolean millerRabinPrimeTest(int);
+    descriptor: (I)Z
+
+  private static int lambda$static$2(int, int);
+    descriptor: (II)I
+
+  private static int lambda$static$1(java.lang.Integer);
+    descriptor: (Ljava/lang/Integer;)I
+
+  private static java.lang.Integer lambda$static$0(java.lang.Integer, java.lang.Integer);
+    descriptor: (Ljava/lang/Integer;Ljava/lang/Integer;)Ljava/lang/Integer;
+
+  static {};
+    descriptor: ()V
+}

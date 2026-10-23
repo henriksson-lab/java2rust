@@ -1,6 +1,46 @@
 use std::{fs, path::Path, process::Command};
 
 #[test]
+fn runtime_support_snapshot_preserves_producer_authority_on_resume() {
+    let dir = std::env::temp_dir().join(format!(
+        "new_java2rust_runtime_provenance_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/focused-provenance.sh");
+    let result = Command::new("bash").arg("-c").arg(r#"
+set -euo pipefail
+source "$1"
+focused_record_translation_producer "$2" "$3/producer.tsv" debug test
+focused_load_translation_producer "$3/producer.tsv"
+focused_emit_runtime_support "$2" "$translation_producer_sha256" floating-point-display "$3/runtime.rs" > "$3/first.rs"
+# Reassembly can use the verified snapshot without the producer executable.
+focused_emit_runtime_support "$3/missing" "$translation_producer_sha256" floating-point-display "$3/runtime.rs" > "$3/resume.rs"
+cmp "$3/first.rs" "$3/resume.rs"
+if focused_emit_runtime_support "$2" "$translation_producer_sha256" another-kind "$3/runtime.rs"; then exit 1; fi
+if focused_emit_runtime_support "$2" "$(printf '%064d' 0)" floating-point-display "$3/runtime.rs"; then exit 1; fi
+cp "$3/producer.tsv" "$3/runtime.rs"
+if focused_emit_runtime_support "$2" "$translation_producer_sha256" floating-point-display "$3/runtime.rs"; then exit 1; fi
+"#).arg("runtime-provenance-test").arg(helper)
+        .arg(env!("CARGO_BIN_EXE_new-java2rust")).arg(&dir).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let support = fs::read_to_string(dir.join("first.rs")).unwrap();
+    assert_eq!(
+        support,
+        new_java2rust::RuntimeSupport::FloatingPointDisplay.emit_rust()
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn focused_error_count_excludes_source_quotes_and_summary_footers() {
     let dir = std::env::temp_dir().join(format!(
         "new_java2rust_error_count_{}_{}",

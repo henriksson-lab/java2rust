@@ -837,6 +837,7 @@ fn member_access_plan_does_not_use_raw_mapped_field_type_as_static_constant_owne
         mode: new_java2rust::facts::ExternalLibraryMode::RustCrateMapping,
         coverage: ExternalApiCoverage::Mapped,
         rust_target: Some("mapped_facade".to_string()),
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {

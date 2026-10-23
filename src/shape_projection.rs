@@ -731,7 +731,7 @@ fn java_type_is_known_platform_facade(java_ty: &JavaType) -> bool {
     }
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            crate::stdlib::is_java_platform_facade_type_name(name)
+            crate::stdlib::is_java_platform_value_carrier_type_name(name)
         }
         _ => false,
     }

@@ -312,6 +312,7 @@ mod tests {
 
     fn empty_type_decl(name: &str) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),

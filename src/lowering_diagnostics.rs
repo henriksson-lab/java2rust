@@ -139,7 +139,7 @@ impl SourceIdentityFacts {
     ) -> Self {
         let mut facts = Self::default();
         for ty in &program.types {
-            facts.collect_type(ty, storage_facts, representations);
+            facts.collect_type(ty, program, storage_facts, representations);
         }
         facts
     }
@@ -147,6 +147,7 @@ impl SourceIdentityFacts {
     fn collect_type(
         &mut self,
         ty: &TypeDecl,
+        program: &Program,
         storage_facts: &FactSet,
         representations: &RepresentationPlan,
     ) {
@@ -179,7 +180,14 @@ impl SourceIdentityFacts {
         }
         for member in &ty.members {
             match member {
-                Member::Method(method) if method_overrides_object_equals(method) => {
+                Member::Method(method)
+                    if crate::semantic_analysis::method_overrides_object_equals(
+                        ty,
+                        method,
+                        program,
+                        storage_facts,
+                    ) =>
+                {
                     self.declares_equals.insert(simple.clone());
                 }
                 Member::Method(method) if method_returns_concrete_comparator(method) => {
@@ -190,7 +198,9 @@ impl SourceIdentityFacts {
                             .insert((rust_name.clone(), method.params.len()));
                     }
                 }
-                Member::Type(nested) => self.collect_type(nested, storage_facts, representations),
+                Member::Type(nested) => {
+                    self.collect_type(nested, program, storage_facts, representations)
+                }
                 _ => {}
             }
         }
@@ -303,10 +313,6 @@ fn concrete_java_type_name(java_ty: &JavaType) -> Option<&str> {
         JavaType::String => Some("String"),
         _ => None,
     }
-}
-
-fn method_overrides_object_equals(method: &MethodDecl) -> bool {
-    crate::semantic_analysis::method_overrides_object_equals(method)
 }
 
 fn collect_type_reference_identity_equality_diagnostics(
@@ -1472,6 +1478,52 @@ fn expr_is_null_literal(expr: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::translate_source;
+
+    #[test]
+    fn identity_diagnostics_do_not_treat_source_object_overloads_as_overrides() {
+        for (source, expected_identity) in [
+            (
+                "class Object {} class C { public boolean equals(Object x) { return true; } }",
+                true,
+            ),
+            (
+                "class C { public boolean equals(other.Object x) { return true; } }",
+                true,
+            ),
+            (
+                "import other.Object; class C { public boolean equals(Object x) { return true; } }",
+                true,
+            ),
+            (
+                "class Object {} class C { public boolean equals(java.lang.Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public boolean equals(Object x) { return true; } }",
+                false,
+            ),
+        ] {
+            let parsed = crate::parser::parse_java_source(source);
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let semantic = crate::semantic_analysis::analyze_program(
+                &resolved.program,
+                &resolved.facts,
+                &crate::facts::FactSet::default(),
+            );
+            let representations =
+                crate::representation::plan_representations(&resolved.program, &semantic.facts);
+            let identity = super::SourceIdentityFacts::from_program(
+                &resolved.program,
+                &semantic.facts,
+                &representations,
+            );
+            assert_eq!(
+                identity.inherits_object_equals("C"),
+                expected_identity,
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn explicit_source_supertype_cast_with_carrier_reports_no_inheritance_gap() {

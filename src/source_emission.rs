@@ -80,11 +80,38 @@ impl SourceEmissionPlan {
             })
             .collect()
     }
+
+    pub(crate) fn java_owners(&self) -> impl Iterator<Item = &str> {
+        self.owners.keys().map(String::as_str)
+    }
+
+    pub(crate) fn contains_declaration(&self, ty: &TypeDecl) -> bool {
+        match &ty.source_names {
+            Some(names) => {
+                self.rust_owner(&names.canonical).is_some()
+                    || self.rust_owner(&names.binary).is_some()
+            }
+            None => self.rust_owner(&ty.name).is_some(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declaration_ownership_does_not_capture_foreign_same_leaf_metadata() {
+        let owned = crate::parser::parse_java_source("package owned; class Value {}").program;
+        let foreign = crate::parser::parse_java_source("package foreign; class Value {}").program;
+        let mut plan = SourceEmissionPlan::default();
+        plan.add_program(&owned);
+        assert!(plan.contains_declaration(&owned.types[0]));
+        assert!(!plan.contains_declaration(&foreign.types[0]));
+        let mut renamed = owned.types[0].clone();
+        renamed.name = "SyntheticFlatName".into();
+        assert!(plan.contains_declaration(&renamed));
+    }
 
     #[test]
     fn source_provenance_uses_the_emission_inventory_without_leaf_name_guessing() {

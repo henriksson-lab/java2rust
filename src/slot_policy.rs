@@ -775,7 +775,7 @@ fn expr_declares_binding_name_for_false_branch(expr: &Expr, binding_name: &str) 
     }
 }
 
-fn method_exactly_returns_param(method: &MethodDecl, param_name: &str) -> bool {
+pub(crate) fn method_exactly_returns_param(method: &MethodDecl, param_name: &str) -> bool {
     method.body.as_ref().is_some_and(|body| {
         stmts_return_param_scan(&body.statements, param_name, false).allows_exact_return_param()
     })
@@ -1032,6 +1032,7 @@ mod tests {
 
     fn owner_type() -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: "Owner".to_string(),
             type_params: Vec::new(),

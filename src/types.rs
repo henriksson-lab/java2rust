@@ -10,6 +10,10 @@ pub struct TypeEnv {
     comparator_object_locals: HashSet<String>,
     comparator_object_fields: HashSet<String>,
     fields: HashMap<String, JavaType>,
+    this_type: Option<JavaType>,
+    // The inline anonymous body's `this` is not the enclosing lexical class.
+    // Keep its declared/inherited fields distinct from captured outer fields.
+    anonymous_this_fields: Option<HashMap<String, JavaType>>,
     type_fields: HashMap<(String, String), JavaType>,
     type_param_bounds: HashMap<String, Option<JavaType>>,
     static_type_aliases: HashMap<String, String>,
@@ -89,6 +93,53 @@ impl TypeEnv {
 
     pub fn insert_field(&mut self, name: impl Into<String>, ty: JavaType) {
         self.fields.insert(name.into(), ty);
+    }
+
+    pub(crate) fn set_this_type(&mut self, ty: JavaType) {
+        self.this_type = Some(ty);
+    }
+
+    pub(crate) fn bind_this_type(&mut self, ty: &crate::java_ir::TypeDecl) {
+        self.set_this_type(JavaType::Named {
+            name: ty.name.clone(),
+            args: ty
+                .type_params
+                .iter()
+                .map(|name| JavaType::Named {
+                    name: name.clone(),
+                    args: vec![],
+                })
+                .collect(),
+        });
+    }
+
+    pub(crate) fn enter_anonymous_field_scope(
+        &mut self,
+        fields: impl IntoIterator<Item = (String, JavaType)>,
+    ) {
+        self.this_type = None;
+        let mut own = HashMap::new();
+        for (name, ty) in fields {
+            let alias = crate::parser::to_snake_case(&name);
+            for spelling in [name, alias] {
+                // A member of the anonymous class shadows an enclosing local;
+                // parameters/locals declared inside its methods are added later.
+                self.locals.remove(&spelling);
+                self.params.remove(&spelling);
+                self.callable_locals.remove(&spelling);
+                self.comparator_object_locals.remove(&spelling);
+                self.fields.insert(spelling.clone(), ty.clone());
+                own.insert(spelling, ty.clone());
+            }
+        }
+        self.anonymous_this_fields = Some(own);
+    }
+
+    pub(crate) fn anonymous_this_field_type(&self, name: &str) -> Option<&JavaType> {
+        let fields = self.anonymous_this_fields.as_ref()?;
+        fields
+            .get(name)
+            .or_else(|| fields.get(&crate::parser::to_snake_case(name)))
     }
 
     pub fn insert_type_field(
@@ -259,7 +310,17 @@ impl TypeEnv {
 
     pub fn learn_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::VarDecl { ty, name, .. } => self.insert_local(name.clone(), ty.clone()),
+            Stmt::VarDecl {
+                ty,
+                name,
+                source_name,
+                ..
+            } => {
+                self.insert_local(name.clone(), ty.clone());
+                // Constant-style references retain Java spelling in the IR,
+                // even when the declared Rust binding name is normalized.
+                self.insert_local(source_name.clone(), ty.clone());
+            }
             Stmt::For { init, .. } => {
                 for stmt in init {
                     self.learn_stmt(stmt);
@@ -283,6 +344,34 @@ impl TypeEnv {
     }
 }
 
+/// Substitute an identifier in generated Rust type/header text without
+/// replacing occurrences embedded in a longer identifier.
+pub fn replace_rust_identifier(source: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(offset) = rest.find(from) {
+        let before = &rest[..offset];
+        let after = &rest[offset + from.len()..];
+        let left_boundary = before
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        let right_boundary = after
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        out.push_str(before);
+        if left_boundary && right_boundary {
+            out.push_str(to);
+        } else {
+            out.push_str(from);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
     match expr {
         Expr::Literal(lit) => literal_type(lit),
@@ -291,7 +380,10 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             .cloned()
             .or_else(|| env.field_type(name).cloned())
             .unwrap_or_else(|| JavaType::Unknown(name.clone())),
-        Expr::This => JavaType::Unknown("this".to_string()),
+        Expr::This => env
+            .this_type
+            .clone()
+            .unwrap_or_else(|| JavaType::Unknown("this".to_string())),
         Expr::Super => JavaType::Unknown("super".to_string()),
         Expr::FieldAccess(receiver, field) => {
             if let Some(java_ty) = infer_member_access_type(receiver, field, env) {
@@ -485,8 +577,8 @@ pub fn literal_type(lit: &Literal) -> JavaType {
         Literal::Long(_) => JavaType::Primitive(PrimitiveType::Long),
         Literal::Float(_) => JavaType::Primitive(PrimitiveType::Float),
         Literal::Double(_) => JavaType::Primitive(PrimitiveType::Double),
-        Literal::String(_) => JavaType::String,
-        Literal::Char(_) => JavaType::Primitive(PrimitiveType::Char),
+        Literal::String(_) | Literal::StringUtf16(_) => JavaType::String,
+        Literal::Char(_) | Literal::CharUtf16(_) => JavaType::Primitive(PrimitiveType::Char),
     }
 }
 
@@ -958,6 +1050,11 @@ pub fn is_final_by_default(java_ty: &JavaType) -> bool {
 }
 
 pub fn infer_member_access_type(receiver: &Expr, member: &str, env: &TypeEnv) -> Option<JavaType> {
+    if matches!(receiver, Expr::This)
+        && let Some(ty) = env.anonymous_this_field_type(member)
+    {
+        return Some(ty.clone());
+    }
     let receiver_ty = infer_expr_type(receiver, env);
     if member == "length" && is_java_length_receiver(&receiver_ty) {
         Some(JavaType::Primitive(PrimitiveType::Int))
@@ -1211,6 +1308,38 @@ pub fn primitive_widening_steps(from: PrimitiveType, to: PrimitiveType) -> Optio
 
 #[cfg(test)]
 mod raw_rust_type_tests {
+    #[test]
+    fn mapped_local_source_spelling_keeps_its_declared_type() {
+        let parsed = crate::parser::parse_java_source(
+            "class Probe { void run() { String CURRENT = \"x\"; } }",
+        );
+        let crate::java_ir::Member::Method(method) = &parsed.program.types[0].members[0] else {
+            panic!("missing method");
+        };
+        let declaration = &method.body.as_ref().unwrap().statements[0];
+        let crate::java_ir::Stmt::VarDecl {
+            name, source_name, ..
+        } = declaration
+        else {
+            panic!("missing declaration");
+        };
+        assert_ne!(name, source_name);
+        let mut env = super::TypeEnv::new();
+        env.learn_stmt(declaration);
+        assert_eq!(
+            env.local_type(name),
+            Some(&crate::java_ir::JavaType::String)
+        );
+        assert_eq!(
+            env.local_type(source_name),
+            Some(&crate::java_ir::JavaType::String)
+        );
+        assert_eq!(
+            super::infer_expr_type(&crate::java_ir::Expr::Var(source_name.clone()), &env),
+            crate::java_ir::JavaType::String
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1475,5 +1604,20 @@ mod primitive_widening_tests {
             method_scope
                 .is_unbounded_object_type_parameter(&crate::parser::parse_hierarchy_type("U"))
         );
+    }
+
+    #[test]
+    fn this_type_is_lexical_and_anonymous_scopes_do_not_inherit_it() {
+        let mut outer = TypeEnv::new();
+        let ty = crate::parser::parse_hierarchy_type("Owner<T>");
+        outer.set_this_type(ty.clone());
+        assert_eq!(infer_expr_type(&Expr::This, &outer), ty);
+        let mut anonymous = outer.clone();
+        anonymous.enter_anonymous_field_scope([]);
+        assert_eq!(
+            infer_expr_type(&Expr::This, &anonymous),
+            JavaType::Unknown("this".into())
+        );
+        assert_eq!(infer_expr_type(&Expr::This, &outer), ty);
     }
 }

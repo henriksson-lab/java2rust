@@ -239,96 +239,10 @@ pub fn analyze_program_with_config(
     }
 }
 
-/// Select one whole-program carrier for `String` as soon as a source-level
-/// reference comparison requires it.  This has to happen before lowering: a
-/// late, expression-local conversion would mix `String` and `JavaString` in
-/// signatures and generic collections.
-fn collect_java_string_identity_representation_facts(program: &Program, facts: &mut FactSet) {
-    let mut identity_requirements =
-        crate::item_assembly::SourceReferenceIdentityRequirements::new(program);
-    walk_program_exprs(program, &mut |expr| {
-        if facts.java_string_identity_representation {
-            return;
-        }
-        if let Expr::Call {
-            resolved: Some(call),
-            ..
-        } = expr
-            && identity_requirements
-                .types_for_call_matching(call, None, |ty| ty == &JavaType::String)
-                .iter()
-                .any(|ty| ty == &JavaType::String)
-        {
-            facts.java_string_identity_representation = true;
-        }
-    });
-    for ty in &program.types {
-        collect_type_java_string_identity_representation_facts(ty, facts);
-    }
-}
-
-fn collect_type_java_string_identity_representation_facts(ty: &TypeDecl, facts: &mut FactSet) {
-    for member in &ty.members {
-        match member {
-            Member::Method(method) => {
-                let Some(body) = &method.body else {
-                    continue;
-                };
-                let mut env = collect_external_api_type_env(
-                    ty,
-                    &method.type_params,
-                    &method.type_param_bounds,
-                    &method.params,
-                );
-                collect_block_declared_locals(body, &mut env);
-                if block_has_java_string_reference_equality(body, &env) {
-                    facts.java_string_identity_representation = true;
-                    return;
-                }
-            }
-            Member::Constructor(constructor) => {
-                let Some(body) = &constructor.body else {
-                    continue;
-                };
-                let mut env = collect_external_api_type_env(
-                    ty,
-                    &constructor.type_params,
-                    &constructor.type_param_bounds,
-                    &constructor.params,
-                );
-                collect_block_declared_locals(body, &mut env);
-                if block_has_java_string_reference_equality(body, &env) {
-                    facts.java_string_identity_representation = true;
-                    return;
-                }
-            }
-            Member::Type(nested) => {
-                collect_type_java_string_identity_representation_facts(nested, facts);
-                if facts.java_string_identity_representation {
-                    return;
-                }
-            }
-            Member::Field(_) | Member::Unsupported { .. } => {}
-        }
-    }
-}
-
-fn block_has_java_string_reference_equality(body: &Block, env: &TypeEnv) -> bool {
-    let mut found = false;
-    walk_block_exprs(body, &mut |expr| {
-        let Expr::Binary { op, left, right } = expr else {
-            return;
-        };
-        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            return;
-        }
-        let left_ty = infer_expr_type(left, env);
-        let right_ty = infer_expr_type(right, env);
-        if matches!(left_ty, JavaType::String) && matches!(right_ty, JavaType::String) {
-            found = true;
-        }
-    });
-    found
+/// Select the String ABI before solving signatures. Source literals and
+/// reference comparisons cannot prove that runtime text contains only scalars.
+fn collect_java_string_identity_representation_facts(_program: &Program, facts: &mut FactSet) {
+    facts.java_string_identity_representation = true;
 }
 
 fn collect_builtin_external_representation_facts(facts: &mut FactSet, enabled: bool) {
@@ -2420,6 +2334,19 @@ fn seed_typed_external_call_effect(
     {
         return;
     }
+    // A destination type is only fallback evidence. In particular, an
+    // imported/simple receiver spelling must not create a new unqualified
+    // guess which shadows a qualified pack's return, throws and ABI contract.
+    if facts
+        .external_api_effect_for_receiver_with_arity(
+            receiver_type_key.as_deref(),
+            name,
+            Some(args.len()),
+        )
+        .is_some_and(|effect| effect.provenance != FactProvenance::ConservativeFallback)
+    {
+        return;
+    }
     let is_modeled_external_api = receiver_type_key.as_deref().is_some_and(|receiver_type| {
         crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
             receiver_type,
@@ -2731,6 +2658,12 @@ fn push_chained_external_fluent_effect_guess(
     arg_count: usize,
     allow_unknown_role: bool,
 ) {
+    if facts
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
+        .is_some_and(|effect| effect.provenance != FactProvenance::ConservativeFallback)
+    {
+        return;
+    }
     let policy = crate::stdlib::external_api_method_policy_with_builtin_packs(
         Some(&receiver_key),
         name,
@@ -3376,14 +3309,20 @@ fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mu
 
 fn collect_source_equals_override_facts(program: &Program, facts: &mut FactSet) {
     for ty in &program.types {
-        collect_type_source_equals_override_facts(ty, facts);
+        collect_type_source_equals_override_facts(ty, program, facts);
     }
 }
 
-fn collect_type_source_equals_override_facts(ty: &TypeDecl, facts: &mut FactSet) {
+fn collect_type_source_equals_override_facts(
+    ty: &TypeDecl,
+    program: &Program,
+    facts: &mut FactSet,
+) {
     for member in &ty.members {
         match member {
-            Member::Method(method) if method_overrides_object_equals(method) => {
+            Member::Method(method)
+                if method_overrides_object_equals(ty, method, program, facts) =>
+            {
                 for type_name in source_equals_override_type_aliases(&ty.name) {
                     facts.source_equals_override_facts.push(
                         crate::facts::SourceEqualsOverrideFact {
@@ -3393,7 +3332,9 @@ fn collect_type_source_equals_override_facts(ty: &TypeDecl, facts: &mut FactSet)
                     );
                 }
             }
-            Member::Type(nested) => collect_type_source_equals_override_facts(nested, facts),
+            Member::Type(nested) => {
+                collect_type_source_equals_override_facts(nested, program, facts)
+            }
             _ => {}
         }
     }
@@ -3409,12 +3350,103 @@ fn source_equals_override_type_aliases(type_name: &str) -> Vec<String> {
     aliases
 }
 
-pub(crate) fn method_overrides_object_equals(method: &MethodDecl) -> bool {
-    method.name == "equals" && method.params.len() == 1 && java_type_is_object(&method.params[0].ty)
+/// The implicit Object method is available only when no source one-argument
+/// equals declaration or inherited overload owns selection at this boundary.
+pub(crate) fn source_type_uses_default_object_equals(owner: &TypeDecl, program: &Program) -> bool {
+    owner.kind == crate::java_ir::TypeKind::Class
+        && !owner.members.iter().any(|member| {
+            matches!(member,
+            Member::Method(method) if method.name == "equals" && method.params.len() == 1)
+        })
+        && !crate::inherited_members::inherited_instance_method_refs_for_type(owner, program)
+            .into_iter()
+            .any(|entry| entry.method().name == "equals" && entry.method().params.len() == 1)
 }
 
-fn java_type_is_object(ty: &JavaType) -> bool {
-    matches!(ty, JavaType::Named { name, args } if args.is_empty() && name.rsplit('.').next() == Some("Object"))
+pub(crate) fn block_invokes_default_object_equals_on_this(
+    owner: &TypeDecl,
+    body: &Block,
+    program: &Program,
+) -> bool {
+    let mut found = false;
+    walk_block_exprs(body, &mut |expr| {
+        found |= matches!(expr, Expr::Call { receiver, name, args, .. }
+            if name == "equals" && args.len() == 1
+                && receiver.as_deref().is_none_or(|receiver| matches!(receiver, Expr::This)));
+    });
+    // Most methods have no such call; avoid rebuilding ancestor methods just
+    // to reject an unrelated body during storage/companion reachability.
+    found && source_type_uses_default_object_equals(owner, program)
+}
+
+pub(crate) fn method_overrides_object_equals(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    program: &Program,
+    facts: &FactSet,
+) -> bool {
+    if method.name != "equals"
+        || method.params.len() != 1
+        || !method.type_params.is_empty()
+        || method.modifiers.contains(&Modifier::Static)
+        || method.return_type != JavaType::Primitive(crate::java_ir::PrimitiveType::Boolean)
+    {
+        return false;
+    }
+    java_type_is_native_object(&method.params[0].ty, owner, program, facts)
+}
+
+pub(crate) fn java_type_is_native_object(
+    ty: &JavaType,
+    owner: &TypeDecl,
+    program: &Program,
+    facts: &FactSet,
+) -> bool {
+    let JavaType::Named { name, args } = ty else {
+        return false;
+    };
+    if !args.is_empty() || !matches!(name.as_str(), "Object" | "java.lang.Object") {
+        return false;
+    }
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    if effective.has_parsed_source_definition(ty) {
+        return false;
+    }
+    if name == "java.lang.Object" {
+        // A fully qualified platform reference is not shadowed by an unrelated
+        // source Object or import. Exact parsed-source ownership above still wins.
+        return true;
+    }
+    if owner.type_params.iter().any(|param| param == "Object") {
+        return false;
+    }
+    // Resolution already qualifies lexical nested types. Top-level source
+    // declarations and explicit external imports may retain their simple name;
+    // neither may be turned into the native Object protocol by a suffix match.
+    if program.types.iter().any(|ty| ty.name == "Object") {
+        return false;
+    }
+    if program.imports.iter().any(|import| {
+        !import.is_wildcard
+            && import.path.rsplit('.').next() == Some("Object")
+            && import.path != "java.lang.Object"
+    }) {
+        return false;
+    }
+    if program.package.as_ref().is_some_and(|package| {
+        effective.has_parsed_source_type_capability_for_name(&format!("{package}.Object"))
+    }) {
+        return false;
+    }
+    !program.imports.iter().any(|import| {
+        !import.is_static
+            && import.is_wildcard
+            && import.path != "java.lang"
+            && effective.has_parsed_source_type_capability_for_name(&format!(
+                "{}.Object",
+                import.path.trim_end_matches(".*")
+            ))
+    })
 }
 
 fn simple_type_name(name: &str) -> &str {
@@ -7574,6 +7606,179 @@ mod tests {
     use crate::java_ir::{Literal, TypeKind};
 
     #[test]
+    fn object_equals_override_contract_keeps_source_and_import_identity() {
+        let cases = [
+            (
+                "class C { public boolean equals(javax.custom.Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public boolean equals(java.custom.Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public boolean equals(Object x) { return true; } }",
+                true,
+            ),
+            (
+                "class C { public boolean equals(java.lang.Object x) { return true; } }",
+                true,
+            ),
+            (
+                "class C { public boolean equals(other.Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class Object {} class C { public boolean equals(Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class Object {} class C { public boolean equals(java.lang.Object x) { return true; } }",
+                true,
+            ),
+            (
+                "import other.Object; class C { public boolean equals(Object x) { return true; } }",
+                false,
+            ),
+            (
+                "import java.lang.Object; class C { public boolean equals(Object x) { return true; } }",
+                true,
+            ),
+            (
+                "import static other.Types.Object; class C { public boolean equals(Object x) { return true; } }",
+                false,
+            ),
+            (
+                "import other.Object; class C { public boolean equals(java.lang.Object x) { return true; } }",
+                true,
+            ),
+            (
+                "class Outer { class Object {} class C { public boolean equals(Object x) { return true; } } }",
+                false,
+            ),
+            (
+                "class C<Object> { public boolean equals(Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public boolean equals(int x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public static boolean equals(Object x) { return true; } }",
+                false,
+            ),
+            (
+                "class C { public int equals(Object x) { return 1; } }",
+                false,
+            ),
+            (
+                "class C { public <T> boolean equals(Object x) { return true; } }",
+                false,
+            ),
+        ];
+        fn find_c(types: &[TypeDecl]) -> &TypeDecl {
+            for ty in types {
+                if ty.name.rsplit('.').next() == Some("C") {
+                    return ty;
+                }
+                for member in &ty.members {
+                    if let Member::Type(nested) = member {
+                        if nested.name.rsplit('.').next() == Some("C") {
+                            return nested;
+                        }
+                    }
+                }
+            }
+            panic!("missing C");
+        }
+        for (source, expected) in cases {
+            let parsed = crate::parser::parse_java_source(source);
+            assert!(!parsed.diagnostics.has_errors(), "{source}");
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let owner = find_c(&resolved.program.types);
+            let Member::Method(method) = &owner.members[0] else {
+                panic!("missing method: {source}");
+            };
+            assert_eq!(
+                method_overrides_object_equals(owner, method, &resolved.program, &resolved.facts),
+                expected,
+                "classification: {source}"
+            );
+            let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+            assert_eq!(
+                semantic
+                    .facts
+                    .source_equals_override_for(&owner.name)
+                    .is_some(),
+                expected,
+                "facts: {source}"
+            );
+            assert_eq!(
+                crate::representation_lowering::source_hierarchy_equals_method(
+                    owner,
+                    &resolved.program,
+                    &semantic.facts,
+                )
+                .is_some(),
+                expected,
+                "protocol selection: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_equals_override_contract_respects_cross_unit_source_ownership() {
+        fn source_facts(name: &str) -> FactSet {
+            let parsed = crate::parser::parse_java_source("class Object {}");
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let mut facts = resolved.facts;
+            for capability in &mut facts.type_capability_overrides {
+                capability.type_name = name.into();
+            }
+            facts
+        }
+        for (source, source_name, expected) in [
+            (
+                "package other; class C { public boolean equals(Object x) { return true; } }",
+                "other.Object",
+                false,
+            ),
+            (
+                "import other.*; class C { public boolean equals(Object x) { return true; } }",
+                "other.Object",
+                false,
+            ),
+            (
+                "class C { public boolean equals(Object x) { return true; } }",
+                "other.Object",
+                true,
+            ),
+            (
+                "class C { public boolean equals(java.lang.Object x) { return true; } }",
+                "Object",
+                true,
+            ),
+            (
+                "class C { public boolean equals(java.lang.Object x) { return true; } }",
+                "java.lang.Object",
+                false,
+            ),
+        ] {
+            let parsed = crate::parser::parse_java_source(source);
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let mut facts = resolved.facts.clone();
+            facts.extend_from(source_facts(source_name));
+            let semantic = analyze_program(&resolved.program, &facts, &FactSet::default());
+            assert_eq!(
+                semantic.facts.source_equals_override_for("C").is_some(),
+                expected,
+                "{source}, source owner {source_name}"
+            );
+        }
+    }
+
+    #[test]
     fn typed_expression_walk_restores_loop_block_and_catch_bindings() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -7637,6 +7842,7 @@ mod tests {
 
     fn type_with_bound(name: &str, bound: JavaType) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: vec!["T".to_string()],

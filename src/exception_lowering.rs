@@ -47,6 +47,8 @@ impl CatchRenderArm {
 pub(crate) struct ExternalExceptionConversion {
     java_type: String,
     rust_type: String,
+    nullable_message_function: Option<String>,
+    utf16_message: bool,
 }
 
 impl ExternalExceptionConversion {
@@ -54,6 +56,8 @@ impl ExternalExceptionConversion {
         Self {
             java_type,
             rust_type,
+            nullable_message_function: None,
+            utf16_message: false,
         }
     }
 
@@ -69,6 +73,21 @@ impl ExternalExceptionConversion {
 pub(crate) fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
     let source_parent_arms = source_exception_parent_match_arms(facts);
+    let builtin_aliases = crate::stdlib::JDK_EXCEPTION_PARENTS
+        .iter()
+        .flat_map(|(child, parent)| [*child, *parent])
+        .chain([
+            "Throwable",
+            "Exception",
+            "Error",
+            "InterruptedException",
+            "ExecutionException",
+        ])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|name| format!("{name:?}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
     let mut item = r#"pub trait JavaInputStreamDispatch {
     fn identity(&self) -> *const ();
     fn available(&self) -> i32 { 0 }
@@ -275,83 +294,11 @@ where I: Iterator<Item = Result<T, E>>, F: FnMut(T) -> Result<U, E> {
     items.map(move |item| item.and_then(&mut mapper))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaException {
-    class_name: &'static str,
-    message: String,
-    cause: Option<std::boxed::Box<JavaException>>,
-    suppressed: Vec<JavaException>,
-}
-
-impl JavaException {
-    pub fn new(class_name: &'static str, message: String) -> JavaException {
-        JavaException { class_name, message, cause: None, suppressed: Vec::new() }
-    }
-
-    pub fn with_cause(
-        class_name: &'static str,
-        message: String,
-        cause: JavaException,
-    ) -> JavaException {
-        JavaException {
-            class_name,
-            message,
-            cause: Some(std::boxed::Box::new(cause)),
-            suppressed: Vec::new(),
-        }
-    }
-
-    pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
-        JavaException { class_name, message: err.to_string(), cause: None, suppressed: Vec::new() }
-    }
-
-    pub fn class_name(&self) -> &'static str {
-        self.class_name
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-
-    pub fn is_instance(&self, class_names: &[&str]) -> bool {
-        class_names
-            .iter()
-            .any(|name| self.class_name == *name || java_exception_is_subtype(self.class_name, name))
-    }
-
-    pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
-        if self.cause.as_ref().is_some_and(|cause| cause.is_instance(class_names)) {
-            *self.cause.take().expect("checked Java exception cause")
-        } else {
-            self
-        }
-    }
-
-    pub fn get_message(&self) -> Option<String> {
-        Some(self.message.clone())
-    }
-
-    pub fn get_localized_message(&self) -> Option<String> {
-        self.get_message()
-    }
-
-    pub fn cause(&self) -> Option<&JavaException> {
-        self.cause.as_deref()
-    }
-
-    pub fn add_suppressed(&mut self, exception: JavaException) {
-        self.suppressed.push(exception);
-    }
-
-    pub fn get_suppressed(&self) -> Vec<Option<JavaException>> {
-        self.suppressed.iter().cloned().map(Some).collect()
-    }
-
-    pub fn get_class(&self) -> JavaClass<()> {
-        JavaClass::<()>::for_name(self.class_name)
-    }
-}
-
+"#
+    .to_string();
+    item.push_str(&java_exception_text_support(facts));
+    item.push_str(include_str!("java_exception.rs"));
+    item.push_str(r#"
 fn java_exception_parent(class_name: &str) -> Option<&'static str> {
     match class_name {
 __SOURCE_EXCEPTION_PARENT_ARMS__        _ => match class_name.rsplit('.').next().unwrap_or(class_name) {
@@ -378,18 +325,33 @@ __SOURCE_EXCEPTION_PARENT_ARMS__        _ => match class_name.rsplit('.').next()
             "UncheckedIOException" => Some("RuntimeException"),
             "UnsupportedOperationException" => Some("RuntimeException"),
             "RuntimeException" => Some("Exception"),
+            "Throwable" => Some("Object"),
+            "Error" => Some("Throwable"),
             _ => None,
         },
     }
 }
 
+fn java_exception_builtin_name(name: &str) -> &str {
+    // Only platform-qualified names have these short aliases. Do not merge
+    // an unrelated application exception merely because its leaf name agrees.
+    if !name.starts_with("java.") { return name; }
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    match simple {
+        __JDK_EXCEPTION_ALIASES__ => simple,
+        _ => name,
+    }
+}
+
 fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
-    let target = target;
-    let mut current = actual;
+    let target = java_exception_builtin_name(target);
+    let mut current = java_exception_builtin_name(actual);
+    if current == target { return true; }
     for _ in 0..32 {
         let Some(parent) = java_exception_parent(current) else {
             return false;
         };
+        let parent = java_exception_builtin_name(parent);
         if parent == target {
             return true;
         }
@@ -515,23 +477,75 @@ impl InputStream {
     }
 }
 
+impl From<&JavaException> for JavaException {
+    fn from(value: &JavaException) -> Self { value.clone() }
+}
+
 impl std::fmt::Display for JavaException {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.class_name, self.message)
+        java_exception_native_format(self, f)
     }
 }"#
-    .to_string();
+    );
     item = item.replace("__SOURCE_EXCEPTION_PARENT_ARMS__", &source_parent_arms);
+    item = item.replace("__JDK_EXCEPTION_ALIASES__", &builtin_aliases);
     for conversion in conversions {
         item.push_str("\n\n");
+        let value = if let Some(function) = &conversion.nullable_message_function {
+            let text_converter = if conversion.utf16_message {
+                if facts.java_string_identity_representation {
+                    "JavaString::from_units"
+                } else {
+                    "|units| String::from_utf16(&units).expect(\"native exception message requires scalar text\")"
+                }
+            } else {
+                "std::convert::Into::into"
+            };
+            format!(
+                "JavaException::from_constructor({:?}, {function}(&err).map({text_converter}), None)",
+                conversion.java_type()
+            )
+        } else {
+            format!(
+                "JavaException::from_display({:?}, err)",
+                conversion.java_type()
+            )
+        };
         item.push_str(&format!(
-            "impl From<{}> for JavaException {{\n    fn from(err: {}) -> JavaException {{\n        JavaException::from_display({:?}, err)\n    }}\n}}",
+            "impl From<{}> for JavaException {{\n    fn from(err: {}) -> JavaException {{\n        {}\n    }}\n}}",
             conversion.rust_type(),
             conversion.rust_type(),
-            conversion.java_type()
+            value
         ));
     }
     RustItem::Raw(item)
+}
+
+fn java_exception_text_support(facts: &FactSet) -> String {
+    if facts.java_string_identity_representation {
+        r#"pub type JavaExceptionText = JavaString;
+fn java_exception_text_value(class_name: &str, message: Option<JavaExceptionText>) -> JavaExceptionText {
+    let mut text = JavaUtf16::from_scalar(class_name);
+    if let Some(message) = message {
+        text.push_text(&JavaUtf16::from_scalar(": "));
+        text.push_text(message.payload());
+    }
+    JavaString::from_payload(text)
+}
+fn java_exception_native_format(value: &JavaException, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    java_native_format_text(f, &value.to_string())
+}
+"#.into()
+    } else {
+        r#"pub type JavaExceptionText = String;
+fn java_exception_text_value(class_name: &str, message: Option<JavaExceptionText>) -> JavaExceptionText {
+    match message { Some(message) => format!("{class_name}: {message}"), None => class_name.to_string() }
+}
+fn java_exception_native_format(value: &JavaException, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&value.to_string())
+}
+"#.into()
+    }
 }
 
 fn source_exception_parent_match_arms(facts: &FactSet) -> String {
@@ -622,12 +636,49 @@ pub(crate) fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExc
         else {
             continue;
         };
-        conversions.insert(ExternalExceptionConversion::new(
+        let mut conversion = ExternalExceptionConversion::new(
             exception.type_name.clone(),
             format!("{crate_name}::{simple}"),
-        ));
+        );
+        conversion.utf16_message = pack.string_abi == crate::facts::ExternalStringAbi::Utf16;
+        if let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
+            Some(&exception.type_name),
+            "getMessage",
+            Some(0),
+        ) && effect.return_type == Some(crate::java_ir::JavaType::String)
+            && effect.return_nullability == crate::facts::NullabilityState::MaybeNull
+            && let Some(mapping) = facts.external_crate_api_mapping_for_receiver(
+                &exception.type_name,
+                "getMessage",
+                Some(0),
+            )
+        {
+            conversion.nullable_message_function =
+                Some(format!("{crate_name}::{}", mapping.rust_name));
+        }
+        conversions.insert(conversion);
     }
-    conversions.into_iter().collect()
+    // Resolution can retain both the imported simple name and its qualified
+    // exception fact. They describe one foreign Rust carrier, not two legal
+    // `From` impls. Prefer the qualified identity only when it is unambiguous;
+    // genuinely different qualified Java classes must not be silently merged.
+    conversions
+        .iter()
+        .filter(|conversion| {
+            conversion.java_type.contains('.')
+                || conversions
+                    .iter()
+                    .filter(|other| {
+                        other.rust_type == conversion.rust_type
+                            && other.java_type.contains('.')
+                            && other.java_type.rsplit('.').next()
+                                == Some(conversion.java_type.as_str())
+                    })
+                    .count()
+                    != 1
+        })
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn exception_result_type(ok_type: RustType) -> RustType {
@@ -635,6 +686,16 @@ pub(crate) fn exception_result_type(ok_type: RustType) -> RustType {
         "Result",
         vec![ok_type, RustType::Named("JavaException".to_string())],
     )
+}
+
+/// State the Java error ABI even for an all-Ok expression. In particular,
+/// `Ok(value)?` cannot infer its error when several From conversions exist.
+pub(crate) fn java_exception_ok_path(ok_type: RustType) -> RustExpr {
+    RustExpr::GenericPath {
+        base: vec!["Ok".into()],
+        args: vec![ok_type, RustType::Named("JavaException".into())],
+        member: None,
+    }
 }
 
 pub(crate) fn exception_try_ok_type(
@@ -1581,9 +1642,12 @@ fn rust_expr_definitely_terminates(expr: &RustExpr) -> bool {
 }
 
 pub(crate) fn java_null_pointer_exception_expr() -> RustExpr {
-    new_exception_expr(
-        "NullPointerException",
-        crate::coercion::rust_string_literal_projection("Java null receiver"),
+    RustExpr::shaped(
+        crate::rust_ir::RustExprShape::SourceNullDiagnostic,
+        new_exception_expr(
+            "NullPointerException",
+            crate::coercion::rust_string_literal_projection("Java null receiver"),
+        ),
     )
 }
 
@@ -1716,6 +1780,39 @@ fn unit_expr() -> RustExpr {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mapped_nullable_exception_message_is_not_replaced_by_display_text() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.error dep.Error rust-crate-mapping mapped target=error_runtime\nexternal-pack-exception dep.error dep.Error unchecked\nexternal-pack-api dep.error dep.Error getMessage mapped getter read-only maybe-null args=0 return=String rust=message\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let rendered = crate::emit::emit_file(&crate::rust_ir::RustFile {
+            items: vec![super::java_exception_support_item_with_facts(
+                parsed.facts(),
+            )],
+        });
+        assert!(
+            rendered.contains("error_runtime::message(&err).map(std::convert::Into::into)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("JavaException::from_display(\"dep.Error\", err)"));
+    }
+
+    #[test]
+    fn mapped_exception_alias_emits_one_qualified_conversion() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.error dep.Error rust-crate-mapping mapped target=error_runtime\nexternal-pack-exception dep.error dep.Error unchecked\nexternal-pack-api dep.error dep.Error getMessage mapped getter read-only maybe-null args=0 return=String rust=message\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut facts = parsed.facts().clone();
+        let mut alias = facts.exception_facts[0].clone();
+        alias.type_name = "Error".into();
+        facts.exception_facts.push(alias);
+        let conversions = super::external_exception_conversions(&facts);
+        assert_eq!(conversions.len(), 1, "{conversions:?}");
+        assert_eq!(conversions[0].java_type(), "dep.Error");
+        assert_eq!(conversions[0].rust_type(), "error_runtime::Error");
+    }
     use super::*;
     use crate::facts::{ExceptionFact, ExceptionKind, FactProvenance, TypeCapabilityOverride};
     use crate::java_ir::JavaType;
@@ -2213,9 +2310,10 @@ mod tests {
 
         assert!(
             rendered.contains("class_name: &'static str,")
-                && rendered.contains("message: String,")
+                && rendered.contains("pub type JavaExceptionText = String;")
+                && rendered.contains("message: Option<JavaExceptionText>,")
                 && rendered.contains("pub fn class_name(&self) -> &'static str")
-                && rendered.contains("pub fn message(&self) -> &str")
+                && rendered.contains("pub fn message(&self) -> &JavaExceptionText")
                 && rendered.contains("pub fn cause(&self) -> Option<&JavaException>")
                 && rendered.contains("pub fn get_suppressed(&self) -> Vec<Option<JavaException>>"),
             "{rendered}"

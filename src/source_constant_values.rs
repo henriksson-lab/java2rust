@@ -35,8 +35,8 @@ pub(crate) enum ConstantValue {
     Long(i64),
     Float(f32),
     Double(f64),
-    Char(char),
-    String(String),
+    Char(u16),
+    String(Vec<u16>),
 }
 
 impl ConstantValue {
@@ -71,9 +71,11 @@ impl ConstantValue {
                 double_value(value).map(|value| render_f64(value))
             }
             (JavaType::Primitive(PrimitiveType::Char), Self::Char(value)) => {
-                Some(format!("{value:?}"))
+                char::from_u32(u32::from(*value)).map(|value| format!("{value:?}"))
             }
-            (JavaType::String, Self::String(value)) => Some(format!("{value:?}")),
+            (JavaType::String, Self::String(value)) => String::from_utf16(value)
+                .ok()
+                .map(|value| format!("{value:?}")),
             _ => None,
         }
     }
@@ -85,6 +87,7 @@ fn float_value(value: &ConstantValue) -> Option<f32> {
         ConstantValue::Double(value) => Some(*value as f32),
         ConstantValue::Int(value) => Some(*value as f32),
         ConstantValue::Long(value) => Some(*value as f32),
+        ConstantValue::Char(value) => Some(f32::from(*value)),
         _ => None,
     }
 }
@@ -95,6 +98,7 @@ fn double_value(value: &ConstantValue) -> Option<f64> {
         ConstantValue::Float(value) => Some(*value as f64),
         ConstantValue::Int(value) => Some(*value as f64),
         ConstantValue::Long(value) => Some(*value as f64),
+        ConstantValue::Char(value) => Some(f64::from(*value)),
         _ => None,
     }
 }
@@ -292,8 +296,10 @@ fn fold_literal(literal: &Literal) -> Option<ConstantValue> {
         Literal::Long(value) => Some(ConstantValue::Long(*value)),
         Literal::Float(value) => Some(ConstantValue::Float(*value)),
         Literal::Double(value) => Some(ConstantValue::Double(*value)),
-        Literal::Char(value) => Some(ConstantValue::Char(*value)),
-        Literal::String(value) => Some(ConstantValue::String(value.clone())),
+        Literal::Char(value) => Some(ConstantValue::Char(u16::try_from(u32::from(*value)).ok()?)),
+        Literal::CharUtf16(value) => Some(ConstantValue::Char(*value)),
+        Literal::String(value) => Some(ConstantValue::String(value.encode_utf16().collect())),
+        Literal::StringUtf16(value) => Some(ConstantValue::String(value.clone())),
         // `null` is not a constant expression in the JLS sense, and a `null`
         // constant is precisely a case that must stay loud.
         Literal::Null => None,
@@ -301,6 +307,11 @@ fn fold_literal(literal: &Literal) -> Option<ConstantValue> {
 }
 
 fn fold_unary(op: UnaryOp, value: ConstantValue) -> Option<ConstantValue> {
+    // Unary numeric promotion widens a Java char to int, including surrogates.
+    let value = match value {
+        ConstantValue::Char(value) => ConstantValue::Int(i32::from(value)),
+        other => other,
+    };
     match (op, value) {
         (UnaryOp::Pos, value) => Some(value),
         (UnaryOp::Neg, ConstantValue::Int(value)) => Some(ConstantValue::Int(value.wrapping_neg())),
@@ -326,7 +337,7 @@ fn fold_cast(ty: &JavaType, value: ConstantValue) -> Option<ConstantValue> {
     let as_long = match &value {
         ConstantValue::Int(value) => Some(i64::from(*value)),
         ConstantValue::Long(value) => Some(*value),
-        ConstantValue::Char(value) => Some(i64::from(u32::from(*value))),
+        ConstantValue::Char(value) => Some(i64::from(*value)),
         _ => None,
     };
     match primitive {
@@ -344,7 +355,13 @@ fn fold_cast(ty: &JavaType, value: ConstantValue) -> Option<ConstantValue> {
         },
         PrimitiveType::Float => Some(ConstantValue::Float(float_value(&value)?)),
         PrimitiveType::Double => Some(ConstantValue::Double(double_value(&value)?)),
-        PrimitiveType::Char => Some(ConstantValue::Char(char::from_u32(as_long? as u32)?)),
+        PrimitiveType::Char => Some(ConstantValue::Char(match value {
+            // Java first narrows floating-point to int (saturating/NaN->0),
+            // then keeps its low 16 bits; integral narrowing wraps directly.
+            ConstantValue::Float(value) => value as i32 as u16,
+            ConstantValue::Double(value) => value as i32 as u16,
+            _ => as_long? as u16,
+        })),
         PrimitiveType::Boolean => match value {
             ConstantValue::Bool(value) => Some(ConstantValue::Bool(value)),
             _ => None,
@@ -357,11 +374,9 @@ fn fold_binary(op: BinaryOp, left: ConstantValue, right: ConstantValue) -> Optio
     if op == BinaryOp::Add
         && (matches!(left, ConstantValue::String(_)) || matches!(right, ConstantValue::String(_)))
     {
-        return Some(ConstantValue::String(format!(
-            "{}{}",
-            java_display(&left)?,
-            java_display(&right)?
-        )));
+        let mut units = java_display(&left)?;
+        units.extend(java_display(&right)?);
+        return Some(ConstantValue::String(units));
     }
     match (&left, &right) {
         (ConstantValue::Bool(left), ConstantValue::Bool(right)) => match op {
@@ -422,7 +437,7 @@ fn integral_value(value: &ConstantValue) -> Option<i64> {
     match value {
         ConstantValue::Int(value) => Some(i64::from(*value)),
         ConstantValue::Long(value) => Some(*value),
-        ConstantValue::Char(value) => Some(i64::from(u32::from(*value))),
+        ConstantValue::Char(value) => Some(i64::from(*value)),
         _ => None,
     }
 }
@@ -508,17 +523,18 @@ fn fold_double(op: BinaryOp, left: f64, right: f64) -> Option<ConstantValue> {
 }
 
 /// How Java renders a constant inside a string concatenation.
-fn java_display(value: &ConstantValue) -> Option<String> {
-    Some(match value {
-        ConstantValue::String(value) => value.clone(),
+fn java_display(value: &ConstantValue) -> Option<Vec<u16>> {
+    let scalar = match value {
+        ConstantValue::String(value) => return Some(value.clone()),
         ConstantValue::Bool(value) => value.to_string(),
         ConstantValue::Int(value) => value.to_string(),
         ConstantValue::Long(value) => value.to_string(),
-        ConstantValue::Char(value) => value.to_string(),
+        ConstantValue::Char(value) => return Some(vec![*value]),
         // Java's float/double `toString` is not Rust's, and a constant whose
         // text has to be exactly right is not worth guessing at.
         ConstantValue::Float(_) | ConstantValue::Double(_) => return None,
-    })
+    };
+    Some(scalar.encode_utf16().collect())
 }
 
 #[cfg(test)]
@@ -660,7 +676,7 @@ mod tests {
             None
         );
         assert_eq!(
-            ConstantValue::String("x".to_string())
+            ConstantValue::String(vec![120])
                 .rust_value_for(&JavaType::Primitive(PrimitiveType::Int)),
             None
         );
@@ -680,6 +696,50 @@ mod tests {
             fold_one("static final char A = (char) 65;").as_deref(),
             Some("'A'")
         );
+    }
+
+    #[test]
+    fn constant_char_narrowing_wraps_and_numeric_promotion_keeps_surrogates() {
+        for (expression, expected) in [
+            ("(int) (char) -1", "65535"),
+            ("(int) (char) 65536", "0"),
+            ("(int) (char) 128512", "62976"),
+            ("(int) (char) 1e100", "65535"),
+            ("(int) (char) -1e100", "0"),
+            (r"'\ud83d' + 1", "55358"),
+            (r"+'\ud83d'", "55357"),
+            (r"-'\ud83d'", "-55357"),
+            (r"~'\ud83d'", "-55358"),
+        ] {
+            assert_eq!(
+                fold_one(&format!("static final int A = {expression};")).as_deref(),
+                Some(expected),
+                "{expression}"
+            );
+        }
+        assert_eq!(
+            fold_one(r"static final double A = (double) '\ud83d';").as_deref(),
+            Some("55357.0")
+        );
+    }
+
+    #[test]
+    fn constant_concatenation_preserves_units_and_can_recombine_surrogates() {
+        let expr = crate::parser::parse_expr(r#""\ud83d" + '\ude00'"#);
+        assert_eq!(
+            fold_constant_expr(&expr, &ConstantScope::new()),
+            Some(ConstantValue::String(vec![0xd83d, 0xde00]))
+        );
+        assert_eq!(
+            fold_one(r#"static final String A = "\ud83d" + '\ude00';"#).as_deref(),
+            Some("\"😀\"")
+        );
+        let expr = crate::parser::parse_expr(r#""x" + '\ud83d' + 1"#);
+        let value = fold_constant_expr(&expr, &ConstantScope::new()).unwrap();
+        assert_eq!(value, ConstantValue::String(vec![120, 0xd83d, 49]));
+        // A scalar-only facade cannot render this value. Preserve it in the
+        // fold, but refuse emission instead of manufacturing scalar text.
+        assert_eq!(value.rust_value_for(&JavaType::String), None);
     }
 }
 

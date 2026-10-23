@@ -1,0 +1,358 @@
+Compiled from "Complex.java"
+public final class org.apache.commons.numbers.complex.Complex implements java.io.Serializable {
+  public static final org.apache.commons.numbers.complex.Complex I;
+    descriptor: Lorg/apache/commons/numbers/complex/Complex;
+  public static final org.apache.commons.numbers.complex.Complex ONE;
+    descriptor: Lorg/apache/commons/numbers/complex/Complex;
+  public static final org.apache.commons.numbers.complex.Complex ZERO;
+    descriptor: Lorg/apache/commons/numbers/complex/Complex;
+  private static final org.apache.commons.numbers.complex.Complex NAN;
+    descriptor: Lorg/apache/commons/numbers/complex/Complex;
+  private static final double PI_OVER_2;
+    descriptor: D
+  private static final double PI_OVER_4;
+    descriptor: D
+  private static final double LN_2;
+    descriptor: D
+  private static final double LOG_10E_O_2;
+    descriptor: D
+  private static final double LOG10_2;
+    descriptor: D
+  private static final double HALF;
+    descriptor: D
+  private static final double ROOT2;
+    descriptor: D
+  private static final double ONE_OVER_ROOT2;
+    descriptor: D
+  private static final long NEGATIVE_ZERO_LONG_BITS;
+    descriptor: J
+  private static final int EXPONENT_OFFSET;
+    descriptor: I
+  private static final double EPSILON;
+    descriptor: D
+  private static final long UNSIGN_MASK;
+    descriptor: J
+  private static final long MANTISSA_MASK;
+    descriptor: J
+  private static final double MULTIPLIER;
+    descriptor: D
+  private static final double A_CROSSOVER;
+    descriptor: D
+  private static final double B_CROSSOVER;
+    descriptor: D
+  private static final double SAFE_MAX;
+    descriptor: D
+  private static final double SAFE_MIN;
+    descriptor: D
+  private static final double SAFE_UPPER;
+    descriptor: D
+  private static final double SAFE_LOWER;
+    descriptor: D
+  private static final double SQRT_SAFE_UPPER;
+    descriptor: D
+  private static final double SAFE_EXP;
+    descriptor: D
+  private static final double EXP_M;
+    descriptor: D
+  private static final int EXP_54;
+    descriptor: I
+  private static final int EXP_500;
+    descriptor: I
+  private static final int EXP_1024;
+    descriptor: I
+  private static final int EXP_NEG_500;
+    descriptor: I
+  private static final double TWO_POW_600;
+    descriptor: D
+  private static final double TWO_POW_NEG_600;
+    descriptor: D
+  private static final long serialVersionUID;
+    descriptor: J
+  private static final int TO_STRING_SIZE;
+    descriptor: I
+  private static final int FORMAT_MIN_LEN;
+    descriptor: I
+  private static final char FORMAT_START;
+    descriptor: C
+  private static final char FORMAT_END;
+    descriptor: C
+  private static final char FORMAT_SEP;
+    descriptor: C
+  private static final int BEFORE_SEP;
+    descriptor: I
+  private final double imaginary;
+    descriptor: D
+  private final double real;
+    descriptor: D
+  private org.apache.commons.numbers.complex.Complex(double, double);
+    descriptor: (DD)V
+
+  public static org.apache.commons.numbers.complex.Complex ofCartesian(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+
+  public static org.apache.commons.numbers.complex.Complex ofPolar(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+
+  public static org.apache.commons.numbers.complex.Complex ofCis(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public static org.apache.commons.numbers.complex.Complex parse(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static java.lang.String parsingExceptionMsg(java.lang.String, java.lang.Object, java.lang.String);
+    descriptor: (Ljava/lang/String;Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;
+
+  public double getReal();
+    descriptor: ()D
+
+  public double real();
+    descriptor: ()D
+
+  public double getImaginary();
+    descriptor: ()D
+
+  public double imag();
+    descriptor: ()D
+
+  public double abs();
+    descriptor: ()D
+
+  private static double abs(double, double);
+    descriptor: (DD)D
+
+  public double arg();
+    descriptor: ()D
+
+  public double norm();
+    descriptor: ()D
+
+  public boolean isNaN();
+    descriptor: ()Z
+
+  public boolean isInfinite();
+    descriptor: ()Z
+
+  public boolean isFinite();
+    descriptor: ()Z
+
+  public org.apache.commons.numbers.complex.Complex conj();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex negate();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex proj();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex add(org.apache.commons.numbers.complex.Complex);
+    descriptor: (Lorg/apache/commons/numbers/complex/Complex;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex add(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex addImaginary(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex subtract(org.apache.commons.numbers.complex.Complex);
+    descriptor: (Lorg/apache/commons/numbers/complex/Complex;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex subtract(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex subtractImaginary(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex subtractFrom(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex subtractFromImaginary(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex multiply(org.apache.commons.numbers.complex.Complex);
+    descriptor: (Lorg/apache/commons/numbers/complex/Complex;)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex multiply(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static double boxInfinity(double);
+    descriptor: (D)D
+
+  private static boolean isNotZero(double, double);
+    descriptor: (DD)Z
+
+  private static double changeNaNtoZero(double);
+    descriptor: (D)D
+
+  public org.apache.commons.numbers.complex.Complex multiply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex multiplyImaginary(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex divide(org.apache.commons.numbers.complex.Complex);
+    descriptor: (Lorg/apache/commons/numbers/complex/Complex;)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex divide(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex divide(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex divideImaginary(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex exp();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex log();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex log10();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private org.apache.commons.numbers.complex.Complex log(java.util.function.DoubleUnaryOperator, double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (Ljava/util/function/DoubleUnaryOperator;DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex pow(org.apache.commons.numbers.complex.Complex);
+    descriptor: (Lorg/apache/commons/numbers/complex/Complex;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex pow(double);
+    descriptor: (D)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex sqrt();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex sqrt(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex sin();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex cos();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex tan();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex asin();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex asin(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex acos();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex acos(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex atan();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex sinh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex sinh(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex cosh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex cosh(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex coshsinh(double, double, double, boolean, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDDZLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex tanh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex tanh(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex asinh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex acosh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  public org.apache.commons.numbers.complex.Complex atanh();
+    descriptor: ()Lorg/apache/commons/numbers/complex/Complex;
+
+  private static org.apache.commons.numbers.complex.Complex atanh(double, double, org.apache.commons.numbers.complex.Complex$ComplexConstructor);
+    descriptor: (DDLorg/apache/commons/numbers/complex/Complex$ComplexConstructor;)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static double x2y2m1(double, double);
+    descriptor: (DD)D
+
+  private static double splitHigh(double);
+    descriptor: (D)D
+
+  private static double squareLow(double, double, double);
+    descriptor: (DDD)D
+
+  private static double fastSumLow(double, double, double);
+    descriptor: (DDD)D
+
+  private static double sumLow(double, double, double);
+    descriptor: (DDD)D
+
+  private static double sumx2y2m1(double, double, double, double);
+    descriptor: (DDDD)D
+
+  public java.util.List<org.apache.commons.numbers.complex.Complex> nthRoot(int);
+    descriptor: (I)Ljava/util/List;
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public int hashCode();
+    descriptor: ()I
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  private static boolean equals(double, double);
+    descriptor: (DD)Z
+
+  private static boolean negative(double);
+    descriptor: (D)Z
+
+  private static boolean isPosInfinite(double);
+    descriptor: (D)Z
+
+  private static boolean isPosFinite(double);
+    descriptor: (D)Z
+
+  private static org.apache.commons.numbers.complex.Complex multiplyNegativeI(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+
+  private static double changeSign(double, double);
+    descriptor: (DD)D
+
+  private static int getScale(double, double);
+    descriptor: (DD)I
+
+  private static int getMaxExponent(double, double);
+    descriptor: (DD)I
+
+  private static boolean inRegion(double, double, double, double);
+    descriptor: (DDDD)Z
+
+  private static double hypot(double, double);
+    descriptor: (DD)D
+
+  private static double x2y2(double, double);
+    descriptor: (DD)D
+
+  private static org.apache.commons.numbers.complex.Complex lambda$acosh$0(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Complex.java"
+interface org.apache.commons.numbers.complex.Complex$ComplexConstructor {
+  public abstract org.apache.commons.numbers.complex.Complex create(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/complex/Complex;
+}

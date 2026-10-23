@@ -158,6 +158,8 @@ pub enum CallTargetPlan<'a> {
     },
     ExternalCrateReceiver {
         receiver: &'a Expr,
+        receiver_type: String,
+        method_name: String,
         crate_name: String,
         rust_name: String,
         mutates_receiver: bool,
@@ -887,6 +889,8 @@ pub enum NativeJavaInstanceMethod {
     /// Open dispatch on an unbounded Java type parameter; unlike the known
     /// native implementation, this method may return null or throw.
     VirtualObjectToString,
+    /// Open dispatch through the erased java.lang.Object carrier.
+    VirtualObjectEquals,
     SourceObjectToString,
     SourceHashCode,
     StringContains,
@@ -902,6 +906,9 @@ pub enum NativeJavaInstanceMethod {
     StringReplaceAll,
     StringMatches,
     StringSplit,
+    /// A nonempty, non-surrogate literal pattern proven by source constant
+    /// analysis. Only lowering with that proof may select this fast path.
+    StringSplitLiteral,
     StringSubstring,
     StringToCharArray,
     StringHashCode,
@@ -962,6 +969,29 @@ pub enum NativeJavaStaticMethod {
         source: PrimitiveType,
     },
     MathToIntExact,
+    MathMultiplyExact {
+        primitive: PrimitiveType,
+    },
+    MathGetExponent {
+        source: PrimitiveType,
+    },
+    MathScalb {
+        primitive: PrimitiveType,
+    },
+    MathCopySign {
+        primitive: PrimitiveType,
+        magnitude: PrimitiveType,
+        sign: PrimitiveType,
+    },
+    IntegralUnsignedDivision {
+        primitive: PrimitiveType,
+        remainder: bool,
+    },
+    IntegerToUnsignedLong,
+    IntegralFormat {
+        primitive: PrimitiveType,
+        radix: u32,
+    },
     MathFloorDiv {
         primitive: PrimitiveType,
     },
@@ -975,7 +1005,13 @@ pub enum NativeJavaStaticMethod {
     IntegerParseInt,
     IntegerDecode,
     IntegerValueOfString,
-    IntegralBitCount,
+    IntegralBitCount {
+        primitive: PrimitiveType,
+    },
+    IntegralZeroCount {
+        primitive: PrimitiveType,
+        leading: bool,
+    },
     LongParseLong,
     FloatParseFloat,
     DoubleParseDouble,
@@ -983,6 +1019,9 @@ pub enum NativeJavaStaticMethod {
         source: PrimitiveType,
     },
     FloatingIsNaN,
+    FloatingCompare {
+        primitive: PrimitiveType,
+    },
     CharacterValueOf,
     BoxedPrimitiveValueOf {
         primitive: PrimitiveType,
@@ -1226,7 +1265,9 @@ pub fn native_collection_lowered_type(
 pub(crate) fn intrinsic_call_result_abi(target: &CallTargetPlan<'_>) -> Option<ResultAbi> {
     match target {
         CallTargetPlan::NativeJavaInstance {
-            method: NativeJavaInstanceMethod::VirtualObjectToString,
+            method:
+                NativeJavaInstanceMethod::VirtualObjectToString
+                | NativeJavaInstanceMethod::VirtualObjectEquals,
             ..
         } => Some(ResultAbi::ResultWrapped),
         CallTargetPlan::NativeJavaInstance {
@@ -1263,11 +1304,14 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         CallTargetPlan::NativeJavaStatic {
             method:
                 NativeJavaStaticMethod::IntegerParseInt
-                | NativeJavaStaticMethod::IntegralBitCount
+                | NativeJavaStaticMethod::FloatingCompare { .. }
+                | NativeJavaStaticMethod::IntegralBitCount { .. }
+                | NativeJavaStaticMethod::IntegralZeroCount { .. }
                 | NativeJavaStaticMethod::MathRound {
                     source: PrimitiveType::Float,
                 }
                 | NativeJavaStaticMethod::MathToIntExact
+                | NativeJavaStaticMethod::MathGetExponent { .. }
                 | NativeJavaStaticMethod::MathFloorDiv {
                     primitive: PrimitiveType::Int,
                 }
@@ -1317,8 +1361,17 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method:
                 NativeJavaStaticMethod::MathMax { primitive }
                 | NativeJavaStaticMethod::MathMin { primitive }
-                | NativeJavaStaticMethod::MathAbs { source: primitive },
+                | NativeJavaStaticMethod::MathAbs { source: primitive }
+                | NativeJavaStaticMethod::MathMultiplyExact { primitive }
+                | NativeJavaStaticMethod::MathScalb { primitive }
+                | NativeJavaStaticMethod::IntegralUnsignedDivision { primitive, .. }
+                | NativeJavaStaticMethod::MathCopySign { primitive, .. },
         } => Some(LoweredType::from_java(JavaType::Primitive(*primitive))),
+        CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::IntegerToUnsignedLong,
+        } => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Long,
+        ))),
         CallTargetPlan::NativeJavaStatic {
             method: NativeJavaStaticMethod::FloatParseFloat,
         } => Some(LoweredType::from_java(JavaType::Primitive(
@@ -1380,6 +1433,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaInstanceMethod::StringMatches
                 | NativeJavaInstanceMethod::StringEqualsIgnoreCase
                 | NativeJavaInstanceMethod::Equals
+                | NativeJavaInstanceMethod::VirtualObjectEquals
                 | NativeJavaInstanceMethod::BitSetGet
                 | NativeJavaInstanceMethod::FileExists
                 | NativeJavaInstanceMethod::ReaderReady
@@ -1417,6 +1471,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaStaticMethod::StringJoin
                 | NativeJavaStaticMethod::StringValueOf
                 | NativeJavaStaticMethod::ObjectsToString
+                | NativeJavaStaticMethod::IntegralFormat { .. }
                 | NativeJavaStaticMethod::FloatingToString { .. },
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
@@ -1433,7 +1488,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             JavaType::Primitive(PrimitiveType::Char),
         )))),
         CallTargetPlan::NativeJavaInstance {
-            method: NativeJavaInstanceMethod::StringSplit,
+            method:
+                NativeJavaInstanceMethod::StringSplit | NativeJavaInstanceMethod::StringSplitLiteral,
             ..
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::string_split_array_value_shape(),
@@ -3057,6 +3113,10 @@ fn external_receiver_expr_type_key_with_index(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> Option<String> {
+    // Keep an explicitly imported owner qualified when selecting its API
+    // contract. Otherwise a simple-name built-in fallback can outrank the
+    // imported pack's precise return, exception and receiver ABI.
+    let qualify = |key: String| types.static_type_alias(&key).unwrap_or(&key).to_string();
     if let Expr::Call {
         receiver: inner_receiver,
         name,
@@ -3076,7 +3136,7 @@ fn external_receiver_expr_type_key_with_index(
         && let Some(key) =
             crate::stdlib::external_api_method_receiver_owner_key(java_ty, types, method_name)
     {
-        return Some(key);
+        return Some(qualify(key));
     }
     let inferred = infer_expr_type(receiver, types);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
@@ -3087,9 +3147,11 @@ fn external_receiver_expr_type_key_with_index(
                     types,
                     method_name,
                 )
-            });
+            })
+            .map(qualify);
     }
     crate::stdlib::external_api_method_receiver_owner_key(&inferred, types, method_name)
+        .map(qualify)
 }
 
 fn infer_external_field_access_type_with_index(
@@ -3597,6 +3659,24 @@ fn plan_call_target_with_external_index_impl<'a>(
         };
     }
 
+    if name == "equals"
+        && arg_count == 1
+        && let Some(receiver) = receiver
+        && source_interface_object_equals_receiver(receiver, facts, types)
+        && resolved.is_none_or(|call| {
+            call.kind == CallKind::Instance
+                && call.arg_target_types.first().is_some_and(|ty| {
+                    crate::shape_projection::java_type_is_erased_object_storage(ty)
+                        && !EffectiveFacts::new(facts).parsed_source_controls_native_carrier(ty)
+                })
+        })
+    {
+        return CallTargetPlan::NativeJavaInstance {
+            receiver,
+            method: NativeJavaInstanceMethod::VirtualObjectEquals,
+        };
+    }
+
     if let Some(receiver) = receiver
         && let Some(target) = plan_java_logging_facade_call(receiver, name)
     {
@@ -3943,6 +4023,24 @@ pub(crate) fn resolved_external_instance_call_rust_name(
         }
     }
     None
+}
+
+pub(crate) fn source_interface_object_equals_receiver(
+    receiver: &Expr,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> bool {
+    let ty = infer_expr_type(receiver, types);
+    let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+    let Some(name) = java_type_name(&ty) else {
+        return false;
+    };
+    facts.object_safe_trait_fact_for_name(name) == Some(true)
+        && java_type_owner_is_parsed_source(name, types, facts)
+        // A source overload is not the native Object protocol. The resolved
+        // declaration proof at the caller handles its exact parameter ABI.
+        && (facts.method_effect_for(name, "equals").is_none()
+            || facts.source_equals_override_for(name).is_some())
 }
 
 fn plan_java_object_to_string_fallback<'a>(
@@ -5398,6 +5496,16 @@ fn plan_native_java_receiver_call<'a>(
         (JavaType::Named { name, .. }, "format") if arg_count == 1 && is_format_receiver(name) => {
             NativeJavaInstanceMethod::DecimalFormatFormat
         }
+        (_, "equals")
+            if arg_count == 1
+                && crate::shape_projection::java_type_is_erased_object_storage(
+                    &effective_receiver_ty,
+                )
+                && !crate::effective_facts::EffectiveFacts::new(facts)
+                    .parsed_source_controls_native_carrier(&effective_receiver_ty) =>
+        {
+            NativeJavaInstanceMethod::VirtualObjectEquals
+        }
         (_, "equals") if arg_count == 1 => NativeJavaInstanceMethod::Equals,
         _ => return None,
     };
@@ -5787,6 +5895,7 @@ fn plan_native_java_static_call<'a>(
             qualified_owner = static_owner_expr_java_type_name(expr, types)?;
             let key = crate::stdlib::canonical_external_receiver_type_key(&qualified_owner);
             let key = crate::javalibs::native_java_static_owner_alias(&key).unwrap_or(&key);
+            let key = key.rsplit('.').next().unwrap_or(key);
             if !native_static_owner_qualified_names(key).contains(&qualified_owner.as_str()) {
                 return None;
             }
@@ -5918,6 +6027,13 @@ fn static_type_alias_shadows_native_owner(
 }
 
 pub(crate) fn native_static_owner_matches(owner: &str, native_owner: &str) -> bool {
+    // Qualified Java identity is stronger than a facade's lossy display key.
+    // Canonicalization may retain only StringBuilder/Math/etc.; it must not
+    // turn example.StringBuilder into java.lang.StringBuilder.
+    let qualified = native_static_owner_qualified_names(native_owner);
+    if owner.contains('.') && !qualified.is_empty() {
+        return qualified.iter().any(|known| owner == *known);
+    }
     let owner_key = crate::stdlib::canonical_external_receiver_type_key(owner);
     let owner_key =
         crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(owner_key.as_str());
@@ -5956,6 +6072,8 @@ fn native_static_owner_qualified_names(native_owner: &str) -> &'static [&'static
         "System" => &["java.lang.System"],
         "Thread" => &["java.lang.Thread"],
         "String" => &["java.lang.String"],
+        "StringBuilder" => &["java.lang.StringBuilder"],
+        "StringBuffer" => &["java.lang.StringBuffer"],
         "Optional" => &["java.util.Optional"],
         "JavaUtilOptional" => &["java.util.Optional"],
         _ => &[],
@@ -6026,6 +6144,44 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
             source: math_unary_overload_primitive(args, types, PrimitiveType::Int),
         },
         ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
+        ("Math", "multiplyExact" | "multiply_exact") => NativeJavaStaticMethod::MathMultiplyExact {
+            primitive: math_binary_overload_primitive(args, types),
+        },
+        ("Math", "getExponent" | "get_exponent") => NativeJavaStaticMethod::MathGetExponent {
+            source: math_unary_overload_primitive(args, types, PrimitiveType::Double),
+        },
+        ("Math", "scalb") => NativeJavaStaticMethod::MathScalb {
+            // Only the first parameter distinguishes the overloads. Integral
+            // and float inputs select float; a double input selects double.
+            primitive: if args
+                .and_then(|args| args.first())
+                .and_then(|arg| expr_numeric_primitive(arg, types))
+                .unwrap_or(PrimitiveType::Double)
+                == PrimitiveType::Double
+            {
+                PrimitiveType::Double
+            } else {
+                PrimitiveType::Float
+            },
+        },
+        ("Math", "copySign" | "copy_sign") => {
+            let sources = args.and_then(|args| if let [a,b] = args { Some((
+                expr_numeric_primitive(a, types).unwrap_or(PrimitiveType::Double),
+                expr_numeric_primitive(b, types).unwrap_or(PrimitiveType::Double),
+            )) } else { None }).unwrap_or((PrimitiveType::Double, PrimitiveType::Double));
+            NativeJavaStaticMethod::MathCopySign {
+                primitive: if sources.0 == PrimitiveType::Double || sources.1 == PrimitiveType::Double {
+                    PrimitiveType::Double
+                } else { PrimitiveType::Float },
+                magnitude: sources.0, sign: sources.1,
+            }
+        },
+        ("Integer" | "Long", "divideUnsigned" | "divide_unsigned" | "remainderUnsigned" | "remainder_unsigned") =>
+            NativeJavaStaticMethod::IntegralUnsignedDivision {
+                primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+                remainder: matches!(name, "remainderUnsigned" | "remainder_unsigned"),
+            },
+        ("Integer", "toUnsignedLong" | "to_unsigned_long") => NativeJavaStaticMethod::IntegerToUnsignedLong,
         ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv {
             primitive: math_binary_overload_primitive(args, types),
         },
@@ -6036,8 +6192,20 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
             NativeJavaStaticMethod::BooleanParseBoolean
         }
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
+        ("Integer" | "Long", "toHexString" | "to_hex_string" | "toOctalString" | "to_octal_string"
+            | "toBinaryString" | "to_binary_string") => NativeJavaStaticMethod::IntegralFormat {
+            primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+            radix: match name { "toHexString" | "to_hex_string" => 16, "toOctalString" | "to_octal_string" => 8, _ => 2 },
+        },
         ("Integer", "decode") => NativeJavaStaticMethod::IntegerDecode,
-        ("Integer" | "Long", "bitCount" | "bit_count") => NativeJavaStaticMethod::IntegralBitCount,
+        ("Integer" | "Long", "bitCount" | "bit_count") => NativeJavaStaticMethod::IntegralBitCount {
+            primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+        },
+        ("Integer" | "Long", "numberOfTrailingZeros" | "number_of_trailing_zeros"
+            | "numberOfLeadingZeros" | "number_of_leading_zeros") => NativeJavaStaticMethod::IntegralZeroCount {
+            primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+            leading: matches!(name, "numberOfLeadingZeros" | "number_of_leading_zeros"),
+        },
         ("Integer", "valueOf" | "value_of")
             if args
                 .and_then(|args| args.first())
@@ -6112,6 +6280,9 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Character", "valueOf" | "value_of") => NativeJavaStaticMethod::CharacterValueOf,
         ("Character", "toChars" | "to_chars") => NativeJavaStaticMethod::CharacterToChars,
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
+        ("Double" | "Float", "compare") => NativeJavaStaticMethod::FloatingCompare {
+            primitive: if receiver_simple == "Float" { PrimitiveType::Float } else { PrimitiveType::Double },
+        },
         ("Character", "isDigit" | "is_digit") => character_predicate("isDigit", "is_ascii_digit"),
         ("Character", "isLetter" | "is_letter") => character_predicate("isLetter", "is_alphabetic"),
         ("Character", "isWhitespace" | "is_whitespace") => {
@@ -6231,7 +6402,11 @@ fn math_unary_overload_primitive(
 }
 
 fn expr_numeric_primitive(expr: &Expr, types: &TypeEnv) -> Option<PrimitiveType> {
-    match infer_expr_type(expr, types) {
+    let ty = infer_expr_type(expr, types);
+    // Solved nullable boxed values retain an outer Optional carrier in the
+    // shape environment. Nullability does not change numeric overload choice;
+    // the selected primitive argument slot performs the checked unboxing.
+    match crate::types::optional_element_type(&ty).unwrap_or(ty) {
         JavaType::Primitive(primitive) => Some(primitive),
         JavaType::Named { name, args } if args.is_empty() => {
             crate::stdlib::boxed_primitive_type(&name)
@@ -6349,6 +6524,8 @@ fn plan_external_crate_receiver_call<'a>(
     }
     Some(CallTargetPlan::ExternalCrateReceiver {
         receiver,
+        receiver_type: receiver_name.clone(),
+        method_name: name.to_string(),
         crate_name: pack.rust_target.clone()?,
         rust_name: mapping
             .map(|mapping| mapping.rust_name)
@@ -7574,6 +7751,52 @@ pub fn plan_call_arguments_with_facts_and_args(
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
+    if arg_count == 1
+        && matches!(
+            name,
+            "toHexString"
+                | "to_hex_string"
+                | "toOctalString"
+                | "to_octal_string"
+                | "toBinaryString"
+                | "to_binary_string"
+        )
+        && let CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::IntegralFormat { primitive, .. },
+        } =
+            plan_call_target_with_facts_and_arity(receiver, name, arg_count, resolved, facts, types)
+    {
+        // The native formal, not the actual char/byte/boxed carrier, owns
+        // widening and checked unboxing. Share the plan with effect analysis.
+        return ArgumentLoweringPlan::Shaped(vec![RustSlotShape::for_storage(
+            JavaType::Primitive(primitive),
+        )]);
+    }
+    if name == "scalb"
+        && arg_count == 2
+        && matches!(
+            plan_call_target_with_facts_and_arity(
+                receiver, name, arg_count, resolved, facts, types,
+            ),
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::MathScalb { .. },
+            }
+        )
+    {
+        // The native boundary is shared by emission and exception analysis.
+        // Source lookalikes must first pass the ordinary owner/target proof.
+        let primitive = if expr_numeric_primitive(&args[0], types).unwrap_or(PrimitiveType::Double)
+            == PrimitiveType::Double
+        {
+            PrimitiveType::Double
+        } else {
+            PrimitiveType::Float
+        };
+        return ArgumentLoweringPlan::Shaped(vec![
+            RustSlotShape::for_storage(JavaType::Primitive(primitive)),
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        ]);
+    }
     if let Some(receiver) = receiver {
         let ty = crate::types::infer_expr_type(receiver, types);
         let base = crate::types::optional_element_type(&ty).unwrap_or(ty);
@@ -8154,38 +8377,75 @@ fn external_call_arg_shapes_core(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<Vec<RustSlotShape>> {
-    let effective_facts = EffectiveFacts::new(facts);
     let receiver_name =
         external_call_argument_receiver_key(receiver, name, arg_count, facts, types);
-    if name == "format"
-        && receiver_name
-            .as_deref()
-            .is_some_and(is_string_formatting_receiver)
-    {
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types));
+    external_call_arg_shapes_for_receiver_metadata(
+        receiver_name.as_deref(),
+        name,
+        arg_count,
+        arg_types,
+        receiver_ty.as_ref(),
+        facts,
+    )
+}
+
+/// A selected mapped target already owns its Java receiver identity. Reusing
+/// that identity also handles chained calls whose lightweight TypeEnv cannot
+/// independently recover the intermediate external return type.
+pub(crate) fn external_call_arg_shapes_for_owner(
+    receiver_name: &str,
+    name: &str,
+    arg_types: &[JavaType],
+    facts: &FactSet,
+) -> Option<Vec<RustSlotShape>> {
+    let receiver_ty = JavaType::Named {
+        name: receiver_name.to_string(),
+        args: Vec::new(),
+    };
+    external_call_arg_shapes_for_receiver_metadata(
+        Some(receiver_name),
+        name,
+        arg_types.len(),
+        Some(arg_types),
+        Some(&receiver_ty),
+        facts,
+    )
+}
+
+fn external_call_arg_shapes_for_receiver_metadata(
+    receiver_name: Option<&str>,
+    name: &str,
+    arg_count: usize,
+    arg_types: Option<&[JavaType]>,
+    receiver_ty: Option<&JavaType>,
+    facts: &FactSet,
+) -> Option<Vec<RustSlotShape>> {
+    let effective_facts = EffectiveFacts::new(facts);
+    if name == "format" && receiver_name.is_some_and(is_string_formatting_receiver) {
         return None;
     }
-    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types));
     let mut saw_fact = false;
     let shapes = (0..arg_count)
         .map(|index| {
             if let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
-                receiver_name.as_deref(),
+                receiver_name,
                 name,
                 Some(arg_count),
                 index,
             ) {
                 saw_fact = true;
-                argument_shape_from_external_effect(effect, receiver_ty.as_ref(), &effective_facts)
+                argument_shape_from_external_effect(effect, receiver_ty, &effective_facts)
             } else if let Some(effect) =
                 crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
-                    receiver_name.as_deref(),
+                    receiver_name,
                     name,
                     Some(arg_count),
                     index,
                 )
             {
                 saw_fact = true;
-                argument_shape_from_external_effect(&effect, receiver_ty.as_ref(), &effective_facts)
+                argument_shape_from_external_effect(&effect, receiver_ty, &effective_facts)
             } else {
                 unspecified_external_argument_shape(
                     name,
@@ -8829,9 +9089,7 @@ pub fn external_constructor_arg_shapes(
             }
         })
         .collect();
-    saw_fact
-        .then_some(shapes)
-        .or_else(|| external_constructor_arg_shapes(ty, rust_name, arg_count, facts))
+    saw_fact.then_some(shapes)
 }
 
 pub fn external_constructor_arg_shapes_with_args(
@@ -8885,7 +9143,14 @@ pub fn external_constructor_arg_shapes_with_args(
                 facts.external_constructor_argument_effect_for(receiver_name, arg_count, index)
             {
                 saw_fact = true;
-                argument_shape_from_external_constructor_effect(effect, &effective_facts)
+                // ABI inspection can prove borrowing/nullability for a Rust
+                // generic parameter without identifying a Java formal type.
+                // Such evidence refines the actual argument, not Object.
+                let mut effect = effect.clone();
+                if effect.parameter_type.is_none() {
+                    effect.parameter_type = Some(actual_arg_type);
+                }
+                argument_shape_from_external_constructor_effect(&effect, &effective_facts)
             } else if let Some(effect) =
                 crate::external_packs::java_platform_constructor_argument_effect_for(
                     receiver_name,
@@ -8939,7 +9204,15 @@ pub fn external_constructor_arg_shapes_with_args(
                 .and_then(|constructor| constructor.arg_types.get(index))
             {
                 saw_fact = true;
-                RustSlotShape::for_storage(parameter_type.clone())
+                // An arity-only external constructor's `_` is absence of a
+                // formal-type constraint, not an erased Object ABI. Preserve
+                // the actual argument type for overloaded/generic adapters.
+                let parameter_type = if matches!(parameter_type, JavaType::Unknown(name) if name == "_") {
+                    actual_arg_type
+                } else {
+                    parameter_type.clone()
+                };
+                RustSlotShape::for_storage(parameter_type)
             } else {
                 RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
             }
@@ -9421,6 +9694,82 @@ pub fn plan_constructor_arguments(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn arity_only_external_constructor_preserves_actual_argument_carrier() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.value dep.Value rust-crate-mapping mapped target=value_runtime\nexternal-pack-constructor dep.value dep.Value 1 mapped rust-type=Value rust=new rust-result=true\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut env = crate::types::TypeEnv::new();
+        let actual = crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Double);
+        env.insert_local("value", actual.clone());
+        let shapes = super::external_constructor_arg_shapes_with_args(
+            &crate::parser::parse_type("dep.Value"),
+            "new",
+            &[crate::java_ir::Expr::Var("value".into())],
+            &crate::signature::SignaturePlan::default(),
+            parsed.facts(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].java_ty, actual);
+        let mut facts = parsed.facts().clone();
+        facts.external_constructor_argument_effect_facts.push(
+            crate::facts::ExternalConstructorArgumentEffectFact {
+                type_name: "dep.Value".into(),
+                arg_count: 1,
+                parameter_index: 0,
+                parameter_type: None,
+                parameter_nullability: crate::facts::NullabilityState::DefinitelyNonNull,
+                argument_mutability: crate::facts::ReceiverMutabilityFact::ReadOnly,
+                alias_policy: crate::facts::ExternalArgumentAliasPolicy::NoAlias,
+                provenance: crate::facts::FactProvenance::ExternalLibraryPack,
+            },
+        );
+        let shapes = super::external_constructor_arg_shapes_with_args(
+            &crate::parser::parse_type("dep.Value"),
+            "new",
+            &[crate::java_ir::Expr::Var("value".into())],
+            &crate::signature::SignaturePlan::default(),
+            &facts,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(shapes[0].java_ty, actual);
+        assert!(
+            super::external_constructor_arg_shapes(
+                &crate::parser::parse_type("dep.Value"),
+                "new",
+                1,
+                &crate::facts::FactSet::default(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn imported_pack_receiver_outranks_simple_builtin_fallback() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.value dep.Value rust-crate-mapping mapped target=value_runtime\nexternal-pack-api dep.value dep.Value copy mapped getter read-only definitely-non-null args=0 return=dep.Value\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut facts = parsed.facts().clone();
+        let mut fallback = facts.external_api_effect_facts[0].clone();
+        fallback.receiver_type = Some("Value".into());
+        fallback.provenance = crate::facts::FactProvenance::BuiltinExternalModel;
+        facts.external_api_effect_facts.push(fallback);
+        let mut env = crate::types::TypeEnv::new();
+        env.insert_local("value", crate::parser::parse_type("Value"));
+        env.insert_static_type_alias("Value", "dep.Value");
+        let receiver = crate::java_ir::Expr::Var("value".into());
+        assert!(matches!(
+            super::plan_call_target_with_facts_and_arity(Some(&receiver), "copy", 0, None, &facts, &env),
+            super::CallTargetPlan::ExternalCrateReceiver { receiver_type, crate_name, .. }
+                if receiver_type == "dep.Value" && crate_name == "value_runtime"
+        ));
+    }
+
     #[test]
     fn native_collection_factories_share_qualified_owner_and_shadowing_proofs() {
         use super::*;
@@ -10585,6 +10934,144 @@ mod tests {
                 .optional_element_type()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn interface_this_and_value_equals_use_checked_dispatch_but_overloads_do_not() {
+        let parsed = crate::parser::parse_java_source(
+            "interface I<T> { T argument(); default boolean compare() { return this.equals(argument()); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let mut types = TypeEnv::new();
+        let owner = &resolved.program.types[0];
+        types.bind_this_type(owner);
+        types.insert_local(
+            "value",
+            JavaType::Named {
+                name: owner.name.clone(),
+                args: vec![JavaType::String],
+            },
+        );
+        for receiver in [Expr::This, Expr::Var("value".into())] {
+            assert!(matches!(
+                plan_call_target_with_facts_and_arity(
+                    Some(&receiver),
+                    "equals",
+                    1,
+                    None,
+                    &semantic.facts,
+                    &types
+                ),
+                CallTargetPlan::NativeJavaInstance {
+                    method: NativeJavaInstanceMethod::VirtualObjectEquals,
+                    ..
+                }
+            ));
+            let overload = ResolvedCall {
+                declaring_type: owner.name.clone(),
+                rust_name: "equals_string".into(),
+                kind: CallKind::Instance,
+                type_args: vec![],
+                return_type: JavaType::Primitive(PrimitiveType::Boolean),
+                arg_target_types: vec![JavaType::String],
+                arg_coercions: vec![],
+            };
+            assert!(!matches!(
+                plan_call_target_with_facts_and_arity(
+                    Some(&receiver),
+                    "equals",
+                    1,
+                    Some(&overload),
+                    &semantic.facts,
+                    &types
+                ),
+                CallTargetPlan::NativeJavaInstance {
+                    method: NativeJavaInstanceMethod::VirtualObjectEquals,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn erased_equals_owns_checked_boolean_abi_without_stealing_source_object() {
+        let receiver = Expr::Var("value".into());
+        let mut types = TypeEnv::new();
+        types.insert_local(
+            "value",
+            crate::types::optional_java_type(crate::parser::parse_hierarchy_type(
+                "java.lang.Object",
+            )),
+        );
+        let facts = FactSet::default();
+        let target = plan_call_target_with_facts_and_arity(
+            Some(&receiver),
+            "equals",
+            1,
+            None,
+            &facts,
+            &types,
+        );
+        assert!(matches!(
+            target,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::VirtualObjectEquals,
+                ..
+            }
+        ));
+        assert_eq!(
+            intrinsic_call_result_abi(&target),
+            Some(ResultAbi::ResultWrapped)
+        );
+        assert_eq!(
+            native_java_call_lowered_type(&target)
+                .unwrap()
+                .into_slot_shape()
+                .java_ty,
+            JavaType::Primitive(PrimitiveType::Boolean)
+        );
+        let parsed = crate::parser::parse_java_source(
+            "class Object { boolean equals(Object other) { return true; } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        types.insert_local("value", crate::parser::parse_hierarchy_type("Object"));
+        let target = plan_call_target_with_facts_and_arity(
+            Some(&receiver),
+            "equals",
+            1,
+            None,
+            &resolved.facts,
+            &types,
+        );
+        assert!(!matches!(
+            target,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::VirtualObjectEquals,
+                ..
+            }
+        ));
+        types.insert_local("value", JavaType::String);
+        let target = plan_call_target_with_facts_and_arity(
+            Some(&receiver),
+            "equals",
+            1,
+            None,
+            &facts,
+            &types,
+        );
+        assert!(matches!(
+            target,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::Equals,
+                ..
+            }
+        ));
+        assert_eq!(intrinsic_call_result_abi(&target), None);
     }
 
     #[test]

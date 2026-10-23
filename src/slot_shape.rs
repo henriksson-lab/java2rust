@@ -90,6 +90,22 @@ pub struct TypeCapabilities {
 }
 
 impl RustSlotShape {
+    /// A non-borrowed nullable String stores String, never the unsized str.
+    /// Keep the physical payload shape shared by rendering and projections:
+    /// borrowing this payload produces &String until a view adapter runs.
+    pub(crate) fn normalize_owned_string_payload_view(&mut self) {
+        if self.java_ty == JavaType::String
+            && self.view == ViewShape::Str
+            && matches!(
+                self.ownership,
+                OwnershipShape::Owned | OwnershipShape::CopyValue
+            )
+        {
+            self.view = ViewShape::Native;
+            self.ownership = OwnershipShape::Owned;
+        }
+    }
+
     pub(crate) fn native_child_type_at_path(ty: &JavaType, path: &[usize]) -> Option<JavaType> {
         let mut ty = ty.clone();
         for index in path {

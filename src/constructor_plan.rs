@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::facts::FactSet;
 use crate::item_assembly::is_static_field;
@@ -10,6 +10,209 @@ use crate::java_ir::{FieldDecl, Program};
 use crate::signature::SignaturePlan;
 use crate::slot_shape::RustSlotShape;
 use crate::unsupported::UnsupportedConstructorLowering;
+
+#[cfg(test)]
+mod prepublication_cause_tests {
+    use super::*;
+
+    fn candidate(source: &str) -> bool {
+        let parsed = crate::parser::parse_java_source(source);
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let ty = &parsed.program.types[0];
+        let ctor = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(ctor) => Some(ctor),
+                _ => None,
+            })
+            .unwrap();
+        let body = ctor.body.as_ref().unwrap();
+        let trailing = body
+            .statements
+            .iter()
+            .skip(1)
+            .map(|stmt| DelegatedConstructorTrailingStmt::Statement { stmt })
+            .collect::<Vec<_>>();
+        prepublication_cause_initialization_candidate(ty, ctor, body, &trailing).is_some()
+    }
+
+    #[test]
+    fn prepublication_cause_candidate_accepts_only_a_discarded_immediate_parameter_or_null_call() {
+        for call in [
+            "initCause(cause)",
+            "this.initCause(cause)",
+            "super.initCause(cause)",
+            "initCause(null)",
+        ] {
+            assert!(
+                candidate(&format!(
+                    "class Wrap extends RuntimeException {{ Wrap(String msg, Throwable cause) {{ super(msg); {call}; }} }}"
+                )),
+                "{call}"
+            );
+        }
+        assert!(candidate(
+            "class Wrap extends RuntimeException { Wrap(Throwable cause) { super(); initCause(cause); } }"
+        ));
+    }
+
+    #[test]
+    fn prepublication_cause_candidate_rejects_escape_initializer_dispatch_and_reinitialization() {
+        for source in [
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg, cause); initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { this(msg); initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); initCause(cause); initCause(null); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); observe(this); initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); Object result = initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause, Throwable other) { super(msg); other.initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); initCause(this); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); initCause(makeCause()); } }",
+            "class Wrap extends RuntimeException { Object state = publish(this); Wrap(String msg, Throwable cause) { super(msg); initCause(cause); } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); initCause(cause); } public Throwable initCause(Throwable cause) { return this; } }",
+            "class Wrap extends RuntimeException { Wrap(String msg, Throwable cause) { super(msg); initCause(cause); } public Throwable fillInStackTrace() { return this; } }",
+        ] {
+            assert!(!candidate(source), "{source}");
+        }
+    }
+}
+
+/// Ordered declaration inventory shared by enum metadata and initialization.
+/// Self-typed fields and static aliases are deliberately excluded.
+pub(crate) fn enum_requires_instance_initialization(ty: &TypeDecl) -> bool {
+    ty.kind == crate::java_ir::TypeKind::Enum
+        && ty.members.iter().any(|member| match member {
+            Member::Constructor(_) => true,
+            Member::Field(field) => {
+                !field.modifiers.contains(&crate::java_ir::Modifier::Static)
+                    || (field.is_enum_constant()
+                        && matches!(field.initializer, Some(Expr::New { body: Some(_), .. })))
+            }
+            _ => false,
+        })
+}
+
+pub fn enum_constant_fields(ty: &TypeDecl) -> impl Iterator<Item = &FieldDecl> {
+    ty.members.iter().filter_map(|member| match member {
+        Member::Field(field)
+            if ty.kind == crate::java_ir::TypeKind::Enum && field.is_enum_constant() =>
+        {
+            Some(field)
+        }
+        _ => None,
+    })
+}
+
+#[derive(Debug)]
+pub enum EnumConstructorSelection<'a> {
+    Resolved {
+        declaration: &'a crate::java_ir::ConstructorDecl,
+        call: &'a ResolvedConstructor,
+    },
+    ImplicitDefault,
+    /// Preserve an unresolved boundary; never choose the first/arity-only ctor.
+    Unresolved,
+}
+
+#[derive(Debug)]
+pub struct EnumConstantInitialization<'a> {
+    pub field: &'a FieldDecl,
+    pub ordinal: usize,
+    pub member_index: usize,
+    pub arguments: &'a [Expr],
+    pub body: Option<&'a [Member]>,
+    pub constructor: EnumConstructorSelection<'a>,
+}
+
+/// No evaluation or initializer substitution happens here. The source AST and
+/// resolved constructor ABI remain authoritative for the eventual storage,
+/// construction and publication steps, including zero-argument constants.
+#[derive(Debug)]
+pub struct EnumInitializationPlan<'a> {
+    pub owner: &'a TypeDecl,
+    pub constants: Vec<EnumConstantInitialization<'a>>,
+    pub instance_fields: Vec<&'a FieldDecl>,
+}
+
+impl<'a> EnumInitializationPlan<'a> {
+    pub fn for_type(owner: &'a TypeDecl) -> Option<Self> {
+        if owner.kind != crate::java_ir::TypeKind::Enum {
+            return None;
+        }
+        let mut constructors = HashMap::new();
+        for member in &owner.members {
+            if let Member::Constructor(constructor) = member {
+                let key = crate::signature::ConstructorKey::source_constructor(owner, constructor);
+                constructors
+                    .entry(key)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert(Some(constructor));
+            }
+        }
+        let constants = owner
+            .members
+            .iter()
+            .enumerate()
+            .filter_map(|(member_index, member)| match member {
+                Member::Field(field) if field.is_enum_constant() => Some((member_index, field)),
+                _ => None,
+            })
+            .enumerate()
+            .map(|(ordinal, (member_index, field))| {
+                let (arguments, body, constructor) = match field.initializer.as_ref() {
+                    Some(Expr::New {
+                        args,
+                        body,
+                        resolved,
+                        ..
+                    }) => {
+                        let constructor = if let Some(call) = resolved {
+                            let key = crate::signature::ConstructorKey::resolved_constructor(call);
+                            constructors.get(&key).copied().flatten().map_or(
+                                EnumConstructorSelection::Unresolved,
+                                |declaration| EnumConstructorSelection::Resolved {
+                                    declaration,
+                                    call,
+                                },
+                            )
+                        } else if constructors.is_empty() && args.is_empty() {
+                            EnumConstructorSelection::ImplicitDefault
+                        } else {
+                            EnumConstructorSelection::Unresolved
+                        };
+                        (args.as_slice(), body.as_deref(), constructor)
+                    }
+                    _ => (&[][..], None, EnumConstructorSelection::Unresolved),
+                };
+                EnumConstantInitialization {
+                    field,
+                    ordinal,
+                    member_index,
+                    arguments,
+                    body,
+                    constructor,
+                }
+            })
+            .collect();
+        let instance_fields = owner
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Field(field)
+                    if !field.modifiers.contains(&crate::java_ir::Modifier::Static) =>
+                {
+                    Some(field)
+                }
+                _ => None,
+            })
+            .collect();
+        Some(Self {
+            owner,
+            constants,
+            instance_fields,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConstructorDelegationPlan<'a> {
@@ -72,6 +275,88 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
         resolved: &'a ResolvedCall,
         args: &'a [Expr],
     },
+}
+
+/// Structural proof for an atomic, prepublication cause initialization. The
+/// caller must additionally prove a native exception base, a cause-uninitialized
+/// superclass overload, and a Throwable/null cause domain. This is not a plan
+/// for arbitrary Throwable mutation after an object has escaped.
+pub(crate) fn prepublication_cause_initialization_candidate<'a>(
+    ty: &TypeDecl,
+    ctor: &crate::java_ir::ConstructorDecl,
+    body: &'a Block,
+    trailing: &[DelegatedConstructorTrailingStmt<'_>],
+) -> Option<(&'a [Expr], &'a Expr)> {
+    if ty.members.iter().any(|member| match member {
+        Member::Field(field) => !is_static_field(field) && field.initializer.is_some(),
+        Member::Method(method) => {
+            (matches!(method.name.as_str(), "initCause" | "init_cause") && method.params.len() == 1)
+                || (matches!(
+                    method.name.as_str(),
+                    "fillInStackTrace" | "fill_in_stack_trace"
+                ) && method.params.is_empty())
+        }
+        _ => false,
+    }) {
+        return None;
+    }
+    let [
+        Stmt::ConstructorInvocation {
+            kind: ConstructorInvocationKind::Super,
+            args: super_args,
+            ..
+        },
+        Stmt::Expr(
+            call @ Expr::Call {
+                receiver,
+                name,
+                args,
+                resolved,
+                ..
+            },
+        ),
+    ] = body.statements.as_slice()
+    else {
+        return None;
+    };
+    if super_args.len() > 1
+        || !matches!(name.as_str(), "initCause" | "init_cause")
+        || !receiver
+            .as_deref()
+            .is_none_or(|receiver| matches!(receiver, Expr::This | Expr::Super))
+    {
+        return None;
+    }
+    let [cause] = args.as_slice() else {
+        return None;
+    };
+    if !matches!(cause, Expr::Literal(crate::java_ir::Literal::Null))
+        && !matches!(cause, Expr::Var(name) if ctor.params.iter().any(|param| {
+            param.name == *name || param.source_name == *name
+        }))
+    {
+        return None;
+    }
+    // Subsuming a source call is legal only if it is exactly the expression
+    // the normal delegation planner would replay, not another trailing effect.
+    let [trailing] = trailing else {
+        return None;
+    };
+    let same_call = match trailing {
+        DelegatedConstructorTrailingStmt::ExprStatement { expr } => *expr == call,
+        DelegatedConstructorTrailingStmt::Statement { stmt } => {
+            matches!(stmt, Stmt::Expr(expr) if expr == call)
+        }
+        DelegatedConstructorTrailingStmt::OwnedStatement { stmt, .. } => {
+            matches!(stmt, Stmt::Expr(expr) if expr == call)
+        }
+        DelegatedConstructorTrailingStmt::InstanceCall {
+            resolved: planned,
+            args: planned_args,
+        } => resolved.as_ref() == Some(*planned) && *planned_args == args.as_slice(),
+        _ => false,
+    };
+    same_call.then_some((super_args, cause))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,20 +544,7 @@ fn is_constructor_field_assignment_stmt(stmt: &Stmt) -> bool {
 
 fn external_exception_superclass(ty: &TypeDecl) -> Option<String> {
     let superclass = ty.extends.as_ref()?;
-    let simple = superclass
-        .rsplit(['.', '$'])
-        .next()
-        .unwrap_or(superclass.as_str());
-    matches!(
-        simple,
-        "Exception"
-            | "RuntimeException"
-            | "IllegalArgumentException"
-            | "IllegalStateException"
-            | "UserException"
-            | "GATKException"
-    )
-    .then(|| simple.to_string())
+    crate::stdlib::is_known_throwable_carrier_type(superclass).then(|| superclass.clone())
 }
 
 pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
@@ -533,6 +805,120 @@ fn constructor_field_assignments(body: Option<&Block>) -> Vec<(String, &Expr)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enum_initialization_retains_actual_declarations_arguments_and_overload_selection() {
+        use super::*;
+        let parsed = crate::parser::parse_java_source(
+            r#"
+enum E {
+    ONE(1), ALIAS(ONE), EMPTY, SPECIAL(3) { int value() { return 4; } };
+    int stored;
+    E peer;
+    static final E SELECTED = ONE;
+    E(int value) { stored = value; }
+    E(E alias) { stored = alias.stored; }
+    E() { stored = 0; }
+    int value() { return stored; }
+}
+"#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let unresolved = EnumInitializationPlan::for_type(&parsed.program.types[0]).unwrap();
+        assert_eq!(unresolved.constants.len(), 4);
+        assert!(
+            unresolved.constants.iter().all(|constant| matches!(
+                constant.constructor,
+                EnumConstructorSelection::Unresolved
+            ))
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let plan = EnumInitializationPlan::for_type(&resolved.program.types[0]).unwrap();
+        assert_eq!(
+            plan.instance_fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["stored", "peer"]
+        );
+        assert_eq!(
+            plan.constants
+                .iter()
+                .map(|constant| constant.field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ONE", "ALIAS", "EMPTY", "SPECIAL"]
+        );
+        for (ordinal, constant) in plan.constants.iter().enumerate() {
+            assert_eq!(constant.ordinal, ordinal);
+            assert_eq!(constant.member_index, ordinal);
+            let EnumConstructorSelection::Resolved { declaration, call } = &constant.constructor
+            else {
+                panic!("unresolved constant: {constant:?}");
+            };
+            assert_eq!(declaration.params.len(), constant.arguments.len());
+            assert_eq!(
+                crate::signature::ConstructorKey::source_constructor(plan.owner, declaration),
+                crate::signature::ConstructorKey::resolved_constructor(call)
+            );
+            match ordinal {
+                0 | 3 => assert_eq!(
+                    declaration.params[0].ty,
+                    crate::parser::parse_hierarchy_type("int")
+                ),
+                1 => assert_eq!(
+                    declaration.params[0].ty,
+                    crate::parser::parse_hierarchy_type("E")
+                ),
+                2 => assert!(constant.arguments.is_empty()),
+                _ => unreachable!(),
+            }
+        }
+        assert!(plan.constants[3].body.is_some());
+        assert!(
+            plan.constants[..3]
+                .iter()
+                .all(|constant| constant.body.is_none())
+        );
+        assert_eq!(
+            crate::object_model::java_enum_variant_names(plan.owner),
+            ["ONE", "ALIAS", "EMPTY", "SPECIAL"]
+        );
+    }
+
+    #[test]
+    fn zero_argument_enum_constants_retain_implicit_construction_sites() {
+        use super::*;
+        let parsed = crate::parser::parse_java_source(
+            "enum E { FIRST, SECOND; E link; static E selected = FIRST; }",
+        );
+        let owner = &parsed.program.types[0];
+        let plan = EnumInitializationPlan::for_type(owner).unwrap();
+        assert_eq!(plan.constants.len(), 2);
+        for constant in &plan.constants {
+            assert!(matches!(constant.field.initializer, Some(Expr::New { .. })));
+            assert!(constant.arguments.is_empty());
+            assert!(matches!(
+                constant.constructor,
+                EnumConstructorSelection::ImplicitDefault
+            ));
+        }
+        assert_eq!(
+            crate::object_model::java_enum_variant_names(owner),
+            ["FIRST", "SECOND"]
+        );
+        assert_eq!(plan.instance_fields.len(), 1);
+        assert!(
+            EnumInitializationPlan::for_type(
+                &crate::parser::parse_java_source("class C {}").program.types[0]
+            )
+            .is_none()
+        );
+    }
+
     use super::*;
     use crate::slot_shape::{DispatchShape, OwnershipShape, ViewShape};
 

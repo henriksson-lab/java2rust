@@ -23,5 +23,5 @@ if [[ "$source_count" != "$expected_count" ]]; then
   echo "Expected the full $expected_count-file generator dependency closure; found $source_count" >&2
   exit 1
 fi
-"$repo_root/scripts/translate-focused-package.sh" \
+bash "${FOCUSED_PACKAGE_RUNNER:-$repo_root/scripts/translate-focused-package.sh}" \
   --primary "$staging" --out "$out_dir" --jobs "${JOBS:-7}" --offline-cargo "$@"

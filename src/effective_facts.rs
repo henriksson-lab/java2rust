@@ -657,6 +657,19 @@ impl<'a> EffectiveFacts<'a> {
         )
     }
 
+    /// These concrete native text facades retain their mutable allocation
+    /// internally, including widening a builder/buffer to CharSequence.
+    pub(crate) fn native_text_reference_carrier(&self, java_ty: &JavaType) -> bool {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        let Some(name) = capability_type_name(&ty) else {
+            return false;
+        };
+        matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "StringBuilder" | "StringBuffer" | "CharSequence"
+        ) && self.allows_platform_hierarchy_fallback(name)
+    }
+
     /// Cursor element domains flow independently of the cursor's own handle.
     pub(crate) fn native_cursor_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
         self.native_cursor_element_type_for_names(
@@ -793,6 +806,39 @@ impl<'a> EffectiveFacts<'a> {
     ) -> Option<crate::stdlib::JavaCollectionKind> {
         self.retained_native_collection_kind(java_ty)
             .or_else(|| self.retained_native_map_kind(java_ty))
+    }
+
+    /// A native entry is a product of Java values, not a new collection
+    /// allocation. Its components can still retain collection/array handles.
+    pub(crate) fn native_map_entry_type_args(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<(JavaType, JavaType)> {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        if self.parsed_source_controls_native_carrier(&ty) {
+            return None;
+        }
+        let JavaType::Named { name, args } = ty else {
+            return None;
+        };
+        if args.len() != 2
+            || !matches!(
+                crate::stdlib::canonical_external_receiver_type_key(&name).as_str(),
+                "Entry" | "Map.Entry" | "java.util.Map.Entry"
+            )
+        {
+            return None;
+        }
+        Some((args[0].clone(), args[1].clone()))
+    }
+
+    pub(crate) fn native_map_entry_constructor(&self, ty: &JavaType) -> bool {
+        if self.parsed_source_controls_native_carrier(ty) {
+            return false;
+        }
+        matches!(ty, JavaType::Named { name, .. }
+            if matches!(name.rsplit('.').next().unwrap_or(name).trim(),
+                "SimpleEntry" | "SimpleImmutableEntry"))
     }
 
     fn hierarchy_overrides_for_name(
@@ -1023,6 +1069,31 @@ fn fallback_override_conflicts_with_parsed_source(
 #[cfg(test)]
 mod type_fact_lookup_session_tests {
     use super::*;
+
+    #[test]
+    fn native_text_reference_carriers_respect_source_and_user_override_precedence() {
+        let mut facts = facts_for(false);
+        let query = |name: &str, facts: &FactSet| {
+            EffectiveFacts::new(facts)
+                .native_text_reference_carrier(&crate::parser::parse_hierarchy_type(name))
+        };
+        for name in ["StringBuilder", "java.lang.StringBuffer", "CharSequence"] {
+            assert!(query(name, &facts), "{name}");
+        }
+        assert!(!query("String", &facts));
+        let mut source = facts.type_capability_overrides[0].clone();
+        source.type_name = "StringBuilder".into();
+        source.provenance = FactProvenance::ParsedSource;
+        facts.type_capability_overrides.push(source);
+        assert!(!query("StringBuilder", &facts));
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "CharSequence".into(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+        assert!(!query("CharSequence", &facts));
+        assert!(query("StringBuffer", &facts));
+    }
 
     #[test]
     fn parsed_source_name_index_retains_exact_emitted_identity_and_provenance() {

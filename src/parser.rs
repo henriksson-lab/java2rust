@@ -9,22 +9,35 @@ pub struct ParsedProgram {
 
 pub fn parse_java_source(source: &str) -> ParsedProgram {
     let mut diagnostics = DiagnosticBag::new();
-    let Some(tree) = parse_tree(source, &mut diagnostics) else {
+    let normalized = match crate::java_literal::normalize_unicode_escape_spelling(source) {
+        Ok(normalized) => normalized,
+        Err(reason) => {
+            diagnostics.error("java_unicode_escape", reason);
+            return ParsedProgram {
+                program: Program::default(),
+                diagnostics,
+            };
+        }
+    };
+    let Some(mut tree) = parse_tree(normalized.source.as_ref(), &mut diagnostics) else {
         return ParsedProgram {
             program: Program::default(),
             diagnostics,
         };
     };
+    normalized.restore_tree_ranges(&mut tree);
     let root = tree.root_node();
     collect_syntax_diagnostics(root, &mut diagnostics);
 
     let imports = parse_imports(root, source);
     let mut types = parse_top_level_types(root, source, &mut diagnostics);
     qualify_java_sql_imported_types(&mut types, &imports);
+    let package = parse_package(root, source);
+    crate::java_naming::record_source_type_names(package.as_deref(), &mut types);
 
     ParsedProgram {
         program: Program {
-            package: parse_package(root, source),
+            package,
             imports,
             types,
         },
@@ -584,6 +597,7 @@ fn parse_class_decl(
     }
 
     TypeDecl {
+        source_names: None,
         kind: TypeKind::Class,
         name,
         type_params: parse_type_parameter_names(node, source),
@@ -665,6 +679,7 @@ fn parse_interface_decl(
     }
 
     TypeDecl {
+        source_names: None,
         static_init_blocks: Vec::new(),
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
@@ -701,6 +716,7 @@ fn parse_enum_decl(
     }
 
     TypeDecl {
+        source_names: None,
         static_init_blocks,
         kind: TypeKind::Enum,
         name,
@@ -803,6 +819,7 @@ fn parse_record_decl(
     }
 
     TypeDecl {
+        source_names: None,
         static_init_blocks: Vec::new(),
         kind: TypeKind::Record,
         name,
@@ -995,7 +1012,7 @@ fn parse_enum_constant_decl(
         .into_iter()
         .find(|child| child.kind() == "class_body")
         .map(|body| parse_anonymous_class_body(body, source));
-    let initializer = (!args.is_empty() || body.is_some()).then(|| Expr::New {
+    let initializer = Some(Expr::New {
         infer_type_arguments: false,
         ty: JavaType::Named {
             name: enum_name.to_string(),
@@ -1012,7 +1029,12 @@ fn parse_enum_constant_decl(
             name: enum_name.to_string(),
             args: Vec::new(),
         },
-        modifiers: vec![Modifier::Public, Modifier::Static, Modifier::Final],
+        modifiers: vec![
+            Modifier::Public,
+            Modifier::Static,
+            Modifier::Final,
+            Modifier::EnumConstant,
+        ],
         initializer,
         span: span(*node),
     })
@@ -1047,6 +1069,7 @@ fn parse_annotation_type_decl(
     }
 
     TypeDecl {
+        source_names: None,
         static_init_blocks: Vec::new(),
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
@@ -2082,10 +2105,9 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "true" => Expr::Literal(Literal::Bool(true)),
         "false" => Expr::Literal(Literal::Bool(false)),
         "null_literal" => Expr::Literal(Literal::Null),
-        "string_literal" => {
-            Expr::Literal(Literal::String(parse_string_literal(text(node, source))))
-        }
-        "character_literal" => Expr::Literal(Literal::Char(parse_char_literal(text(node, source)))),
+        "string_literal" | "character_literal" => crate::java_literal::decode(text(node, source))
+            .map(Expr::Literal)
+            .unwrap_or_else(|reason| unsupported_expr_reason(reason.to_string())),
         "field_access" => {
             let object = node.child_by_field_name("object").map(|n| {
                 if n.kind() == "identifier" {
@@ -2183,9 +2205,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             }
         }
         "unary_expression" => {
-            let expr = first_named_child(node)
-                .map(|node| parse_expr_node(node, source))
-                .unwrap_or_else(|| unsupported_expr_node(node, "unary_expression without operand"));
+            let operand = first_named_child(node);
             let raw = text(node, source).trim_start();
             let op = if raw.starts_with('!') {
                 UnaryOp::Not
@@ -2198,6 +2218,25 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             } else {
                 return unsupported_expr_node(node, "unsupported unary_expression operator");
             };
+            if op == UnaryOp::Neg
+                && let Some(operand) = operand
+                && operand.kind() == "decimal_integer_literal"
+            {
+                // JLS decimal boundary magnitudes are legal only as the
+                // direct operand of unary minus. Keep ordinary positive and
+                // parenthesized out-of-range literals invalid.
+                let digits = text(operand, source).replace('_', "");
+                match digits.as_str() {
+                    "2147483648" => return Expr::Literal(Literal::Int(i32::MIN)),
+                    "9223372036854775808L" | "9223372036854775808l" => {
+                        return Expr::Literal(Literal::Long(i64::MIN));
+                    }
+                    _ => {}
+                }
+            }
+            let expr = operand
+                .map(|node| parse_expr_node(node, source))
+                .unwrap_or_else(|| unsupported_expr_node(node, "unary_expression without operand"));
             Expr::Unary {
                 op,
                 expr: Box::new(expr),
@@ -3139,6 +3178,14 @@ fn preserve_explicit_runtime_type_name(src: &str) -> bool {
     // Qualification distinguishes a real platform wrapper from a lexical
     // type parameter with the same simple spelling. Keep that evidence until
     // binder normalization and source-name resolution have run.
+    // Object also determines whether equals is the native virtual protocol or
+    // merely a source overload. Retain non-platform owners too, including
+    // javax-prefixed source names that the general name shortening excludes.
+    if src.rsplit_once('.').is_some_and(|(_, name)| {
+        name == "Object" || crate::java_append_plan::NATIVE_BUILDER_TYPES.contains(&name)
+    }) {
+        return true;
+    }
     if src
         .strip_prefix("java.lang.")
         .is_some_and(|name| crate::stdlib::boxed_primitive_type(name).is_some())
@@ -3347,174 +3394,14 @@ fn parse_hex_floating_literal(src: &str) -> Expr {
         Some('d') | Some('D') => (&src[..src.len() - 1], false),
         _ => (src.as_str(), false),
     };
-    let Some((mantissa, exponent)) = body.split_once(['p', 'P']) else {
-        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
-    };
-    let Some(mantissa) = mantissa
-        .strip_prefix("0x")
-        .or_else(|| mantissa.strip_prefix("0X"))
-    else {
-        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
-    };
-    let Ok(exponent) = exponent.parse::<i32>() else {
-        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
-    };
-    let Some(value) = parse_hex_float_mantissa(mantissa) else {
-        return unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"));
-    };
-    let value = value * 2f64.powi(exponent);
-    if is_float {
-        Expr::Literal(Literal::Float(value as f32))
+    let parsed = if is_float {
+        crate::java_float_parse::java_float_parse_f32(body).map(Literal::Float)
     } else {
-        Expr::Literal(Literal::Double(value))
-    }
-}
-
-fn parse_hex_float_mantissa(mantissa: &str) -> Option<f64> {
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let mut value = 0f64;
-    for ch in whole.chars() {
-        value = value * 16f64 + ch.to_digit(16)? as f64;
-    }
-    let mut place = 1f64 / 16f64;
-    for ch in fraction.chars() {
-        value += ch.to_digit(16)? as f64 * place;
-        place /= 16f64;
-    }
-    Some(value)
-}
-
-fn parse_string_literal(src: &str) -> String {
-    let src = src.trim();
-    if src.starts_with("\"\"\"") && src.ends_with("\"\"\"") && src.len() >= 6 {
-        parse_text_block_literal(src)
-    } else {
-        // Remove exactly the lexical delimiters. `trim_*_matches` also strips
-        // an escaped quote at either edge: Java `"\\\""` became a single
-        // trailing backslash before escape decoding, which in turn made
-        // ordinary quote-building code emit `\\` instead of `\"`.
-        let inner = src
-            .strip_prefix('"')
-            .and_then(|src| src.strip_suffix('"'))
-            .unwrap_or(src);
-        parse_java_string_escapes(inner)
-    }
-}
-
-fn parse_text_block_literal(src: &str) -> String {
-    let raw = &src[3..src.len() - 3];
-    let mut content = raw.replace("\r\n", "\n").replace('\r', "\n");
-    if let Some(rest) = content.strip_prefix('\n') {
-        content = rest.to_string();
-    }
-
-    let mut lines = content
-        .split('\n')
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>();
-    let incidental_indent = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let is_closing_delimiter_line = index + 1 == lines.len();
-            if !is_closing_delimiter_line && line.trim().is_empty() {
-                None
-            } else {
-                Some(java_whitespace_indent(line))
-            }
-        })
-        .min()
-        .unwrap_or(0);
-
-    for line in &mut lines {
-        *line = strip_java_whitespace_indent(line, incidental_indent)
-            .trim_end_matches(java_text_block_trailing_whitespace)
-            .to_string();
-    }
-
-    parse_java_string_escapes(&lines.join("\n"))
-}
-
-fn java_whitespace_indent(line: &str) -> usize {
-    line.chars()
-        .take_while(|ch| java_text_block_trailing_whitespace(*ch))
-        .count()
-}
-
-fn strip_java_whitespace_indent(line: &str, indent: usize) -> &str {
-    let mut byte_index = 0usize;
-    for (count, (index, ch)) in line.char_indices().enumerate() {
-        if count >= indent || !java_text_block_trailing_whitespace(ch) {
-            byte_index = index;
-            return &line[byte_index..];
-        }
-        byte_index = index + ch.len_utf8();
-    }
-    if line.chars().count() >= indent {
-        ""
-    } else {
-        &line[byte_index..]
-    }
-}
-
-fn java_text_block_trailing_whitespace(ch: char) -> bool {
-    matches!(ch, ' ' | '\t' | '\u{000c}')
-}
-
-fn parse_java_string_escapes(src: &str) -> String {
-    let mut out = String::new();
-    let mut chars = src.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('\n') => {}
-            Some('\r') => {
-                if matches!(chars.peek(), Some('\n')) {
-                    chars.next();
-                }
-            }
-            Some('b') => out.push('\u{0008}'),
-            Some('t') => out.push('\t'),
-            Some('n') => out.push('\n'),
-            Some('f') => out.push('\u{000c}'),
-            Some('r') => out.push('\r'),
-            Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
-            Some('\\') => out.push('\\'),
-            Some('s') => out.push(' '),
-            Some(other @ '0'..='7') => {
-                let mut digits = String::from(other);
-                while digits.len() < 3 && matches!(chars.peek(), Some('0'..='7')) {
-                    digits.push(chars.next().unwrap());
-                }
-                if let Ok(value) = u32::from_str_radix(&digits, 8) {
-                    if let Some(ch) = char::from_u32(value) {
-                        out.push(ch);
-                    }
-                }
-            }
-            Some(other) => out.push(other),
-            None => out.push('\\'),
-        }
-    }
-    out
-}
-
-fn parse_char_literal(src: &str) -> char {
-    let inner = src.trim().trim_start_matches('\'').trim_end_matches('\'');
-    match inner {
-        "\\n" => '\n',
-        "\\r" => '\r',
-        "\\t" => '\t',
-        "\\0" => '\0',
-        "\\'" => '\'',
-        "\\\"" => '"',
-        "\\\\" => '\\',
-        _ => inner.chars().next().unwrap_or('\0'),
-    }
+        crate::java_float_parse::java_float_parse_f64(body).map(Literal::Double)
+    };
+    parsed.map(Expr::Literal).unwrap_or_else(|_| {
+        unsupported_expr_reason(format!("invalid Java hex floating-point literal: {src}"))
+    })
 }
 
 fn compound_assignment_value(op: Option<&str>, target: Expr, value: Expr) -> Expr {
@@ -3830,6 +3717,36 @@ fn java_type_suffix_name(name: &str) -> String {
 
 #[cfg(test)]
 mod naming_tests {
+    #[test]
+    fn explicit_java_lang_object_retains_its_owner_before_source_resolution() {
+        use super::*;
+        let expected = JavaType::Named {
+            name: "java.lang.Object".into(),
+            args: vec![],
+        };
+        assert_eq!(parse_hierarchy_type("java.lang.Object"), expected);
+        assert_eq!(
+            parse_hierarchy_type("javax.custom.Object"),
+            JavaType::Named {
+                name: "javax.custom.Object".into(),
+                args: vec![]
+            },
+        );
+        let parsed = parse_java_source(
+            "class Object {} class C { java.lang.Object item; boolean equals(java.lang.Object value) { return false; } }",
+        );
+        assert!(!parsed.diagnostics.has_errors());
+        let members = &parsed.program.types[1].members;
+        let Member::Field(field) = &members[0] else {
+            panic!("missing field")
+        };
+        assert_eq!(field.ty, expected);
+        let Member::Method(method) = &members[1] else {
+            panic!("missing equals")
+        };
+        assert_eq!(method.params[0].ty, expected);
+    }
+
     use super::to_snake_case_unescaped;
 
     #[test]
@@ -3848,6 +3765,91 @@ mod naming_tests {
 #[cfg(test)]
 mod expression_tests {
     use super::*;
+
+    #[test]
+    fn unicode_spelling_normalization_preserves_original_source_ranges() {
+        let source = "class C {\n static String a = \"😀\\uuuu0041\";\n static String b = \"\\uu0042\";\n static int f() { return 3; }\n}";
+        let parsed = parse_java_source(source);
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let owner = &parsed.program.types[0];
+        assert_eq!(&source[owner.span.start()..owner.span.end()], source);
+        let Member::Field(a) = &owner.members[0] else {
+            panic!("field a")
+        };
+        // Field spans name the variable_declarator, not its containing
+        // field_declaration (parse_field_decl); retain that existing contract.
+        assert_eq!(
+            &source[a.span.start()..a.span.end()],
+            "a = \"😀\\uuuu0041\""
+        );
+        assert_eq!(
+            a.initializer,
+            Some(Expr::Literal(Literal::String("😀A".to_string())))
+        );
+        let Member::Field(b) = &owner.members[1] else {
+            panic!("field b")
+        };
+        assert_eq!(&source[b.span.start()..b.span.end()], "b = \"\\uu0042\"");
+        assert_eq!(
+            b.initializer,
+            Some(Expr::Literal(Literal::String("B".to_string())))
+        );
+        let Member::Method(method) = &owner.members[2] else {
+            panic!("method")
+        };
+        assert_eq!(
+            &source[method.span.start()..method.span.end()],
+            "static int f() { return 3; }"
+        );
+    }
+
+    #[test]
+    fn literals_retain_utf16_values_and_their_java_types() {
+        for (source, expected) in [
+            (r"'\ud800'", Literal::CharUtf16(0xd800)),
+            (r"'\377'", Literal::Char('ÿ')),
+            (r#""\udfff""#, Literal::StringUtf16(vec![0xdfff])),
+            (r#""\ud83d\ude00""#, Literal::String("😀".to_string())),
+            (r#""\400""#, Literal::String(" 0".to_string())),
+        ] {
+            let Expr::Literal(actual) = parse_expr(source) else {
+                panic!("{source}")
+            };
+            assert_eq!(actual, expected);
+            let ty = if source.starts_with('\'') {
+                JavaType::Primitive(PrimitiveType::Char)
+            } else {
+                JavaType::String
+            };
+            assert_eq!(crate::types::literal_type(&actual), ty);
+        }
+    }
+
+    #[test]
+    fn decimal_signed_minima_require_the_direct_unary_minus_context() {
+        for expression in ["-2147483648", "-2_147_483_648"] {
+            assert_eq!(
+                parse_expr(expression),
+                Expr::Literal(Literal::Int(i32::MIN))
+            );
+        }
+        for expression in ["-9223372036854775808L", "-9_223_372_036_854_775_808l"] {
+            assert_eq!(
+                parse_expr(expression),
+                Expr::Literal(Literal::Long(i64::MIN))
+            );
+        }
+        for expression in ["2147483648", "9223372036854775808L"] {
+            assert!(
+                matches!(parse_expr(expression), Expr::Unsupported { .. }),
+                "{expression}"
+            );
+        }
+        assert!(
+            matches!(parse_expr("-(2147483648)"), Expr::Unary { expr, .. }
+            if matches!(*expr, Expr::Unsupported { .. }))
+        );
+    }
 
     #[test]
     fn conditional_comments_do_not_replace_expression_operands() {

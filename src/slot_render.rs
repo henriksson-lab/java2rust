@@ -76,6 +76,8 @@ impl SlotNoDefaultMessagePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotDefaultValuePolicy {
     EmptyStringView,
+    EmptyStringReferenceView,
+    EmptyIdentityString,
     EmptySliceView,
     PrimitiveBooleanZero,
     PrimitiveCharZero,
@@ -122,6 +124,7 @@ pub enum SlotValueRustTypePolicy {
         java_ty: JavaType,
     },
     StringView,
+    StringReferenceView,
     SliceView {
         element_ty: JavaType,
         nested_array: bool,
@@ -272,6 +275,18 @@ fn rust_type_for_slot_with_effective_facts_and_representations(
     effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(rendered) =
+        synchronized_functional_slot_rust_type(shape, &effective_facts, |local| {
+            rust_type_for_slot_with_effective_facts_and_representations(
+                local,
+                facts,
+                effective_facts,
+                representations,
+            )
+        })
+    {
+        return rendered;
+    }
     if let Some(rendered) = carrier_borrow_slot_rust_type(shape, |owned| {
         rust_type_for_slot_with_effective_facts_and_representations(
             owned,
@@ -389,13 +404,7 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
         // Likewise, `Option` stores a string value rather than a borrowed
         // `str` view. Rendering the inherited view here would produce the
         // unsized `Option<str>` for nullable Java `String` locals/returns.
-        if matches!(element_shape.java_ty, JavaType::String)
-            && element_shape.view == ViewShape::Str
-            && matches!(element_shape.ownership, OwnershipShape::Owned)
-        {
-            element_shape.view = ViewShape::Native;
-            element_shape.ownership = OwnershipShape::Owned;
-        }
+        element_shape.normalize_owned_string_payload_view();
         // Through the wrapping entry point: the element is where the handle
         // belongs, giving `Option<Rc<T>>`.
         return RustType::Option(Box::new(
@@ -539,7 +548,7 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
             } else if matches!(
                 &shape.java_ty,
                 JavaType::Named { name, .. } | JavaType::Unknown(name)
-                    if crate::stdlib::is_java_platform_facade_type_name(name)
+                    if crate::stdlib::is_java_platform_value_carrier_type_name(name)
             ) && !effective_facts.has_parsed_source_definition(&shape.java_ty)
             {
                 // A concrete platform-facade constraint is authoritative: it
@@ -623,6 +632,11 @@ pub fn rust_type_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(rendered) = synchronized_functional_slot_rust_type(shape, facts, |local| {
+        rust_type_for_slot_with_effective_facts(local, facts)
+    }) {
+        return rendered;
+    }
     if let Some(rendered) = carrier_borrow_slot_rust_type(shape, |owned| {
         rust_type_for_slot_with_effective_facts(owned, facts)
     }) {
@@ -656,6 +670,7 @@ pub fn rust_type_for_slot_with_effective_facts(
         }
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
+        element_shape.normalize_owned_string_payload_view();
         return RustType::Option(Box::new(rust_type_for_slot_with_effective_facts(
             &element_shape,
             facts,
@@ -696,6 +711,63 @@ pub fn rust_type_for_slot_with_effective_facts(
     let rendered =
         render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts));
     shared_handle_slot_rust_type(shape, facts, rendered)
+}
+
+pub(crate) fn functional_slot_carrier_name(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> Option<String> {
+    let ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    facts.native_functional_carrier(&ty)?;
+    let name = match &ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return None,
+    };
+    let local = rust_name_for_java_named_type(name);
+    Some(if shape.native_allocation.sync() {
+        crate::stdlib::synchronized_functional_carrier_name(&local)
+    } else {
+        local
+    })
+}
+
+fn synchronized_functional_slot_rust_type(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    render_local: impl FnOnce(&RustSlotShape) -> RustType,
+) -> Option<RustType> {
+    if !shape.native_allocation.sync() {
+        return None;
+    }
+    let synchronized = functional_slot_carrier_name(shape, facts)?;
+    let mut local = shape.clone();
+    local.native_allocation = StoragePlacement::default();
+    let local_name = functional_slot_carrier_name(&local, facts)?;
+    fn project(ty: RustType, local: &str, synchronized: &str) -> RustType {
+        match ty {
+            RustType::Named(name) if name == local => RustType::Named(synchronized.into()),
+            RustType::Generic { base, args } if base == local => RustType::Generic {
+                base: synchronized.into(),
+                args,
+            },
+            RustType::Option(inner) => {
+                RustType::Option(Box::new(project(*inner, local, synchronized)))
+            }
+            RustType::Ref {
+                mutable,
+                lifetime,
+                inner,
+            } => RustType::Ref {
+                mutable,
+                lifetime,
+                inner: Box::new(project(*inner, local, synchronized)),
+            },
+            other => other,
+        }
+    }
+    Some(project(render_local(&local), &local_name, &synchronized))
 }
 
 pub(crate) fn semantic_hash_collection_base(ty: &JavaType) -> Option<&'static str> {
@@ -784,7 +856,8 @@ fn project_nested_native_allocations(
         JavaType::Named { args, .. }
             if crate::stdlib::java_collection_kind_for_type(&java_ty).is_some()
                 || facts.native_iterable_element_type(&java_ty).is_some()
-                || facts.native_list_cursor_element_type(&java_ty).is_some() =>
+                || facts.native_list_cursor_element_type(&java_ty).is_some()
+                || facts.native_map_entry_type_args(&java_ty).is_some() =>
         {
             args.clone()
         }
@@ -800,6 +873,13 @@ fn project_nested_native_allocations(
         wrap_child(&slot, facts, child)
     };
     match rendered {
+        RustType::Tuple(items) if items.len() == children.len() => RustType::Tuple(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, child)| project(index, child))
+                .collect(),
+        ),
         RustType::Vec(element) => RustType::Vec(Box::new(project(0, *element))),
         RustType::Slice(element) => RustType::Slice(Box::new(project(0, *element))),
         RustType::Generic { base, args } if args.len() == children.len() => RustType::Generic {
@@ -1091,6 +1171,11 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
                 java_ty: shape.java_ty.clone(),
             }
         }
+        (ViewShape::Str, _, JavaType::String)
+            if facts.uses_java_string_identity_representation() =>
+        {
+            SlotValueRustTypePolicy::StringReferenceView
+        }
         (ViewShape::Str, _, _) if content.string_content() => SlotValueRustTypePolicy::StringView,
         (ViewShape::Slice, _, java_ty)
             if crate::types::ndarray_array2_element_type(java_ty).is_some() =>
@@ -1224,6 +1309,7 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
             }
         }
         SlotValueRustTypePolicy::StringView => RustType::Str,
+        SlotValueRustTypePolicy::StringReferenceView => RustType::Named("JavaString".to_string()),
         SlotValueRustTypePolicy::SliceView {
             element_ty,
             nested_array,
@@ -1602,7 +1688,12 @@ pub fn slot_default_value_policy_with_effective_facts(
     let content = slot_content_capability_policy_with_effective_facts(&shape.java_ty, facts);
     match (&shape.ownership, &shape.view, &shape.java_ty) {
         (OwnershipShape::SharedBorrow, ViewShape::Str, _) if content.string_content() => {
-            SlotDefaultValuePolicy::EmptyStringView
+            if shape.java_ty == JavaType::String && facts.uses_java_string_identity_representation()
+            {
+                SlotDefaultValuePolicy::EmptyStringReferenceView
+            } else {
+                SlotDefaultValuePolicy::EmptyStringView
+            }
         }
         (OwnershipShape::SharedBorrow, ViewShape::Slice, _) => {
             SlotDefaultValuePolicy::EmptySliceView
@@ -1621,7 +1712,11 @@ pub fn slot_default_value_policy_with_effective_facts(
         }
         (_, _, JavaType::Primitive(_)) => SlotDefaultValuePolicy::PrimitiveNumericZero,
         (OwnershipShape::Owned, ViewShape::Native, JavaType::String) => {
-            SlotDefaultValuePolicy::EmptyString
+            if facts.uses_java_string_identity_representation() {
+                SlotDefaultValuePolicy::EmptyIdentityString
+            } else {
+                SlotDefaultValuePolicy::EmptyString
+            }
         }
         (OwnershipShape::Owned, ViewShape::Native, JavaType::Named { name, args })
             if external_crate_mapped_named_rust_type(name, args, facts).is_some() =>
@@ -1708,12 +1803,22 @@ pub(crate) fn slot_no_default_message_policy(
 fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
     match policy {
         SlotDefaultValuePolicy::EmptyStringView => RustExpr::Literal("\"\"".to_string()),
+        SlotDefaultValuePolicy::EmptyStringReferenceView => RustExpr::Call {
+            function: Box::new(RustExpr::path(["JavaString", "empty_ref"])),
+            args: Vec::new(),
+        },
+        SlotDefaultValuePolicy::EmptyIdentityString => RustExpr::Call {
+            function: Box::new(RustExpr::path(["JavaString", "intern_literal"])),
+            args: vec![RustExpr::Literal("\"\"".to_string())],
+        },
         SlotDefaultValuePolicy::EmptySliceView => RustExpr::Unary {
             op: "&".to_string(),
             expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
         },
         SlotDefaultValuePolicy::PrimitiveBooleanZero => RustExpr::Literal("false".to_string()),
-        SlotDefaultValuePolicy::PrimitiveCharZero => RustExpr::Literal("'\\0'".to_string()),
+        SlotDefaultValuePolicy::PrimitiveCharZero => {
+            RustExpr::Literal("JavaCodeUnit(0u16)".to_string())
+        }
         SlotDefaultValuePolicy::PrimitiveNumericZero => RustExpr::Literal("0".to_string()),
         SlotDefaultValuePolicy::PrimitiveFloatZero => RustExpr::Literal("0f32".to_string()),
         SlotDefaultValuePolicy::PrimitiveDoubleZero => RustExpr::Literal("0f64".to_string()),
@@ -1763,7 +1868,7 @@ fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
                     PrimitiveType::Boolean => RustExpr::Literal("false".to_string()),
                     PrimitiveType::Float => RustExpr::Literal("0f32".to_string()),
                     PrimitiveType::Double => RustExpr::Literal("0f64".to_string()),
-                    PrimitiveType::Char => RustExpr::Literal("'\\0'".to_string()),
+                    PrimitiveType::Char => RustExpr::Literal("JavaCodeUnit(0u16)".to_string()),
                     _ => RustExpr::Literal("0".to_string()),
                 },
             ],
@@ -2588,9 +2693,9 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         JavaType::Primitive(PrimitiveType::Short) => {
             NativeJavaRustTypePolicy::Direct { ty: RustType::I16 }
         }
-        JavaType::Primitive(PrimitiveType::Char) => {
-            NativeJavaRustTypePolicy::Direct { ty: RustType::Char }
-        }
+        JavaType::Primitive(PrimitiveType::Char) => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named("JavaCodeUnit".to_string()),
+        },
         JavaType::Primitive(PrimitiveType::Int) => {
             NativeJavaRustTypePolicy::Direct { ty: RustType::I32 }
         }
@@ -2750,12 +2855,23 @@ pub fn slot_content_capability_policy_with_effective_facts(
 pub(crate) fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustTypePolicy {
     let rust_name = rust_name_for_java_named_type(name);
     let policy = match name {
+        name if crate::java_append_plan::qualified_native_builder_name(name).is_some() => {
+            NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Named(
+                    crate::java_append_plan::qualified_native_builder_name(name)
+                        .unwrap()
+                        .into(),
+                ),
+            }
+        }
         "Integer" => NativeJavaRustTypePolicy::Direct { ty: RustType::I32 },
         "Long" => NativeJavaRustTypePolicy::Direct { ty: RustType::I64 },
         "Double" => NativeJavaRustTypePolicy::Direct { ty: RustType::F64 },
         "Float" => NativeJavaRustTypePolicy::Direct { ty: RustType::F32 },
         "Boolean" => NativeJavaRustTypePolicy::Direct { ty: RustType::Bool },
-        "Character" => NativeJavaRustTypePolicy::Direct { ty: RustType::Char },
+        "Character" => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named("JavaCodeUnit".to_string()),
+        },
         "Object" | "java.lang.Object" => NativeJavaRustTypePolicy::Direct {
             ty: erased_object_rust_type(),
         },
@@ -3838,6 +3954,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nullable_string_views_are_sized_in_both_renderers() {
+        let parsed = crate::parser::parse_java_source("class Owner {}");
+        let facts = FactSet::default();
+        let representations = crate::representation::plan_representations(&parsed.program, &facts);
+        for ownership in [
+            OwnershipShape::Owned,
+            OwnershipShape::CopyValue,
+            OwnershipShape::SharedBorrow,
+            OwnershipShape::MutableBorrow,
+        ] {
+            let mut shape =
+                RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::String));
+            shape.ownership = ownership;
+            shape.view = ViewShape::Str;
+            let expected = match ownership {
+                OwnershipShape::Owned | OwnershipShape::CopyValue => "Option<String>",
+                OwnershipShape::SharedBorrow => "Option<&str>",
+                OwnershipShape::MutableBorrow => "Option<&mut str>",
+            };
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, &facts)),
+                expected
+            );
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn generic_carrier_borrow_keeps_rc_arc_and_nullable_outer_order() {
         let parsed = crate::parser::parse_java_source("class Packet {}");
         for threaded in [false, true] {
@@ -4850,7 +5001,7 @@ class ConcreteReader extends Reader<Item> {}
             ("Float", "Vec<f32>"),
             ("Double", "Vec<f64>"),
             ("Boolean", "Vec<bool>"),
-            ("Character", "Vec<char>"),
+            ("Character", "Vec<JavaCodeUnit>"),
         ] {
             let values = JavaType::Named {
                 name: "java.util.ArrayList".to_string(),
@@ -5069,6 +5220,21 @@ class ConcreteReader extends Reader<Item> {}
             )),
             "Vec<JavaString>"
         );
+        for (ownership, expected) in [
+            (OwnershipShape::Owned, "Option<JavaString>"),
+            (OwnershipShape::CopyValue, "Option<JavaString>"),
+            (OwnershipShape::SharedBorrow, "Option<&JavaString>"),
+            (OwnershipShape::MutableBorrow, "Option<&mut JavaString>"),
+        ] {
+            let mut shape =
+                RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::String));
+            shape.ownership = ownership;
+            shape.view = ViewShape::Str;
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, &facts)),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -5080,7 +5246,7 @@ class ConcreteReader extends Reader<Item> {}
                 &shape,
                 &FactSet::default(),
             )),
-            "'\\0'"
+            "JavaCodeUnit(0u16)"
         );
     }
 }

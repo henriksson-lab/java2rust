@@ -1,0 +1,158 @@
+Compiled from "Angle.java"
+public final class org.apache.commons.numbers.angle.Angle$Deg extends org.apache.commons.numbers.angle.Angle {
+  public static final org.apache.commons.numbers.angle.Angle$Deg ZERO;
+    descriptor: Lorg/apache/commons/numbers/angle/Angle$Deg;
+  public static final java.util.function.DoubleUnaryOperator WITHIN_0_AND_360;
+    descriptor: Ljava/util/function/DoubleUnaryOperator;
+  private org.apache.commons.numbers.angle.Angle$Deg(double);
+    descriptor: (D)V
+
+  public static org.apache.commons.numbers.angle.Angle$Deg of(double);
+    descriptor: (D)Lorg/apache/commons/numbers/angle/Angle$Deg;
+
+  public org.apache.commons.numbers.angle.Angle$Turn toTurn();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Turn;
+
+  public org.apache.commons.numbers.angle.Angle$Rad toRad();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Rad;
+
+  public org.apache.commons.numbers.angle.Angle$Deg toDeg();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Deg;
+
+  public static java.util.function.DoubleUnaryOperator normalizer(double);
+    descriptor: (D)Ljava/util/function/DoubleUnaryOperator;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Angle.java"
+final class org.apache.commons.numbers.angle.Angle$Normalizer implements java.util.function.DoubleUnaryOperator {
+  private final double lo;
+    descriptor: D
+  private final double hi;
+    descriptor: D
+  private final double period;
+    descriptor: D
+  private final org.apache.commons.numbers.angle.Reduce reduce;
+    descriptor: Lorg/apache/commons/numbers/angle/Reduce;
+  org.apache.commons.numbers.angle.Angle$Normalizer(double, double);
+    descriptor: (DD)V
+
+  public double applyAsDouble(double);
+    descriptor: (D)D
+}
+Compiled from "Angle.java"
+public final class org.apache.commons.numbers.angle.Angle$Rad extends org.apache.commons.numbers.angle.Angle {
+  public static final org.apache.commons.numbers.angle.Angle$Rad ZERO;
+    descriptor: Lorg/apache/commons/numbers/angle/Angle$Rad;
+  public static final org.apache.commons.numbers.angle.Angle$Rad PI;
+    descriptor: Lorg/apache/commons/numbers/angle/Angle$Rad;
+  public static final org.apache.commons.numbers.angle.Angle$Rad TWO_PI;
+    descriptor: Lorg/apache/commons/numbers/angle/Angle$Rad;
+  public static final java.util.function.DoubleUnaryOperator WITHIN_0_AND_2PI;
+    descriptor: Ljava/util/function/DoubleUnaryOperator;
+  public static final java.util.function.DoubleUnaryOperator WITHIN_MINUS_PI_AND_PI;
+    descriptor: Ljava/util/function/DoubleUnaryOperator;
+  private org.apache.commons.numbers.angle.Angle$Rad(double);
+    descriptor: (D)V
+
+  public static org.apache.commons.numbers.angle.Angle$Rad of(double);
+    descriptor: (D)Lorg/apache/commons/numbers/angle/Angle$Rad;
+
+  public org.apache.commons.numbers.angle.Angle$Turn toTurn();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Turn;
+
+  public org.apache.commons.numbers.angle.Angle$Rad toRad();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Rad;
+
+  public org.apache.commons.numbers.angle.Angle$Deg toDeg();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Deg;
+
+  public static java.util.function.DoubleUnaryOperator normalizer(double);
+    descriptor: (D)Ljava/util/function/DoubleUnaryOperator;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Angle.java"
+public final class org.apache.commons.numbers.angle.Angle$Turn extends org.apache.commons.numbers.angle.Angle {
+  public static final org.apache.commons.numbers.angle.Angle$Turn ZERO;
+    descriptor: Lorg/apache/commons/numbers/angle/Angle$Turn;
+  public static final java.util.function.DoubleUnaryOperator WITHIN_0_AND_1;
+    descriptor: Ljava/util/function/DoubleUnaryOperator;
+  private org.apache.commons.numbers.angle.Angle$Turn(double);
+    descriptor: (D)V
+
+  public static org.apache.commons.numbers.angle.Angle$Turn of(double);
+    descriptor: (D)Lorg/apache/commons/numbers/angle/Angle$Turn;
+
+  public org.apache.commons.numbers.angle.Angle$Turn toTurn();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Turn;
+
+  public org.apache.commons.numbers.angle.Angle$Rad toRad();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Rad;
+
+  public org.apache.commons.numbers.angle.Angle$Deg toDeg();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Deg;
+
+  public static java.util.function.DoubleUnaryOperator normalizer(double);
+    descriptor: (D)Ljava/util/function/DoubleUnaryOperator;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Angle.java"
+public abstract class org.apache.commons.numbers.angle.Angle implements java.util.function.DoubleSupplier {
+  public static final double TWO_PI;
+    descriptor: D
+  public static final double PI_OVER_TWO;
+    descriptor: D
+  private static final double TURN_TO_DEG;
+    descriptor: D
+  private static final double RAD_TO_DEG;
+    descriptor: D
+  private static final double DEG_TO_RAD;
+    descriptor: D
+  private final double value;
+    descriptor: D
+  org.apache.commons.numbers.angle.Angle(double);
+    descriptor: (D)V
+
+  public double getAsDouble();
+    descriptor: ()D
+
+  public int hashCode();
+    descriptor: ()I
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public abstract org.apache.commons.numbers.angle.Angle$Turn toTurn();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Turn;
+
+  public abstract org.apache.commons.numbers.angle.Angle$Rad toRad();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Rad;
+
+  public abstract org.apache.commons.numbers.angle.Angle$Deg toDeg();
+    descriptor: ()Lorg/apache/commons/numbers/angle/Angle$Deg;
+}
+Compiled from "CosAngle.java"
+public final class org.apache.commons.numbers.angle.CosAngle {
+  private org.apache.commons.numbers.angle.CosAngle();
+    descriptor: ()V
+
+  public static double value(double[], double[]);
+    descriptor: ([D[D)D
+}
+Compiled from "Reduce.java"
+public class org.apache.commons.numbers.angle.Reduce implements java.util.function.DoubleUnaryOperator {
+  private final double offset;
+    descriptor: D
+  private final double period;
+    descriptor: D
+  public org.apache.commons.numbers.angle.Reduce(double, double);
+    descriptor: (DD)V
+
+  public double applyAsDouble(double);
+    descriptor: (D)D
+}

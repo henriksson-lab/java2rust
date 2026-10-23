@@ -6,8 +6,8 @@ use crate::facts::{
 };
 use crate::java_ir::{
     BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Literal, Member,
-    Modifier, Param, PrimitiveType, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel,
-    TypeDecl, UnaryOp,
+    Modifier, Param, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
+    UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
 use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
@@ -96,7 +96,6 @@ impl CallGraph {
         &self.edges
     }
 
-    #[cfg(test)]
     pub(crate) fn anonymous_methods(&self) -> &HashMap<CallableKey, crate::java_ir::MethodDecl> {
         &self.anonymous_methods
     }
@@ -1383,11 +1382,15 @@ pub struct CallSiteUse {
     argument_bindings: Vec<(usize, BindingId)>,
     argument_self_fields: Vec<(usize, String)>,
     collection_argument_origins: Vec<(usize, CollectionArgumentOrigin)>,
+    argument_result_calls: Vec<(usize, ResolvedCall)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedCall>,
 }
 
 impl CallSiteUse {
+    pub(crate) fn argument_result_calls(&self) -> &[(usize, ResolvedCall)] {
+        &self.argument_result_calls
+    }
     pub(crate) fn collection_argument_origins(&self) -> &[(usize, CollectionArgumentOrigin)] {
         &self.collection_argument_origins
     }
@@ -1450,11 +1453,15 @@ pub struct ConstructorCallSiteUse {
     argument_bindings: Vec<(usize, BindingId)>,
     argument_self_fields: Vec<(usize, String)>,
     collection_argument_origins: Vec<(usize, CollectionArgumentOrigin)>,
+    argument_result_calls: Vec<(usize, ResolvedCall)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedConstructor>,
 }
 
 impl ConstructorCallSiteUse {
+    pub(crate) fn argument_result_calls(&self) -> &[(usize, ResolvedCall)] {
+        &self.argument_result_calls
+    }
     pub(crate) fn collection_argument_origins(&self) -> &[(usize, CollectionArgumentOrigin)] {
         &self.collection_argument_origins
     }
@@ -2353,6 +2360,7 @@ fn build_type_call_graph(
                         ),
                     );
                     context.source_callbacks = callbacks;
+                    context.return_type = Some(method.return_type.clone());
                     for (index, param) in method.params.iter().enumerate() {
                         if callbacks.is_some_and(|plan| plan.is_inline(ty, method, index)) {
                             let key = CallableKey::CallbackParameter {
@@ -2403,10 +2411,12 @@ struct CallGraphBuildContext<'a> {
     source_symbols: &'a crate::resolve::SourceSymbols,
     source_callbacks: Option<&'a crate::source_callbacks::SourceCallbackPlan>,
     callback_parameters: HashMap<String, (CallableKey, JavaType)>,
+    return_type: Option<JavaType>,
     type_env: TypeEnv,
     consumed_callback_bodies: HashSet<SourceLambdaBodyKey>,
     anonymous_super_type: Option<&'a TypeDecl>,
     anonymous_method_param_types: HashMap<String, JavaType>,
+    anonymous_member_methods: std::sync::Arc<Vec<(&'a crate::java_ir::MethodDecl, CallableKey)>>,
     next_lambda_ordinal: usize,
     next_anonymous_ordinal: usize,
     handled_catch_types: Vec<JavaType>,
@@ -2429,10 +2439,12 @@ impl<'a> CallGraphBuildContext<'a> {
             source_symbols,
             source_callbacks: None,
             callback_parameters: HashMap::new(),
+            return_type: None,
             type_env,
             consumed_callback_bodies: HashSet::new(),
             anonymous_super_type: None,
             anonymous_method_param_types: HashMap::new(),
+            anonymous_member_methods: Default::default(),
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
             handled_catch_types: Vec::new(),
@@ -2448,10 +2460,12 @@ impl<'a> CallGraphBuildContext<'a> {
             source_symbols: self.source_symbols,
             source_callbacks: self.source_callbacks,
             callback_parameters: self.callback_parameters.clone(),
+            return_type: None,
             type_env: self.type_env.clone(),
             consumed_callback_bodies: self.consumed_callback_bodies.clone(),
             anonymous_super_type: self.anonymous_super_type,
             anonymous_method_param_types: self.anonymous_method_param_types.clone(),
+            anonymous_member_methods: self.anonymous_member_methods.clone(),
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
             handled_catch_types: Vec::new(),
@@ -2542,16 +2556,29 @@ fn collect_call_graph_edges_from_stmt(
     facts: &FactSet,
 ) {
     match stmt {
-        Stmt::VarDecl { initializer, .. } => {
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
             if let Some(initializer) = initializer {
+                collect_source_functional_value_contract(ty, initializer, graph, context, facts);
                 collect_call_graph_edges_from_expr(initializer, graph, context, facts);
             }
         }
         Stmt::Assign { target, value } => {
+            if callback_value_needs_contract(value) {
+                let ty = crate::types::infer_expr_type(target, &context.type_env);
+                collect_source_functional_value_contract(&ty, value, graph, context, facts);
+            }
             collect_call_graph_edges_from_expr(target, graph, context, facts);
             collect_call_graph_edges_from_expr(value, graph, context, facts);
         }
-        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+        Stmt::Return(Some(expr)) => {
+            if let Some(ty) = context.return_type.clone() {
+                collect_source_functional_value_contract(&ty, expr, graph, context, facts);
+            }
+            collect_call_graph_edges_from_expr(expr, graph, context, facts);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
             collect_call_graph_edges_from_expr(expr, graph, context, facts);
         }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
@@ -2690,6 +2717,11 @@ fn collect_call_graph_edges_from_stmt(
                 ),
             };
             add_call_graph_edge(graph, context, callee, edge_kind, facts);
+            if let Some(resolved) = resolved {
+                collect_source_constructor_callback_arguments(
+                    resolved, args, graph, context, facts,
+                );
+            }
             for arg in args {
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
@@ -2779,68 +2811,29 @@ fn collect_source_callback_arguments(
                     );
                 }
             }
-            Expr::Lambda { params, body } if params.len() == inputs.len() => {
-                if !context
-                    .consumed_callback_bodies
-                    .insert(SourceLambdaBodyKey::for_lambda(body))
-                {
-                    continue;
-                }
-                let lambda = context.next_lambda();
-                add_call_graph_edge(graph, &contract, lambda.clone(), body_edge, facts);
-                let mut child = context.child_for(lambda.clone());
-                let mut typed_params = Vec::new();
-                for (param, input) in params.iter().zip(inputs) {
-                    for name in [&param.name, &param.source_name] {
-                        child.type_env.insert_local(name.clone(), input.clone());
-                        child.callback_parameters.remove(name);
-                    }
-                    typed_params.push(Param {
-                        name: param.name.clone(),
-                        source_name: param.source_name.clone(),
-                        ty: input,
-                        is_varargs: false,
-                        binding: None,
-                    });
-                }
-                let body = match body {
-                    LambdaBody::Expr(expr) => {
-                        collect_call_graph_edges_from_expr(expr, graph, &mut child, facts);
-                        Block {
-                            statements: vec![Stmt::Return(Some((**expr).clone()))],
-                        }
-                    }
-                    LambdaBody::Block(block) => {
-                        collect_call_graph_edges_from_block(block, graph, &mut child, facts);
-                        block.clone()
-                    }
-                };
-                graph.callback_bodies.insert(lambda, (typed_params, body));
-            }
-            Expr::MethodReference { target, method } => {
-                if let Some(call) = crate::resolve::resolve_source_method_reference_with_input_types(
-                    target,
-                    method,
-                    &inputs,
-                    &context.current_type,
-                    context.source_symbols,
-                    &context.type_env,
+            Expr::Lambda { .. } | Expr::MethodReference { .. } => {
+                collect_typed_callback_body(
+                    argument,
+                    formal,
+                    inputs,
+                    source_sam.as_ref().map(|call| call.return_type.clone()),
+                    body_edge,
+                    graph,
+                    context,
                     facts,
-                ) {
-                    add_call_graph_edge(
-                        graph,
-                        &contract,
-                        resolved_method_call_graph_key(&call, context),
-                        // The reference adapter, not the referenced method,
-                        // implements the SAM ABI. An infallible method can
-                        // therefore remain infallible under a fallible SAM.
-                        CallGraphEdgeKind::DirectMethodCall,
-                        facts,
-                    );
-                    context
-                        .consumed_callback_bodies
-                        .insert(SourceLambdaBodyKey::Expr(argument));
-                }
+                );
+            }
+            Expr::Ternary { .. } if source_sam.is_some() => {
+                collect_typed_callback_body(
+                    argument,
+                    formal,
+                    inputs,
+                    source_sam.as_ref().map(|call| call.return_type.clone()),
+                    body_edge,
+                    graph,
+                    context,
+                    facts,
+                );
             }
             _ => {
                 // An existing native functional value has the checked SAM
@@ -2868,6 +2861,202 @@ fn collect_source_callback_arguments(
             }
         }
     }
+}
+
+/// A returned/stored source SAM has the same invocation contract as a callback
+/// argument. Register its typed body before generic expression traversal so
+/// creation is not mistaken for execution and all adapters share one Result ABI.
+fn collect_source_functional_value_contract(
+    ty: &JavaType,
+    expr: &Expr,
+    graph: &mut CallGraph,
+    context: &mut CallGraphBuildContext<'_>,
+    facts: &FactSet,
+) {
+    if !callback_value_needs_contract(expr) {
+        return;
+    }
+    let Some(sam) = context.source_symbols.source_functional_interface_call(ty) else {
+        return;
+    };
+    collect_typed_callback_body(
+        expr,
+        resolved_method_call_graph_key(&sam, context),
+        sam.arg_target_types.clone(),
+        Some(sam.return_type.clone()),
+        CallGraphEdgeKind::CallbackContractEquality,
+        graph,
+        context,
+        facts,
+    );
+}
+
+/// Constructor formals retain source SAMs just like fields and ordinary
+/// method arguments. Creation does not invoke the callback: only its SAM
+/// descriptor is linked to the typed body here.
+fn collect_source_constructor_callback_arguments(
+    constructor: &crate::java_ir::ResolvedConstructor,
+    args: &[Expr],
+    graph: &mut CallGraph,
+    context: &mut CallGraphBuildContext<'_>,
+    facts: &FactSet,
+) {
+    for (argument, param) in args.iter().zip(&constructor.params) {
+        collect_source_functional_value_contract(&param.ty, argument, graph, context, facts);
+    }
+}
+
+fn callback_value_needs_contract(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lambda { .. } | Expr::MethodReference { .. } => true,
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => callback_value_needs_contract(then_expr) || callback_value_needs_contract(else_expr),
+        _ => false,
+    }
+}
+
+fn collect_typed_callback_body(
+    expr: &Expr,
+    formal: CallableKey,
+    inputs: Vec<JavaType>,
+    result: Option<JavaType>,
+    body_edge: CallGraphEdgeKind,
+    graph: &mut CallGraph,
+    context: &mut CallGraphBuildContext<'_>,
+    facts: &FactSet,
+) {
+    if !callback_value_needs_contract(expr) {
+        return;
+    }
+    let contract = context.child_for(formal.clone());
+    match expr {
+        Expr::Lambda { params, body } if params.len() == inputs.len() => {
+            if !context
+                .consumed_callback_bodies
+                .insert(SourceLambdaBodyKey::for_lambda(body))
+            {
+                return;
+            }
+            collect_typed_callback_lambda(
+                params, body, formal, inputs, result, body_edge, graph, context, facts,
+            );
+        }
+        Expr::MethodReference { target, method } => {
+            if let Some(call) = crate::resolve::resolve_source_method_reference_with_input_types(
+                target,
+                method,
+                &inputs,
+                &context.current_type,
+                context.source_symbols,
+                &context.type_env,
+                facts,
+            ) {
+                // Only the adapter shares the SAM contract. An infallible
+                // referenced method need not acquire a fallible signature.
+                add_call_graph_edge(
+                    graph,
+                    &contract,
+                    resolved_method_call_graph_key(&call, context),
+                    CallGraphEdgeKind::DirectMethodCall,
+                    facts,
+                );
+                context
+                    .consumed_callback_bodies
+                    .insert(SourceLambdaBodyKey::Expr(expr));
+            } else if let Some(Expr::Lambda { params, body }) =
+                crate::resolve::native_method_reference_lambda(
+                    target,
+                    method,
+                    &inputs,
+                    context.source_symbols,
+                    &context.type_env,
+                    facts,
+                    &facts.external_lookup_index(),
+                )
+            {
+                context
+                    .consumed_callback_bodies
+                    .insert(SourceLambdaBodyKey::Expr(expr));
+                // Synthetic adapters do not have immutable-source pointer
+                // identities. Register the original reference only; sharing
+                // a freed temporary lambda address would merge callbacks.
+                collect_typed_callback_lambda(
+                    &params, &body, formal, inputs, result, body_edge, graph, context, facts,
+                );
+            }
+        }
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_typed_callback_body(
+                then_expr,
+                formal.clone(),
+                inputs.clone(),
+                result.clone(),
+                body_edge,
+                graph,
+                context,
+                facts,
+            );
+            collect_typed_callback_body(
+                else_expr, formal, inputs, result, body_edge, graph, context, facts,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn collect_typed_callback_lambda(
+    params: &[crate::java_ir::LambdaParam],
+    body: &LambdaBody,
+    formal: CallableKey,
+    inputs: Vec<JavaType>,
+    result: Option<JavaType>,
+    body_edge: CallGraphEdgeKind,
+    graph: &mut CallGraph,
+    context: &mut CallGraphBuildContext<'_>,
+    facts: &FactSet,
+) {
+    let contract = context.child_for(formal);
+    let lambda = context.next_lambda();
+    add_call_graph_edge(graph, &contract, lambda.clone(), body_edge, facts);
+    let mut child = context.child_for(lambda.clone());
+    child.return_type = result;
+    let mut typed_params = Vec::new();
+    for (param, input) in params.iter().zip(inputs) {
+        for name in [&param.name, &param.source_name] {
+            child.type_env.insert_local(name.clone(), input.clone());
+            child.callback_parameters.remove(name);
+        }
+        typed_params.push(Param {
+            name: param.name.clone(),
+            source_name: param.source_name.clone(),
+            ty: input,
+            is_varargs: false,
+            binding: None,
+        });
+    }
+    let body = match body {
+        LambdaBody::Expr(expr) => {
+            if let Some(ty) = child.return_type.clone() {
+                collect_source_functional_value_contract(&ty, expr, graph, &mut child, facts);
+            }
+            collect_call_graph_edges_from_expr(expr, graph, &mut child, facts);
+            Block {
+                statements: vec![Stmt::Return(Some((**expr).clone()))],
+            }
+        }
+        LambdaBody::Block(block) => {
+            collect_call_graph_edges_from_block(block, graph, &mut child, facts);
+            block.clone()
+        }
+    };
+    graph.callback_bodies.insert(lambda, (typed_params, body));
 }
 
 fn collect_call_graph_edges_from_expr(
@@ -3006,6 +3195,11 @@ fn collect_call_graph_edges_from_expr(
                 CallGraphEdgeKind::UnresolvedExternalConstructorCall
             };
             add_call_graph_edge(graph, context, callee, edge_kind, facts);
+            if let Some(resolved) = resolved {
+                collect_source_constructor_callback_arguments(
+                    resolved, args, graph, context, facts,
+                );
+            }
             for arg in args {
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
@@ -3020,44 +3214,74 @@ fn collect_call_graph_edges_from_expr(
                     }
                     _ => None,
                 };
-                for member in body {
-                    if let Member::Method(method) = member {
-                        let anonymous = context.next_anonymous_method(method.name.clone());
-                        graph
-                            .anonymous_methods
-                            .insert(anonymous.clone(), method.clone());
-                        add_call_graph_edge(
-                            graph,
-                            context,
-                            anonymous.clone(),
-                            CallGraphEdgeKind::AnonymousClassMethod,
-                            facts,
-                        );
-                        if let Some(base) = anonymous_base {
-                            for contract in
-                                anonymous_override_contract_keys(base, method, context.program)
-                            {
-                                let edge = CallGraphEdge {
-                                    caller: contract.clone(),
-                                    callee: anonymous.clone(),
-                                    kind: CallGraphEdgeKind::AnonymousOverrideContract,
-                                };
-                                graph.nodes.insert(contract);
-                                if !graph.edges.contains(&edge) {
-                                    graph.edges.push(edge);
-                                }
+                // Allocate every member identity before visiting any body, so
+                // forward/sibling calls bind to this anonymous object rather
+                // than to a same-named method of its enclosing class.
+                let members = std::sync::Arc::new(
+                    body.iter()
+                        .filter_map(|member| {
+                            let Member::Method(method) = member else {
+                                return None;
+                            };
+                            Some((method, context.next_anonymous_method(method.name.clone())))
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                for (method, anonymous) in members.iter() {
+                    graph
+                        .anonymous_methods
+                        .insert(anonymous.clone(), (**method).clone());
+                    add_call_graph_edge(
+                        graph,
+                        context,
+                        anonymous.clone(),
+                        CallGraphEdgeKind::AnonymousClassMethod,
+                        facts,
+                    );
+                    if let Some(base) = anonymous_base {
+                        for contract in
+                            anonymous_override_contract_keys(base, method, context.program)
+                        {
+                            let edge = CallGraphEdge {
+                                caller: contract.clone(),
+                                callee: anonymous.clone(),
+                                kind: CallGraphEdgeKind::AnonymousOverrideContract,
+                            };
+                            graph.nodes.insert(contract);
+                            if !graph.edges.contains(&edge) {
+                                graph.edges.push(edge);
                             }
                         }
-                        if let Some(body) = &method.body {
-                            let mut child = context.child_for(anonymous);
-                            child.anonymous_super_type = anonymous_base;
-                            child.anonymous_method_param_types = method
-                                .params
-                                .iter()
-                                .map(|param| (param.name.clone(), param.ty.clone()))
-                                .collect();
-                            collect_call_graph_edges_from_block(body, graph, &mut child, facts);
+                    }
+                    if let Some(method_body) = &method.body {
+                        let mut child = context.child_for(anonymous.clone());
+                        child.anonymous_member_methods = members.clone();
+                        child
+                            .type_env
+                            .enter_anonymous_field_scope(body.iter().filter_map(|member| {
+                                match member {
+                                    Member::Field(field) => {
+                                        Some((field.name.clone(), field.ty.clone()))
+                                    }
+                                    _ => None,
+                                }
+                            }));
+                        for param in &method.params {
+                            child
+                                .type_env
+                                .insert_local(param.name.clone(), param.ty.clone());
+                            child
+                                .type_env
+                                .insert_local(param.source_name.clone(), param.ty.clone());
                         }
+                        child.anonymous_super_type = anonymous_base;
+                        child.return_type = Some(method.return_type.clone());
+                        child.anonymous_method_param_types = method
+                            .params
+                            .iter()
+                            .map(|param| (param.name.clone(), param.ty.clone()))
+                            .collect();
+                        collect_call_graph_edges_from_block(method_body, graph, &mut child, facts);
                     }
                 }
             }
@@ -3267,6 +3491,34 @@ fn call_graph_method_target(
     context: &CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) -> (CallableKey, CallGraphEdgeKind) {
+    if receiver.is_none_or(|receiver| matches!(receiver, Expr::This))
+        && !context.anonymous_member_methods.is_empty()
+    {
+        let methods = context
+            .anonymous_member_methods
+            .iter()
+            .map(|(method, _)| *method)
+            .collect::<Vec<_>>();
+        let arg_types = args
+            .iter()
+            .map(|arg| crate::types::infer_expr_type(arg, &context.type_env))
+            .collect::<Vec<_>>();
+        if let Some(selected) = crate::resolve::select_scoped_instance_method(
+            &methods,
+            name,
+            &arg_types,
+            &context.current_type,
+            context.source_symbols,
+            &context.type_env,
+            facts,
+        ) && let Some((_, key)) = context
+            .anonymous_member_methods
+            .iter()
+            .find(|(method, _)| std::ptr::eq(*method, selected))
+        {
+            return (key.clone(), CallGraphEdgeKind::DirectMethodCall);
+        }
+    }
     if let Some(Expr::Var(receiver)) = receiver
         && let Some((key, JavaType::Named { name: owner, .. })) =
             context.callback_parameters.get(receiver)
@@ -3356,7 +3608,7 @@ fn call_graph_method_target(
             facts,
         );
         let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
-        if let JavaType::Named { name: owner, .. } = ty
+        if let JavaType::Named { name: owner, .. } = &ty
             && let Some(sam) = crate::stdlib::functional_interface_shape(
                 &crate::stdlib::canonical_external_receiver_type_key(&owner),
             )
@@ -3366,6 +3618,24 @@ fn call_graph_method_target(
         {
             return (
                 CallableKey::external_method(Some(owner), sam.result_method_name(), args.len()),
+                CallGraphEdgeKind::UnresolvedExternalMethodCall,
+            );
+        }
+        // A constructed/chained receiver need not have a source declaration,
+        // but its modeled nominal type is still the callee's identity. Dropping
+        // it here disconnected the external throw/result contract from the
+        // same mapped call that lowering emits.
+        if let Some(owner) = java_type_name_for_usage(&ty)
+            && facts
+                .external_api_effect_for_receiver_with_arity_or_rust_name(
+                    Some(owner),
+                    name,
+                    Some(args.len()),
+                )
+                .is_some()
+        {
+            return (
+                CallableKey::external_method(Some(owner), name, args.len()),
                 CallGraphEdgeKind::UnresolvedExternalMethodCall,
             );
         }
@@ -3558,10 +3828,7 @@ fn anonymous_call_graph_arg_type(
 ) -> Option<JavaType> {
     match expr {
         Expr::Var(name) => context.anonymous_method_param_types.get(name).cloned(),
-        Expr::Literal(Literal::Int(_)) => Some(JavaType::Primitive(PrimitiveType::Int)),
-        Expr::Literal(Literal::Long(_)) => Some(JavaType::Primitive(PrimitiveType::Long)),
-        Expr::Literal(Literal::String(_)) => Some(JavaType::String),
-        Expr::Literal(Literal::Bool(_)) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        Expr::Literal(literal) => Some(crate::types::literal_type(literal)),
         Expr::Cast { ty, .. } => Some(ty.clone()),
         _ => None,
     }
@@ -4942,6 +5209,7 @@ fn analyze_stmt(
             let policy = constructor_invocation_boundary_policy(*kind);
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "constructor".to_string(),
+                argument_result_calls: argument_result_calls(args),
                 arg_count: args.len(),
                 null_arg_indices: null_argument_indices(args),
                 nullable_source_call_arg_indices: nullable_source_call_arg_indices(
@@ -5523,7 +5791,10 @@ fn record_native_comparison_retention(
     }
     for operand in [left, right] {
         let ty = native_storage_expr_type(operand, facts, owner, types, context);
-        if crate::effective_facts::EffectiveFacts::new(context.facts)
+        if !matches!(
+            crate::types::optional_element_type(&ty).unwrap_or_else(|| ty.clone()),
+            JavaType::Array(_)
+        ) && crate::effective_facts::EffectiveFacts::new(context.facts)
             .retained_native_container_kind(&ty)
             .is_none()
         {
@@ -5708,6 +5979,35 @@ fn record_native_value_domain_storage(
     types: &TypeEnv,
     context: &UsageAnalysisContext<'_>,
 ) {
+    let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+    if let Expr::New {
+        ty,
+        args,
+        body: None,
+        ..
+    } = expr
+        && args.len() == 2
+        && effective.native_map_entry_constructor(ty)
+        && effective
+            .native_map_entry_type_args(&destination.ty)
+            .is_some()
+    {
+        // Entry construction retains each Java component reference. Feed
+        // these transfers into the same storage graph as native factories.
+        for (index, arg) in args.iter().enumerate() {
+            let Some(child) = crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                &destination.ty,
+                &[index],
+            ) else {
+                continue;
+            };
+            let mut target = destination.clone();
+            target.path.push(index);
+            target.ty = child;
+            record_native_value_domain_storage(arg, target, facts, owner, types, context);
+        }
+        return;
+    }
     if let Expr::New { ty, body: None, .. } = expr
         && crate::effective_facts::EffectiveFacts::new(context.facts)
             .native_collection_requires_runtime_policy(ty)
@@ -6688,6 +6988,27 @@ fn native_collection_storage_slot(
         );
         return Some(slot);
     }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.is_empty()
+        && let Some(index) = crate::call_plan::native_map_entry_accessor_index(name)
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_map_entry_type_args(&native_storage_expr_type(
+                receiver, facts, owner, types, context,
+            ))
+            .is_some()
+    {
+        let mut slot = native_collection_storage_slot(receiver, facts, owner, types, context)?;
+        slot.ty = crate::types::generic_read_type_preserving_optional(
+            &crate::slot_shape::RustSlotShape::native_child_type_at_path(&slot.ty, &[index])?,
+        );
+        slot.path.push(index);
+        return Some(slot);
+    }
     let root = match expr {
         Expr::Var(name) => {
             if let Some(binding) = facts.visible_binding_id_for_name(name) {
@@ -6906,6 +7227,41 @@ fn nullable_source_call_arg_indices(
             .then_some(index)
         })
         .collect()
+}
+
+/// Keep expression-result producers until signature saturation. A syntactic
+/// source-nullability summary can still be unknown before nullable field or
+/// parameter storage reaches the producer's solved return contract.
+fn argument_result_calls(args: &[Expr]) -> Vec<(usize, ResolvedCall)> {
+    fn visit(expr: &Expr, index: usize, out: &mut Vec<(usize, ResolvedCall)>) {
+        match expr {
+            Expr::Cast {
+                ty: JavaType::Primitive(_),
+                ..
+            } => {}
+            Expr::Cast { expr, .. } => visit(expr, index, out),
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                visit(then_expr, index, out);
+                visit(else_expr, index, out);
+            }
+            Expr::Call {
+                resolved: Some(call),
+                ..
+            } if !matches!(call.return_type, JavaType::Void | JavaType::Primitive(_)) => {
+                out.push((index, call.clone()));
+            }
+            _ => {}
+        }
+    }
+    let mut results = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        visit(arg, index, &mut results);
+    }
+    results
 }
 
 fn source_call_arg_nullability(
@@ -7182,6 +7538,7 @@ fn record_nullable_source_callback_calls(
         }
         usage.call_sites.push(CallSiteUse {
             name: name.to_string(),
+            argument_result_calls: Vec::new(),
             arg_count: call.arg_target_types.len(),
             result_returned: false,
             receiver_is_self: false,
@@ -7530,6 +7887,7 @@ fn analyze_expr_with_context(
                 type_env,
             );
             facts.call_sites.push(CallSiteUse {
+                argument_result_calls: argument_result_calls(args),
                 name: name.clone(),
                 arg_count: args.len(),
                 result_returned,
@@ -8130,6 +8488,7 @@ fn analyze_expr_with_context(
             }
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "new".to_string(),
+                argument_result_calls: argument_result_calls(args),
                 arg_count: args.len(),
                 null_arg_indices: null_argument_indices(args),
                 nullable_source_call_arg_indices: nullable_source_call_arg_indices(
@@ -9727,6 +10086,79 @@ fn restore_binding_use_facts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anonymous_sibling_calls_keep_identity_and_exception_edges() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/numbers/AnonymousHelperCallProbe.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let graph = super::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let helper = graph
+            .anonymous_methods()
+            .iter()
+            .find(|(_, method)| method.name == "helper")
+            .unwrap()
+            .0;
+        let getter = graph
+            .anonymous_methods()
+            .iter()
+            .find(|(_, method)| method.name == "get")
+            .unwrap()
+            .0;
+        assert!(
+            graph
+                .edges()
+                .iter()
+                .any(|edge| edge.caller() == getter && edge.callee() == helper),
+            "{:?}",
+            graph.edges()
+        );
+        let plan = crate::exception_plan::plan_program_fallibility(
+            &resolved.program,
+            &graph,
+            &resolved.facts,
+        );
+        assert!(plan.returns_result(helper));
+        assert!(plan.returns_result(getter));
+        assert!(!plan.returns_result(&super::CallableKey::method_identity(
+            "AnonymousHelperCallProbe",
+            "make"
+        )));
+    }
+
+    #[test]
+    fn constructed_mapped_receiver_retains_external_callee_identity() {
+        let packs = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.value dep.Value rust-crate-mapping mapped target=value_runtime\nexternal-pack-constructor dep.value dep.Value 1 mapped rust-type=Value rust=new\nexternal-pack-api dep.value dep.Value read mapped getter read-only definitely-non-null args=0 return=int rust=read rust-result=true\n",
+        );
+        assert!(!packs.diagnostics().has_errors());
+        let parsed = crate::parser::parse_java_source(
+            "import dep.Value; class Probe { static int run() { return new Value(1).read(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts.extend_from(packs.facts().clone());
+        let graph = super::build_call_graph_with_facts(&resolved.program, &facts);
+        assert!(
+            graph
+                .edges()
+                .iter()
+                .any(|edge| edge.callee().external_method_parts().is_some_and(
+                    |(owner, name, arity)| owner
+                        .is_some_and(|owner| owner == "dep.Value" || owner == "Value")
+                        && name == "read"
+                        && arity == 0
+                )),
+            "{:?}",
+            graph.edges()
+        );
+    }
+
     use super::*;
     use crate::binding_id::BindingKind;
     use crate::facts::{
@@ -12329,6 +12761,7 @@ class TernaryPatternUsageScope {
             span: crate::diagnostics::Span::default(),
         };
         let ty = TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: "SwitchExpressionPatternUsageScope".to_string(),
             type_params: Vec::new(),

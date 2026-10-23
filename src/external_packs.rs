@@ -370,6 +370,7 @@ impl ExternalPackManifest {
                 mode: self.mode,
                 coverage: self.default_coverage,
                 rust_target: self.rust_target.map(str::to_string),
+                string_abi: Default::default(),
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         }
@@ -515,17 +516,32 @@ pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: u
         || (external_type_name_matches(erased, "java.util.zip.GZIPOutputStream")
             || external_type_name_matches(erased, "GZIPOutputStream"))
             && arg_count == 1
-        || external_superclass_uses_embedded_carrier(erased) && arg_count == 1
+        || external_superclass_uses_embedded_carrier(erased)
+            && !crate::stdlib::is_known_throwable_carrier_type(erased)
+            && arg_count == 1
 }
 
 pub fn external_superclass_uses_embedded_carrier(type_name: &str) -> bool {
     let erased = erased_external_type_name(type_name);
-    external_type_name_matches(erased, "org.itadaki.bzip2.BitOutputStream")
+    crate::stdlib::is_known_throwable_carrier_type(erased)
+        || external_type_name_matches(erased, "org.itadaki.bzip2.BitOutputStream")
         || external_type_name_matches(erased, "BitOutputStream")
         || external_type_name_matches(erased, "java.io.BufferedReader")
         || external_type_name_matches(erased, "BufferedReader")
         || external_type_name_matches(erased, "htsjdk.tribble.AsciiFeatureCodec")
         || external_type_name_matches(erased, "AsciiFeatureCodec")
+}
+
+/// Physical carrier of an embedded platform base, independent of the open
+/// hierarchy representation of references to that Java type.
+pub(crate) fn embedded_external_super_rust_name(type_name: &str) -> String {
+    if crate::stdlib::is_known_throwable_carrier_type(type_name) {
+        "JavaException".to_string()
+    } else {
+        crate::java_naming::rust_name_for_java_named_type(
+            &crate::stdlib::canonical_external_receiver_type_key(type_name),
+        )
+    }
 }
 
 pub fn modeled_external_super_constructor_state_field(
@@ -2256,6 +2272,7 @@ fn push_external_pack_fact(
         mode,
         coverage,
         rust_target: parsed_metadata.rust_target,
+        string_abi: parsed_metadata.string_abi,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     if let Some(rust_type_name) = parsed_metadata.rust_type_name {
@@ -4155,6 +4172,7 @@ fn parse_nullability_state(value: &str) -> Option<NullabilityState> {
 struct ExternalPackMetadata {
     rust_target: Option<String>,
     rust_type_name: Option<String>,
+    string_abi: crate::facts::ExternalStringAbi,
 }
 
 fn parse_pack_metadata(
@@ -4184,6 +4202,19 @@ fn parse_pack_metadata(
                 return None;
             }
             parsed.rust_type_name = Some(rust_type_name.to_string());
+        } else if let Some(abi) = token.strip_prefix("string-abi=") {
+            parsed.string_abi = match abi {
+                "utf8" => crate::facts::ExternalStringAbi::Utf8,
+                "utf16" => crate::facts::ExternalStringAbi::Utf16,
+                _ => {
+                    push_external_pack_parse_error(
+                        diagnostics,
+                        line_index,
+                        "string-abi must be utf8 or utf16",
+                    );
+                    return None;
+                }
+            };
         } else if let Some(package) = token.strip_prefix("package=") {
             if package.is_empty() {
                 push_external_pack_parse_error(
@@ -34281,6 +34312,7 @@ fn manifest_pack_fact(manifest: &ExternalPackManifest) -> ExternalLibraryPackFac
         mode: manifest.mode,
         coverage: manifest.default_coverage,
         rust_target: manifest.rust_target.map(str::to_string),
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     }
 }

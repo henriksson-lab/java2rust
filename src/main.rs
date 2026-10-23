@@ -14,9 +14,16 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir [--primary-file relative/or/absolute.java ...] [--emit-primary-file relative/or/absolute.java ...] --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>\n       new-java2rust count-invalid-patterns <file.rs>"
         );
+        eprintln!(
+            "       new-java2rust emit-runtime-support <floating-point-display|lossless-java-text>"
+        );
         return ExitCode::from(2);
     };
 
+    if let Args::EmitRuntimeSupport { kind } = args {
+        print!("{}", kind.emit_rust());
+        return ExitCode::SUCCESS;
+    }
     if let Args::CountInvalidPatterns { rust_path } = args {
         return match fs::read_to_string(&rust_path) {
             Ok(rust) => {
@@ -180,6 +187,9 @@ fn main() -> ExitCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Args {
+    EmitRuntimeSupport {
+        kind: new_java2rust::RuntimeSupport,
+    },
     Translate {
         source_path: String,
         external_inputs: ExternalInputPaths,
@@ -253,6 +263,14 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     let mut context_dir_packages = Vec::new();
     let mut context_dirs_are_emitted = false;
     let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "emit-runtime-support") {
+        args.next();
+        let kind = new_java2rust::RuntimeSupport::from_name(&args.next()?)?;
+        if args.next().is_some() {
+            return None;
+        }
+        return Some(Args::EmitRuntimeSupport { kind });
+    }
     if args
         .peek()
         .is_some_and(|arg| arg == "count-invalid-patterns")
@@ -1416,24 +1434,34 @@ fn enrich_external_pack_facade_abi(
         let Some(abi) = abi_map.fns.get(&(owner.clone(), rust_name.clone())) else {
             continue;
         };
+        if effect
+            .arg_count
+            .is_some_and(|arity| arity != abi.params.len())
+        {
+            // An inherent method's self parameter is not a Java argument.
+            // Reject incompatible observations rather than publishing an ABI
+            // which silently drops or invents operands.
+            continue;
+        }
+        let abi = resolve_facade_self_type(abi, &format!("{crate_name}::{owner}"));
         append_facade_structured_method_abi_fact(
             facts,
             &effect,
             crate_name.as_str(),
-            abi,
+            &abi,
             &owner,
             &rust_name,
         );
-        append_facade_method_abi_facts(facts, &effect, abi);
+        append_facade_method_abi_facts(facts, &effect, &abi);
         append_facade_argument_abi_facts(
             facts,
             &effect,
             &effect.method_name,
             &effect.method_name,
-            abi,
+            &abi,
         );
         if rust_name != effect.method_name {
-            append_facade_argument_abi_facts(facts, &effect, &effect.method_name, &rust_name, abi);
+            append_facade_argument_abi_facts(facts, &effect, &effect.method_name, &rust_name, &abi);
         }
     }
 
@@ -1618,6 +1646,19 @@ fn facade_receiver_abi(receiver: FacadeFnReceiver) -> new_java2rust::facts::Rece
         FacadeFnReceiver::MutBorrowedSelf => new_java2rust::facts::ReceiverAbi::MutBorrowedSelf,
         FacadeFnReceiver::OwnedSelf => new_java2rust::facts::ReceiverAbi::OwnedSelf,
     }
+}
+
+fn resolve_facade_self_type(abi: &FacadeFnAbi, owner: &str) -> FacadeFnAbi {
+    let mut resolved = abi.clone();
+    let replace = |ty: &str| new_java2rust::types::replace_rust_identifier(ty, "Self", owner);
+    resolved.return_type = resolved.return_type.as_deref().map(replace);
+    resolved.params = resolved.params.iter().map(|ty| replace(ty)).collect();
+    resolved.generic_bounds = resolved
+        .generic_bounds
+        .iter()
+        .map(|(name, bound)| (name.clone(), replace(bound)))
+        .collect();
+    resolved
 }
 
 fn facade_result_abi(return_type: &str) -> new_java2rust::facts::ResultAbi {
@@ -1872,31 +1913,46 @@ fn parse_facade_abi(source: &str) -> FacadeAbi {
     let mut aliases = HashMap::new();
     let mut from_conversions = Vec::new();
     let mut owner: Option<String> = None;
+    let mut owner_depth = None;
+    let mut depth = 0usize;
     let mut pending = String::new();
-    for raw_line in source.lines() {
+    let code = rust_code_mask(source);
+    for (raw_line, code_line) in source.lines().zip(code.lines()) {
         let line = raw_line.trim();
-        if let Some((alias, target)) = parse_facade_type_alias(line) {
+        let code_line = code_line.trim();
+        if let Some((alias, target)) = parse_facade_type_alias(code_line) {
             aliases.insert(alias, target);
         }
-        if let Some(conversion) = parse_facade_from_conversion(line) {
+        if let Some(conversion) = parse_facade_from_conversion(code_line) {
             from_conversions.push(conversion);
         }
-        if let Some(rest) = line.strip_prefix("impl ") {
+        if let Some(rest) = code_line.strip_prefix("impl ") {
+            owner = None;
+            owner_depth = None;
             if let Some(name) = rest.split_whitespace().next() {
                 if name.chars().next().is_some_and(char::is_uppercase) {
-                    owner = Some(name.trim_matches('{').to_string());
+                    owner = Some(
+                        name.trim_matches('{')
+                            .split('<')
+                            .next()
+                            .unwrap_or(name)
+                            .to_string(),
+                    );
                 }
             }
         }
-        if owner.is_none() {
-            continue;
+        if owner.is_some() && owner_depth.is_none() && code_line.contains('{') {
+            owner_depth = Some(depth + 1);
         }
-        if line.starts_with("pub fn ") || !pending.is_empty() {
+        if owner.is_some()
+            && ((code_line.starts_with("pub fn ") && owner_depth == Some(depth))
+                || !pending.is_empty())
+        {
             if !pending.is_empty() {
                 pending.push(' ');
             }
             pending.push_str(line);
-            if line.contains('{') || line.ends_with(';') {
+            if code_line.contains('{') || code_line.ends_with(';') {
                 if let (Some(owner), Some((name, abi))) =
                     (owner.clone(), parse_facade_fn_signature(&pending))
                 {
@@ -1905,12 +1961,129 @@ fn parse_facade_abi(source: &str) -> FacadeAbi {
                 pending.clear();
             }
         }
+        for byte in code_line.bytes() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if owner_depth.is_some_and(|body_depth| depth < body_depth) {
+            owner = None;
+            owner_depth = None;
+            pending.clear();
+        }
     }
     FacadeAbi {
         fns: out,
         aliases,
         from_conversions,
     }
+}
+
+/// Preserve byte positions/newlines while hiding Rust comments and literals.
+/// Scope discovery must not count braces in messages, raw strings or chars.
+fn rust_code_mask(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        let mut end = None;
+        if bytes[index..].starts_with(b"//") {
+            end = Some(
+                index
+                    + bytes[index..]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .unwrap_or(bytes.len() - index),
+            );
+        } else if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut nesting = 1;
+            while index < bytes.len() && nesting != 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    nesting += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    nesting -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            end = Some(index);
+        } else if bytes[index] == b'r' {
+            let mut quote = index + 1;
+            while bytes.get(quote) == Some(&b'#') {
+                quote += 1;
+            }
+            if bytes.get(quote) == Some(&b'"') {
+                let hashes = quote - index - 1;
+                let mut cursor = quote + 1;
+                while cursor < bytes.len() {
+                    if bytes[cursor] == b'"'
+                        && bytes
+                            .get(cursor + 1..cursor + 1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                    {
+                        cursor += 1 + hashes;
+                        break;
+                    }
+                    cursor += 1;
+                }
+                end = Some(cursor);
+            }
+        }
+        if end.is_none() && bytes[start] == b'"' {
+            let mut cursor = start + 1;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'\\' {
+                    cursor = (cursor + 2).min(bytes.len());
+                } else if bytes[cursor] == b'"' {
+                    cursor += 1;
+                    break;
+                } else {
+                    cursor += 1;
+                }
+            }
+            end = Some(cursor);
+        }
+        if end.is_none() && bytes[start] == b'\'' {
+            if let Some(character) = source[start + 1..].chars().next() {
+                let close = start + 1 + character.len_utf8();
+                if character != '\\' && bytes.get(close) == Some(&b'\'') {
+                    end = Some(close + 1);
+                } else if character == '\\' {
+                    let close = match bytes.get(start + 2) {
+                        Some(b'u') if bytes.get(start + 3) == Some(&b'{') => bytes[start + 4..]
+                            .iter()
+                            .position(|byte| *byte == b'}')
+                            .map(|offset| start + 5 + offset),
+                        Some(b'x') => Some(start + 5),
+                        Some(_) => Some(start + 3),
+                        None => None,
+                    };
+                    if let Some(close) = close
+                        && bytes.get(close) == Some(&b'\'')
+                    {
+                        end = Some(close + 1);
+                    }
+                }
+            }
+        }
+        if let Some(end) = end {
+            for byte in &mut masked[start..end] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+            index = end;
+        } else {
+            index = start + 1;
+        }
+    }
+    String::from_utf8(masked).expect("mask preserves Rust source UTF-8")
 }
 
 fn parse_facade_type_alias(line: &str) -> Option<(String, String)> {
@@ -2180,8 +2353,77 @@ fn print_diagnostics(diagnostics: &new_java2rust::diagnostics::DiagnosticBag) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn facade_self_type_is_bound_before_leaving_its_impl() {
+        let (_, abi) = super::parse_facade_fn_signature(
+            "pub fn copy(&self, other: &Self) -> Result<Self, SelfError> {",
+        )
+        .unwrap();
+        let resolved = super::resolve_facade_self_type(&abi, "dep_runtime::Value");
+        assert_eq!(resolved.params, ["&dep_runtime::Value"]);
+        assert_eq!(
+            resolved.return_type.as_deref(),
+            Some("Result<dep_runtime::Value, SelfError>")
+        );
+        assert_eq!(resolved.receiver, super::FacadeFnReceiver::BorrowedSelf);
+    }
+
+    #[test]
+    fn facade_abi_scope_does_not_capture_free_functions_or_literal_braces() {
+        let source = r####"
+impl Value {
+    pub fn combine(&self, other: &Value) -> Value {
+        let _ = "} impl Wrong { pub fn fake() {";
+        let _ = r###"} impl Wrong {"###;
+        let _ = '}';
+        let _ = '\\';
+        let _ = '\u{7d}';
+        // } impl Wrong {
+        /* } /* nested } */ impl Wrong { */
+        other.clone()
+    }
+    pub fn identity(&self) -> i32 { 1 }
+}
+pub fn combine(value: &Value, other: &Value) -> Value { value.combine(other) }
+pub fn outside() -> i32 { 7 }
+impl Other {
+    pub fn identity(&mut self) -> i32 { 2 }
+}
+"####;
+        let abi = super::parse_facade_abi(source);
+        let combine = &abi.fns[&("Value".into(), "combine".into())];
+        assert_eq!(combine.receiver, super::FacadeFnReceiver::BorrowedSelf);
+        assert_eq!(combine.params, ["&Value"]);
+        assert_eq!(abi.fns.len(), 3, "{:?}", abi.fns);
+        assert_eq!(
+            abi.fns[&("Value".into(), "identity".into())].receiver,
+            super::FacadeFnReceiver::BorrowedSelf
+        );
+        assert_eq!(
+            abi.fns[&("Other".into(), "identity".into())].receiver,
+            super::FacadeFnReceiver::MutBorrowedSelf
+        );
+    }
+
     use super::*;
     use new_java2rust::facts::{FactProvenance, NullabilityState};
+
+    #[test]
+    fn runtime_support_cli_validates_named_producer_owned_snippets() {
+        let parse = |args: &[&str]| parse_args(args.iter().map(|arg| arg.to_string()));
+        assert_eq!(
+            parse(&["emit-runtime-support", "floating-point-display"]),
+            Some(Args::EmitRuntimeSupport {
+                kind: new_java2rust::RuntimeSupport::FloatingPointDisplay
+            })
+        );
+        assert_eq!(parse(&["emit-runtime-support"]), None);
+        assert_eq!(parse(&["emit-runtime-support", "unknown"]), None);
+        assert_eq!(
+            parse(&["emit-runtime-support", "floating-point-display", "extra"]),
+            None
+        );
+    }
 
     #[test]
     fn parse_args_accepts_facts_and_external_pack_manifest_inputs() {

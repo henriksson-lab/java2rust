@@ -229,8 +229,9 @@ pub struct TypeStorageFacts {
     escape: Escape,
     /// `T b = a;` with `a` a bare handle — the shape that makes lowering clone.
     locally_aliased: bool,
-    /// A mutating Java object protocol is invoked through a shared reference
-    /// (`&dyn Any`). Its canonical carrier must provide interior access even
+    /// A Java object protocol is invoked through a shared reference (`&dyn Any`).
+    /// Its canonical carrier must retain identity and provide interior access
+    /// when an override mutates the receiver, even
     /// when the program has not introduced a second local alias yet.
     borrowed_object_dispatch: bool,
     /// Any field write through a value of the type, or a method that writes
@@ -611,9 +612,31 @@ pub(crate) fn effective_storage_placement(
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoragePlan {
     types: BTreeMap<String, TypeStorageFacts>,
+    native_callback_sync: BTreeSet<String>,
+    native_capture_targets: std::collections::HashMap<
+        (crate::facts::CaptureOrigin, crate::binding_id::BindingId),
+        BTreeSet<String>,
+    >,
 }
 
 impl StoragePlan {
+    pub(crate) fn native_callback_requires_sync(&self, name: &str) -> bool {
+        self.native_callback_sync
+            .contains(&crate::stdlib::canonical_external_receiver_type_key(name))
+    }
+    pub(crate) fn native_capture_requires_sync(
+        &self,
+        origin: &crate::facts::CaptureOrigin,
+        binding: &crate::binding_id::BindingId,
+    ) -> bool {
+        self.native_capture_targets
+            .get(&(origin.clone(), binding.clone()))
+            .is_some_and(|targets| {
+                targets
+                    .iter()
+                    .any(|target| self.native_callback_requires_sync(target))
+            })
+    }
     pub fn facts(&self, type_name: &str) -> Option<&TypeStorageFacts> {
         self.types.get(type_name).or_else(|| {
             let emitted = crate::java_naming::rust_name_for_java_named_type(type_name);
@@ -644,6 +667,13 @@ impl StoragePlan {
     }
 
     pub fn extend_from(&mut self, other: StoragePlan) {
+        self.native_callback_sync.extend(other.native_callback_sync);
+        for (binding, targets) in other.native_capture_targets {
+            self.native_capture_targets
+                .entry(binding)
+                .or_default()
+                .extend(targets);
+        }
         for (type_name, facts) in other.types {
             self.types
                 .entry(type_name)
@@ -802,8 +832,10 @@ fn plan_storage_strategies_with_facts(
         }
     }
     let mut interface_value_types = source_interfaces_used_as_value_types(program, &interfaces);
+    let empty_erasure_facts = FactSet::default();
     let collection_context = StorageFactContext {
         program,
+        erasure_facts: facts.unwrap_or(&empty_erasure_facts),
         identity_requirements: std::cell::RefCell::new(
             crate::item_assembly::SourceReferenceIdentityRequirements::new(program),
         ),
@@ -847,13 +879,119 @@ fn plan_storage_strategies_with_facts(
     }
     mark_source_interface_implementors_as_aliasable(program, &interface_value_types, &mut types);
     mark_external_input_stream_subclasses_as_aliasable(program, &mut types);
-    propagate_inherited_receiver_mutation(program, usage, &declared, &mut types);
+    propagate_inherited_receiver_mutation(
+        program,
+        usage,
+        &declared,
+        collection_context.erasure_facts,
+        &mut types,
+    );
     mark_mutable_source_argument_aliases(usage, &declared, &mut types);
     if let Some(facts) = facts {
         collect_inner_outer_capture_storage_requirements(program, facts, &declared, &mut types);
         collect_constructor_inner_identity_requirements(program, facts, &mut types);
     }
+    // Opaque native callbacks retain their captures even though no source
+    // declaration exposes those fields. Include these hidden storage edges
+    // in the same process-wide reachability calculation as ordinary fields.
+    let mut callback_declared = BTreeSet::new();
+    for ty in &program.types {
+        collect_all_source_type_names(ty, &mut callback_declared);
+    }
+    let native_callbacks = interfaces
+        .iter()
+        .filter(|name| {
+            let ty = JavaType::Named {
+                name: (*name).clone(),
+                args: Vec::new(),
+            };
+            crate::effective_facts::EffectiveFacts::new(collection_context.erasure_facts)
+                .native_functional_carrier(&ty)
+                .is_some()
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    callback_declared.extend(native_callbacks.iter().cloned());
+    let mut callback_fields = BTreeMap::new();
+    let mut callback_roots = BTreeSet::new();
+    let mut native_capture_targets = std::collections::HashMap::<_, BTreeSet<String>>::new();
+    for ty in &program.types {
+        collect_static_reachability_edges(
+            ty,
+            &callback_declared,
+            &mut callback_fields,
+            &mut callback_roots,
+        );
+    }
+    // A native facade retains its implementing object just as a lambda
+    // retains captures. Include this hidden edge before the same transitive
+    // field walk, so nested payloads use the canonical synchronized tier too.
+    fn collect_native_implementor_edges(
+        ty: &TypeDecl,
+        program: &Program,
+        callbacks: &BTreeSet<String>,
+        fields: &mut BTreeMap<String, Vec<String>>,
+    ) {
+        if ty.kind == TypeKind::Class {
+            for callback in callbacks {
+                if source_type_reaches_interface_value(
+                    ty,
+                    program,
+                    &BTreeSet::from([callback.clone()]),
+                    &mut BTreeSet::new(),
+                ) {
+                    fields
+                        .entry(callback.clone())
+                        .or_default()
+                        .push(ty.name.clone());
+                }
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect_native_implementor_edges(nested, program, callbacks, fields);
+            }
+        }
+    }
+    for ty in &program.types {
+        collect_native_implementor_edges(ty, program, &native_callbacks, &mut callback_fields);
+    }
+    if let Some(facts) = facts {
+        for owner in &facts.captures.owners {
+            let Some(target) = &owner.target_type else {
+                continue;
+            };
+            let origin = match &owner.origin {
+                crate::facts::CaptureOrigin::Method { type_name, .. }
+                | crate::facts::CaptureOrigin::Constructor { type_name }
+                | crate::facts::CaptureOrigin::Type { type_name } => type_name,
+            };
+            let Some(target) = declared_type_name(target, origin, &native_callbacks) else {
+                continue;
+            };
+            for capture in &owner.captures {
+                if let Some(binding) = &capture.binding {
+                    native_capture_targets
+                        .entry((owner.origin.clone(), binding.clone()))
+                        .or_default()
+                        .insert(crate::stdlib::canonical_external_receiver_type_key(&target));
+                }
+                callback_fields.entry(target.clone()).or_default().extend(
+                    declared_storage_type_names(&capture.ty, origin, &callback_declared),
+                );
+            }
+        }
+    }
+    let callback_reachable = storage_reachability(callback_fields, callback_roots);
+    let native_callback_sync = native_callbacks
+        .iter()
+        .filter(|name| callback_reachable.contains(*name))
+        .map(|name| crate::stdlib::canonical_external_receiver_type_key(name))
+        .collect();
     for (name, facts) in types.iter_mut() {
+        if callback_reachable.contains(name) && !all_static_reachable.contains(name) {
+            facts.threaded = true;
+        }
         facts.static_reachable = static_reachable.contains(name);
         if all_static_reachable.contains(name)
             && source_type_has_interface_field(program, name, &interfaces)
@@ -866,7 +1004,11 @@ fn plan_storage_strategies_with_facts(
         facts.surface_forwardable =
             type_interface_surface_is_handle_forwardable(name, program, usage);
     }
-    StoragePlan { types }
+    StoragePlan {
+        types,
+        native_callback_sync,
+        native_capture_targets,
+    }
 }
 
 /// A source subclass converted to the platform `InputStream` facade must keep
@@ -920,41 +1062,40 @@ fn mark_external_input_stream_subclasses_as_aliasable(
 /// (and a cell when mutation requires one).  The generated forwarding impl's
 /// `clone_box` then clones that handle, preserving Java identity.  Leaving an
 /// implementor at `Value` would force either a deep clone or a runtime panic.
+fn source_type_reaches_interface_value(
+    ty: &TypeDecl,
+    program: &Program,
+    interfaces: &BTreeSet<String>,
+    seen: &mut BTreeSet<String>,
+) -> bool {
+    if !seen.insert(ty.name.clone()) {
+        return false;
+    }
+    ty.implements
+        .iter()
+        .chain(ty.extends.iter())
+        .any(|implemented| {
+            let parsed = crate::parser::parse_hierarchy_type(implemented);
+            let name = match &parsed {
+                JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
+                _ => implemented,
+            };
+            if let Some(super_ty) = source_type_decl_for_owner_context(program, &ty.name, name) {
+                return interfaces.contains(&super_ty.name)
+                    || source_type_reaches_interface_value(super_ty, program, interfaces, seen);
+            }
+            interfaces.iter().any(|interface| {
+                source_type_decl_for_owner_context(program, &ty.name, interface).is_none()
+                    && crate::stdlib::is_known_java_platform_subtype(name, interface)
+            })
+        })
+}
+
 fn mark_source_interface_implementors_as_aliasable(
     program: &Program,
     interfaces: &BTreeSet<String>,
     types: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
-    fn reaches_source_interface(
-        ty: &TypeDecl,
-        program: &Program,
-        interfaces: &BTreeSet<String>,
-        seen: &mut BTreeSet<String>,
-    ) -> bool {
-        if !seen.insert(ty.name.clone()) {
-            return false;
-        }
-        ty.implements
-            .iter()
-            .chain(ty.extends.iter())
-            .any(|implemented| {
-                let parsed = crate::parser::parse_hierarchy_type(implemented);
-                let name = match &parsed {
-                    JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
-                    _ => implemented,
-                };
-                if let Some(super_ty) = source_type_decl_for_owner_context(program, &ty.name, name)
-                {
-                    return interfaces.contains(&super_ty.name)
-                        || reaches_source_interface(super_ty, program, interfaces, seen);
-                }
-                interfaces.iter().any(|interface| {
-                    source_type_decl_for_owner_context(program, &ty.name, interface).is_none()
-                        && crate::stdlib::is_known_java_platform_subtype(name, interface)
-                })
-            })
-    }
-
     fn visit(
         ty: &TypeDecl,
         program: &Program,
@@ -962,7 +1103,7 @@ fn mark_source_interface_implementors_as_aliasable(
         types: &mut BTreeMap<String, TypeStorageFacts>,
     ) {
         if ty.kind == TypeKind::Class
-            && reaches_source_interface(ty, program, interfaces, &mut BTreeSet::new())
+            && source_type_reaches_interface_value(ty, program, interfaces, &mut BTreeSet::new())
             && let Some(facts) = types.get_mut(&ty.name)
         {
             facts.locally_aliased = true;
@@ -1304,6 +1445,7 @@ fn propagate_inherited_receiver_mutation(
     program: &Program,
     usage: &UsageFacts,
     declared: &BTreeSet<String>,
+    erasure_facts: &FactSet,
     types: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for subtype in declared {
@@ -1312,6 +1454,7 @@ fn propagate_inherited_receiver_mutation(
         let mut inherits_mutation = false;
         let mut inherits_unproven_mutation = false;
         let mut inherits_aliasing = false;
+        let mut inherits_borrowed_object_dispatch = false;
         for _ in 0..64 {
             let Some(super_name) = current else {
                 break;
@@ -1320,9 +1463,13 @@ fn propagate_inherited_receiver_mutation(
             else {
                 break;
             };
-            inherits_aliasing |= types
+            inherits_aliasing |= types.get(&super_ty.name).is_some_and(|facts| {
+                facts.locally_aliased
+                    || matches!(facts.escape, Escape::Stored | Escape::UnknownBoundary)
+            });
+            inherits_borrowed_object_dispatch |= types
                 .get(&super_ty.name)
-                .is_some_and(TypeStorageFacts::requires_shared_storage);
+                .is_some_and(|facts| facts.borrowed_object_dispatch);
             inherits_unproven_mutation |= types
                 .get(&super_ty.name)
                 .is_some_and(|facts| !facts.mutation_provably_absent);
@@ -1345,6 +1492,10 @@ fn propagate_inherited_receiver_mutation(
             // subclass must keep that same allocation when copied through the
             // base carrier, even when no subclass-typed local is aliased.
             facts.locally_aliased |= inherits_aliasing;
+            // A protocol-only canonical carrier is not evidence of a second
+            // local alias. Preserve the requirement, and its reason, through
+            // the same superclass chain used for mutation/alias propagation.
+            facts.borrowed_object_dispatch |= inherits_borrowed_object_dispatch;
             // Flattened subclass storage contains the superclass subobject.
             // An inherited method therefore mutates the subclass allocation,
             // even when the subclass declares no mutating method of its own.
@@ -1355,11 +1506,15 @@ fn propagate_inherited_receiver_mutation(
             crate::inherited_members::inherited_instance_method_refs_for_type(decl, program)
                 .into_iter()
                 .any(|inherited| {
-                    crate::stdlib::source_method_uses_borrowed_object_dispatch(inherited.method())
-                        && usage.source_method_or_alias_mutates(
-                            inherited.declaring_ty(),
-                            inherited.method(),
-                        )
+                    crate::stdlib::source_method_uses_borrowed_object_dispatch(
+                        inherited.declaring_ty(),
+                        inherited.method(),
+                        program,
+                        erasure_facts,
+                    ) && usage.source_method_or_alias_mutates(
+                        inherited.declaring_ty(),
+                        inherited.method(),
+                    )
                 })
         });
         if inherited_object_dispatch && let Some(facts) = types.get_mut(subtype) {
@@ -1529,21 +1684,22 @@ fn static_reachable_type_names(program: &Program, declared: &BTreeSet<String>) -
     for ty in &program.types {
         collect_static_reachability_edges(ty, declared, &mut fields_of, &mut reachable);
     }
-    // Transitive closure: a type held by a reachable type is reachable.
-    loop {
-        let mut grew = false;
-        for (owner, fields) in &fields_of {
-            if !reachable.contains(owner) {
-                continue;
+    storage_reachability(fields_of, reachable)
+}
+
+fn storage_reachability(
+    fields_of: BTreeMap<String, Vec<String>>,
+    mut reachable: BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut pending = reachable
+        .iter()
+        .cloned()
+        .collect::<std::collections::VecDeque<_>>();
+    while let Some(owner) = pending.pop_front() {
+        for field in fields_of.get(&owner).into_iter().flatten() {
+            if reachable.insert(field.clone()) {
+                pending.push_back(field.clone());
             }
-            for field in fields {
-                if reachable.insert(field.clone()) {
-                    grew = true;
-                }
-            }
-        }
-        if !grew {
-            break;
         }
     }
     reachable
@@ -1766,6 +1922,7 @@ fn collect_threaded(ty: &TypeDecl, declared: &BTreeSet<String>, into: &mut BTree
 /// state or threading a cache through helpers that never query capabilities.
 struct StorageFactContext<'a> {
     program: &'a Program,
+    erasure_facts: &'a FactSet,
     identity_requirements:
         std::cell::RefCell<crate::item_assembly::SourceReferenceIdentityRequirements<'a>>,
     hash_requirements: std::cell::RefCell<crate::item_assembly::SourceReferenceRequirements<'a>>,
@@ -1860,6 +2017,25 @@ fn collect_type_facts(
     threaded: &BTreeSet<String>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
+    let implicit_identity_body = |body: &Block| {
+        crate::semantic_analysis::block_invokes_default_object_equals_on_this(ty, body, program)
+    };
+    let needs_identity_dispatch = ty.members.iter().any(|member| {
+        matches!(member,
+        Member::Method(method) if method.body.as_ref().is_some_and(&implicit_identity_body))
+    })
+        || crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
+            .into_iter()
+            .any(|entry| {
+                entry
+                    .method()
+                    .body
+                    .as_ref()
+                    .is_some_and(&implicit_identity_body)
+            });
+    if needs_identity_dispatch && let Some(facts) = into.get_mut(&ty.name) {
+        facts.borrowed_object_dispatch = true;
+    }
     if threaded.contains(&ty.name)
         && let Some(facts) = into.get_mut(&ty.name)
     {
@@ -1869,6 +2045,17 @@ fn collect_type_facts(
     for member in &ty.members {
         match member {
             Member::Field(field) => {
+                if let Some(value) = &field.initializer {
+                    record_erased_reference_storage(
+                        &field.ty,
+                        value,
+                        ty,
+                        program,
+                        declared,
+                        &BTreeMap::new(),
+                        into,
+                    );
+                }
                 // A field of type T is a second place a T can be reached from.
                 // The same is true for values physically stored inside an
                 // array or generic field: `Cell[]` and `List<Cell>` both retain
@@ -1894,7 +2081,12 @@ fn collect_type_facts(
                     && let Some(facts) = into.get_mut(&ty.name)
                 {
                     facts.mutated = true;
-                    if crate::stdlib::source_method_uses_borrowed_object_dispatch(method) {
+                    if crate::stdlib::source_method_uses_borrowed_object_dispatch(
+                        ty,
+                        method,
+                        program,
+                        program.erasure_facts,
+                    ) {
                         facts.borrowed_object_dispatch = true;
                     }
                 }
@@ -1917,6 +2109,19 @@ fn collect_type_facts(
                 }
                 if let Some(body) = &method.body {
                     let mut locals = local_types_from_params(&method.params);
+                    crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| {
+                        if let Stmt::Return(Some(value)) = stmt {
+                            record_erased_reference_storage(
+                                &method.return_type,
+                                value,
+                                ty,
+                                program,
+                                declared,
+                                &locals,
+                                into,
+                            );
+                        }
+                    });
                     collect_block_facts(body, ty, program, declared, false, &mut locals, into);
                 }
             }
@@ -2179,6 +2384,68 @@ fn collect_block_facts(
     }
 }
 
+/// Entering an erased reference slot retains the constructed source object.
+/// A payload box is not a substitute for a canonical, cloneable Java handle.
+/// Reuse this boundary rule for declarations, fields, returns, casts and calls.
+fn record_erased_reference_storage(
+    target: &JavaType,
+    value: &Expr,
+    owner: &TypeDecl,
+    program: &StorageFactContext<'_>,
+    declared: &BTreeSet<String>,
+    locals: &BTreeMap<String, JavaType>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    if !crate::semantic_analysis::java_type_is_native_object(
+        target,
+        owner,
+        program,
+        program.erasure_facts,
+    ) {
+        return;
+    }
+    match value {
+        Expr::New { ty, body: None, .. } => {
+            if let Some(name) = declared_type_name(ty, &owner.name, declared)
+                && let Some(storage) = into.get_mut(&name)
+            {
+                storage.borrowed_object_dispatch = true;
+            }
+        }
+        Expr::Call {
+            resolved: Some(call),
+            ..
+        } => {
+            if let Some(name) = declared_type_name(&call.return_type, &owner.name, declared)
+                && let Some(storage) = into.get_mut(&name)
+            {
+                storage.borrowed_object_dispatch = true;
+            }
+        }
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            for branch in [then_expr, else_expr] {
+                record_erased_reference_storage(
+                    target, branch, owner, program, declared, locals, into,
+                );
+            }
+        }
+        Expr::Cast { expr, .. } => {
+            record_erased_reference_storage(target, expr, owner, program, declared, locals, into);
+        }
+        _ => {
+            if let Some(name) = handle_type_name(value, owner, declared, locals)
+                && let Some(storage) = into.get_mut(&name)
+            {
+                storage.borrowed_object_dispatch = true;
+            }
+        }
+    }
+}
+
 fn collect_stmt_facts(
     stmt: &Stmt,
     owner: &TypeDecl,
@@ -2195,6 +2462,9 @@ fn collect_stmt_facts(
             initializer,
             ..
         } => {
+            if let Some(value) = initializer {
+                record_erased_reference_storage(ty, value, owner, program, declared, locals, into);
+            }
             // `T b = a;` where `a` is a bare handle: a second name for one
             // object. This is exactly the shape that makes lowering insert a
             // clone, which is why it is the alias signal rather than a general
@@ -2227,6 +2497,15 @@ fn collect_stmt_facts(
             }
         }
         Stmt::Assign { target, value } => {
+            record_erased_reference_storage(
+                &assignment_result_java_type(target, owner, locals),
+                value,
+                owner,
+                program,
+                declared,
+                locals,
+                into,
+            );
             collect_anonymous_body_facts_from_expr(target, owner, program, declared, locals, into);
             collect_anonymous_body_facts_from_expr(value, owner, program, declared, locals, into);
             if expr_reuses_handle(value, owner, locals) {
@@ -2559,9 +2838,7 @@ fn collect_anonymous_body_facts_from_expr(
         }
     }
     if let Expr::Call {
-        receiver,
-        resolved: Some(call),
-        ..
+        receiver, resolved, ..
     } = expr
     {
         let mut env = crate::types::TypeEnv::new();
@@ -2573,26 +2850,40 @@ fn collect_anonymous_body_facts_from_expr(
                 env.insert_field(field.name.clone(), field.ty.clone());
             }
         }
-        let receiver_type = receiver
-            .as_ref()
-            .map(|receiver| crate::types::infer_expr_type(receiver, &env));
-        let relevant =
-            |ty: &JavaType| !declared_storage_type_names(ty, &owner.name, declared).is_empty();
-        let mut required_types = program
-            .identity_requirements
-            .borrow_mut()
-            .types_for_call_matching(call, receiver_type.as_ref(), &relevant);
-        required_types.extend(
-            program
-                .hash_requirements
-                .borrow_mut()
-                .types_for_call_matching(call, receiver_type.as_ref(), relevant),
-        );
-        for ty in required_types {
-            for name in declared_storage_type_names(&ty, &owner.name, declared) {
+        if let Some(append) =
+            crate::java_append_plan::plan_object_append(expr, &env, program.erasure_facts)
+        {
+            let argument_ty = crate::types::infer_expr_type(append.argument, &env);
+            for name in declared_storage_type_names(&argument_ty, &owner.name, declared) {
                 for family in source_hierarchy_family_names(program, &name, declared) {
                     if let Some(storage) = into.get_mut(&family) {
                         storage.locally_aliased = true;
+                    }
+                }
+            }
+        }
+        if let Some(call) = resolved {
+            let receiver_type = receiver
+                .as_ref()
+                .map(|receiver| crate::types::infer_expr_type(receiver, &env));
+            let relevant =
+                |ty: &JavaType| !declared_storage_type_names(ty, &owner.name, declared).is_empty();
+            let mut required_types = program
+                .identity_requirements
+                .borrow_mut()
+                .types_for_call_matching(call, receiver_type.as_ref(), &relevant);
+            required_types.extend(
+                program
+                    .hash_requirements
+                    .borrow_mut()
+                    .types_for_call_matching(call, receiver_type.as_ref(), relevant),
+            );
+            for ty in required_types {
+                for name in declared_storage_type_names(&ty, &owner.name, declared) {
+                    for family in source_hierarchy_family_names(program, &name, declared) {
+                        if let Some(storage) = into.get_mut(&family) {
+                            storage.locally_aliased = true;
+                        }
                     }
                 }
             }
@@ -2632,9 +2923,12 @@ fn collect_anonymous_body_facts_from_expr(
             }
             collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
         }
+        Expr::Cast { ty, expr } => {
+            record_erased_reference_storage(ty, expr, owner, program, declared, locals, into);
+            collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
+        }
         Expr::FieldAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
-        | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
             collect_anonymous_body_facts_from_expr(receiver, owner, program, declared, locals, into)
         }
@@ -2704,7 +2998,19 @@ fn collect_anonymous_body_facts_from_expr(
                 );
             }
         }
-        Expr::Call { receiver, args, .. } => {
+        Expr::Call {
+            receiver,
+            args,
+            resolved,
+            ..
+        } => {
+            if let Some(call) = resolved {
+                for (argument, target) in args.iter().zip(&call.arg_target_types) {
+                    record_erased_reference_storage(
+                        target, argument, owner, program, declared, locals, into,
+                    );
+                }
+            }
             if let Some(receiver) = receiver {
                 collect_anonymous_body_facts_from_expr(
                     receiver, owner, program, declared, locals, into,
@@ -2718,8 +3024,17 @@ fn collect_anonymous_body_facts_from_expr(
             qualifier,
             args,
             body,
+            resolved,
             ..
         } => {
+            if let Some(call) = resolved {
+                for (argument, target) in args.iter().zip(call.params.iter().map(|param| &param.ty))
+                {
+                    record_erased_reference_storage(
+                        target, argument, owner, program, declared, locals, into,
+                    );
+                }
+            }
             if let Some(qualifier) = qualifier {
                 collect_anonymous_body_facts_from_expr(
                     qualifier, owner, program, declared, locals, into,
@@ -3627,6 +3942,7 @@ mod tests {
                 empty_class("a.Item"),
                 empty_class("b.Item"),
                 TypeDecl {
+                    source_names: None,
                     kind: TypeKind::Class,
                     name: "b.Holder".to_string(),
                     type_params: Vec::new(),
@@ -3675,6 +3991,7 @@ mod tests {
                 empty_class("a.Base"),
                 empty_class("b.Base"),
                 TypeDecl {
+                    source_names: None,
                     kind: TypeKind::Class,
                     name: "b.Child".to_string(),
                     type_params: Vec::new(),
@@ -3699,6 +4016,7 @@ mod tests {
 
     fn empty_class(name: &str) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),
@@ -3720,6 +4038,31 @@ mod constructor_mutation_tests {
     use crate::parser::parse_java_source;
 
     #[test]
+    fn implicit_object_equals_in_own_and_inherited_bodies_requires_identity_storage() {
+        let source = r#"
+class Direct { boolean same(Object other) { return this.equals(other); } }
+interface I { default boolean same(Object other) { return this.equals(other); } }
+class Inherited implements I {}
+class Unused {}
+class Overload { boolean equals(String other) { return true; } boolean same(String other) { return this.equals(other); } }
+"#;
+        for name in ["Direct", "Inherited"] {
+            let facts = facts_of(source, name);
+            assert!(facts.borrowed_object_dispatch, "{name}");
+            assert!(!facts.locally_aliased, "{name}");
+            assert_eq!(
+                strategy_of(source, name),
+                StorageStrategy::SharedImmutable,
+                "{name}"
+            );
+        }
+        for name in ["Unused", "Overload"] {
+            assert!(!facts_of(source, name).borrowed_object_dispatch, "{name}");
+            assert_eq!(strategy_of(source, name), StorageStrategy::Value, "{name}");
+        }
+    }
+
+    #[test]
     fn mutating_object_protocol_requires_a_handle_without_inventing_local_aliases() {
         let source = r#"
 class Mutable { int calls; public String toString() { calls++; return "x"; } }
@@ -3728,6 +4071,12 @@ class ReadOnly { public String toString() { return "x"; } }
 class HashMutable { int calls; public int hashCode() { calls++; return 1; } }
 class HashChild extends HashMutable {}
 class HashReadOnly { public int hashCode() { return 1; } }
+class EqualsMutable { int calls; public boolean equals(Object other) { calls++; return true; } }
+class EqualsChild extends EqualsMutable {}
+class EqualsReadOnly { public boolean equals(Object other) { return true; } }
+class EqualsOverload { int calls; public boolean equals(String other) { calls++; return true; } }
+class EqualsStatic { static int calls; public static boolean equals(Object other) { calls++; return true; } }
+class EqualsGeneric<Object> { int calls; public boolean equals(Object other) { calls++; return true; } }
 "#;
         assert_eq!(strategy_of(source, "Mutable"), StorageStrategy::SharedLocal);
         assert_eq!(strategy_of(source, "Child"), StorageStrategy::SharedLocal);
@@ -3744,6 +4093,25 @@ class HashReadOnly { public int hashCode() { return 1; } }
         let facts = facts_of(source, "Mutable");
         assert!(facts.borrowed_object_dispatch);
         assert!(!facts.locally_aliased);
+        for name in ["EqualsMutable", "EqualsChild"] {
+            assert_eq!(
+                strategy_of(source, name),
+                StorageStrategy::SharedLocal,
+                "{name}"
+            );
+            let facts = facts_of(source, name);
+            assert!(facts.borrowed_object_dispatch, "{name}");
+            assert!(!facts.locally_aliased, "{name}");
+        }
+        for name in [
+            "EqualsReadOnly",
+            "EqualsOverload",
+            "EqualsStatic",
+            "EqualsGeneric",
+        ] {
+            assert_eq!(strategy_of(source, name), StorageStrategy::Value, "{name}");
+            assert!(!facts_of(source, name).borrowed_object_dispatch, "{name}");
+        }
     }
 
     #[test]
@@ -3752,6 +4120,44 @@ class HashReadOnly { public int hashCode() { return 1; } }
         assert_eq!(
             strategy_of(source, "Value"),
             StorageStrategy::SharedImmutable
+        );
+    }
+
+    #[test]
+    fn fresh_erased_allocations_require_dispatch_handles_not_fake_aliases() {
+        for declaration in [
+            "void run() { Object value = new Payload(); }",
+            "void run() { Object value = null; value = new Payload(); }",
+            "Object value = new Payload();",
+            "Object make() { return new Payload(); }",
+            "void run(boolean choice) { Object value = choice ? new Payload() : new Payload(); }",
+            "void run() { Object value = (Object) new Payload(); }",
+            "static void accept(Object value) {} void run() { accept(new Payload()); }",
+            "static class Holder { Holder(Object value) {} } void run() { new Holder(new Payload()); }",
+            "Payload concrete() { return new Payload(); } Object erased() { return concrete(); }",
+        ] {
+            let source = format!("class Payload {{}} class Use {{ {declaration} }}");
+            let storage = facts_of(&source, "Payload");
+            assert!(
+                storage.borrowed_object_dispatch,
+                "{declaration}: {storage:?}"
+            );
+            assert_eq!(
+                storage.strategy(),
+                StorageStrategy::SharedImmutable,
+                "{declaration}"
+            );
+            assert!(
+                !storage.locally_aliased(),
+                "fresh allocation is retained, not a fabricated local alias: {declaration}"
+            );
+        }
+        assert_eq!(
+            strategy_of(
+                "class Payload {} class Use { Payload make() { return new Payload(); } }",
+                "Payload"
+            ),
+            StorageStrategy::Value,
         );
     }
 
@@ -3773,6 +4179,67 @@ class HashReadOnly { public int hashCode() { return 1; } }
             .facts(type_name)
             .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
             .clone()
+    }
+
+    #[test]
+    fn native_callback_capture_domains_are_scoped_to_the_callable_origin() {
+        let parsed = parse_java_source(
+            r#"
+            import java.util.function.DoubleUnaryOperator;
+            import java.util.function.IntUnaryOperator;
+            class CaptureDomains {
+                static final DoubleUnaryOperator GLOBAL = global();
+                static DoubleUnaryOperator global() {
+                    double[] values = new double[]{1};
+                    return x -> { values[0] += x; return values[0]; };
+                }
+                static IntUnaryOperator local() {
+                    int[] values = new int[]{1};
+                    return x -> values[0] + x;
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+        let owner = |name: &str| {
+            resolved.facts.captures.owners.iter().find(|owner|
+            matches!(&owner.origin, crate::facts::CaptureOrigin::Method { method_name, .. } if method_name == name)
+        ).unwrap()
+        };
+        let global = owner("global");
+        let local = owner("local");
+        let binding =
+            |owner: &crate::facts::CaptureOwner| owner.captures[0].binding.clone().unwrap();
+        assert_eq!(
+            binding(global),
+            binding(local),
+            "this regression requires colliding callable-local IDs"
+        );
+        assert!(plan.native_capture_requires_sync(&global.origin, &binding(global)));
+        assert!(!plan.native_capture_requires_sync(&local.origin, &binding(local)));
+        assert!(global.target_type.is_some() && local.target_type.is_some());
+    }
+
+    #[test]
+    fn named_native_callbacks_propagate_sync_through_inherited_payload_fields() {
+        let parsed = parse_java_source(include_str!(
+            "../tests/corpus/numbers/NamedGlobalSamProbe.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+        for name in [
+            "NamedGlobalSamProbe.Operation",
+            "NamedGlobalSamProbe.Base",
+            "NamedGlobalSamProbe.Payload",
+        ] {
+            assert!(
+                plan.placement(name).sync(),
+                "{name} must be reachable through the native callback"
+            );
+        }
     }
 
     #[test]

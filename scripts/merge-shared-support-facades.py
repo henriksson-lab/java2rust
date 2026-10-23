@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import cache
 from pathlib import Path
 
-from rust_item_utils import expand_inherent_impl_alias, has_associated_definitions, impl_target_name, top_level_macro_items
+from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_target_name, top_level_macro_items
 
 
 # Private helper types can be representation dependencies of a public support
@@ -16,12 +16,14 @@ from rust_item_utils import expand_inherent_impl_alias, has_associated_definitio
 TYPE_RE = re.compile(
     r"^\s*(?:(?:pub(?:\(crate\))?)\s+)?(struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
-TRAIT_DECL_RE = re.compile(r"^\s*pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+TRAIT_DECL_RE = re.compile(
+    r"^\s*(?:pub(?:\(crate\))?\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.MULTILINE,
+)
 ALIAS_RE = re.compile(
     r"^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"
     r"(?:\s*<[^=;]+>)?\s*=\s*(.+?)\s*;\s*$"
 )
-DERIVE_RE = re.compile(r"^\s*#\[derive")
 INHERENT_IMPL_RE = re.compile(
     r"^\s*impl(?:\s*<.*>)?\s+(?:dyn\s+)?"
     r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
@@ -262,10 +264,7 @@ def impl_header_text(lines: list[str], start: int) -> str:
 
 
 def attached_start(lines: list[str], start: int) -> int:
-    index = start
-    while index > 0 and DERIVE_RE.match(lines[index - 1]):
-        index -= 1
-    return index
+    return attached_outer_item_start(lines, start)
 
 
 @cache
@@ -1022,10 +1021,10 @@ def crate_visible_top_level_value(text: str) -> str:
 
 def crate_visible_top_level_type(text: str) -> str:
     """Expose a promoted private nominal helper to generated child modules."""
-    if re.search(r"(?m)^\s*pub(?:\(crate\))?\s+(?:struct|enum)\b", text):
+    if re.search(r"(?m)^\s*pub(?:\(crate\))?\s+(?:struct|enum|trait)\b", text):
         return text
     return re.sub(
-        r"(?m)^(\s*)((?:struct|enum)\b)",
+        r"(?m)^(\s*)((?:struct|enum|trait)\b)",
         r"\1pub(crate) \2",
         text,
         count=1,
@@ -1811,7 +1810,17 @@ def box_self_recursive_fields(name: str, text: str) -> str:
 
 
 def item_targets_name(item_name: str, target_name: str, alias_targets: dict[str, str]) -> bool:
-    return item_name == target_name or alias_targets.get(item_name) == target_name
+    # Aliases do not create a second nominal type. Follow the same owner
+    # graph for inherent and trait impls, including chains with no methods.
+    seen = set()
+    while item_name not in seen:
+        if item_name == target_name:
+            return True
+        seen.add(item_name)
+        item_name = alias_targets.get(item_name)
+        if item_name is None:
+            break
+    return False
 
 
 def resolved_inherent_impl_header(
@@ -1845,7 +1854,7 @@ def preferred_decl_variant(variants: list[str]) -> tuple[str, str]:
         if re.search(r"(?m)^\s*pub\s+enum\s+", text):
             return text, "enum"
     for text in variants:
-        if re.search(r"(?m)^\s*pub\s+trait\s+", text):
+        if TRAIT_DECL_RE.search(text):
             # A source-summary interface is authoritative semantic evidence.
             # Other units that do not directly exercise the interface can
             # synthesize an opaque struct with the same name; selecting that
@@ -1952,6 +1961,7 @@ def trait_impl_target_can_be_emitted_without_decl(
         or target_name.startswith("Vec<")
         or "::" in target_name
         or target_name.startswith("&")
+        or target_name.startswith(("[", "("))
         or target_name
         in {
             "bool",
@@ -2535,7 +2545,7 @@ def main() -> int:
         name
         for name, variants in declarations.items()
         if any(
-            path != shared_support_path and re.match(r"^\s*pub\s+trait\b", text)
+            path != shared_support_path and TRAIT_DECL_RE.search(text)
             for path, text in variants
         )
     }
@@ -2545,7 +2555,7 @@ def main() -> int:
         if item["kind"] == "decl":
             name = item["name"]
             if name in generated_trait_decls:
-                if not re.match(r"^\s*pub\s+trait\b", item["text"]):
+                if not TRAIT_DECL_RE.search(item["text"]):
                     continue
                 declarations[name].append((shared_support_path, item["text"]))
                 existing_shared_items_to_replace.append(item)
@@ -2696,7 +2706,7 @@ def main() -> int:
         selected_decl_paths = {
             path for path, text in decls if text == selected_decl
         }
-        selected_decl_is_trait = bool(re.match(r"^\s*pub\s+trait\b", selected_decl))
+        selected_decl_is_trait = bool(TRAIT_DECL_RE.search(selected_decl))
         declaration_is_already_shared = (
             name in existing_shared_declared_type_names
             and name not in generated_trait_decls
@@ -2707,14 +2717,14 @@ def main() -> int:
                 f"{name}\tdeclaration\tkept {selected_decl_reason} of {len(unique_decls)} variants\n"
             )
         selected_decl = (
-            merge_trait_declarations(
+            crate_visible_top_level_type(merge_trait_declarations(
                 name,
                 [
                     declaration
                     for declaration in unique_decls
-                    if re.match(r"^\s*pub\s+trait\b", declaration)
+                    if TRAIT_DECL_RE.search(declaration)
                 ],
-            )
+            ))
             if selected_decl_is_trait
             else crate_visible_top_level_type(selected_decl)
         )
@@ -2815,10 +2825,10 @@ def main() -> int:
         for (type_name, trait_raw), variants in sorted(trait_impls.items()):
             trait_name = trait_impl_name(trait_raw)
             from_match = FROM_TRAIT_RE.match(trait_raw)
-            belongs_to_type = impl_target_name(type_name) == name
-            belongs_to_from_source = from_match is not None and impl_target_name(
-                from_match.group(1)
-            ) == name
+            belongs_to_type = item_targets_name(impl_target_name(type_name), name, alias_targets)
+            belongs_to_from_source = from_match is not None and item_targets_name(
+                impl_target_name(from_match.group(1)), name, alias_targets
+            )
             belongs_to_boxed_dyn_trait = boxed_dyn_trait_target_name(type_name) == name
             belongs_to_adapter_dependency = name in boxed_conversion_dependencies.get(
                 (type_name, trait_raw), ()

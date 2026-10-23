@@ -492,7 +492,9 @@ pub(crate) fn default_array_element_expr(element_type: &JavaType) -> Option<Rust
         JavaType::Primitive(PrimitiveType::Float) | JavaType::Primitive(PrimitiveType::Double) => {
             Some(RustExpr::Literal("0.0".to_string()))
         }
-        JavaType::Primitive(PrimitiveType::Char) => Some(RustExpr::Literal("'\\0'".to_string())),
+        JavaType::Primitive(PrimitiveType::Char) => {
+            Some(RustExpr::Literal("JavaCodeUnit(0u16)".to_string()))
+        }
         ty if reference_array_element_is_nullable(ty) => Some(RustExpr::Var("None".to_string())),
         _ => None,
     }

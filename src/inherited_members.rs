@@ -615,8 +615,10 @@ pub(crate) fn embedded_external_super_name_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
 ) -> Option<String> {
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
     if let Some(super_name) = ty.extends.as_deref()
         && crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+        && !effective.has_parsed_source_type_capability_for_name(super_name)
     {
         return Some(super_name.to_string());
     }
@@ -624,6 +626,7 @@ pub(crate) fn embedded_external_super_name_for_type(
         .into_iter()
         .find(|super_name| {
             crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+                && !effective.has_parsed_source_type_capability_for_name(super_name)
         })
 }
 
@@ -1692,6 +1695,7 @@ mod tests {
 
     fn class(name: &str, extends: Option<&str>, members: Vec<Member>) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             static_init_blocks: Vec::new(),
             kind: TypeKind::Class,
             name: name.to_string(),

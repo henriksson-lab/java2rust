@@ -159,6 +159,14 @@ fn type_emission_for_with_facts_and_exceptions(
             enum_name,
             variants,
         } => {
+            let java_enum_name = ty
+                .source_names
+                .as_ref()
+                .map(|names| names.canonical.as_str())
+                .unwrap_or(enum_name);
+            let labels = crate::constructor_plan::enum_constant_fields(ty)
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>();
             let rust_enum_name = rust_name_for_java_named_type(enum_name);
             let variant_items = variants
                 .iter()
@@ -172,12 +180,28 @@ fn type_emission_for_with_facts_and_exceptions(
                 .join(", ");
             let value_of_arms = variants
                 .iter()
-                .map(|variant| format!("            {variant:?} => Self::{variant},"))
+                .zip(&labels)
+                .map(|(variant, label)| format!("            {label:?} => Ok(Self::{variant}),"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let runtime_initialized =
+                crate::constructor_plan::enum_requires_instance_initialization(ty);
+            let values_body = if runtime_initialized {
+                format!(
+                    "Self::__java_class_init(); if !Self::__java_values_ready() {{ std::panic::panic_any(JavaException::new(\"NullPointerException\", \"enum values not initialized\".to_string())); }} vec![{values}]"
+                )
+            } else {
+                format!("vec![{values}]")
+            };
+            let class_init_prefix = if runtime_initialized {
+                "        Self::__java_class_init();\n"
+            } else {
+                ""
+            };
             let name_arms = variants
                 .iter()
-                .map(|variant| format!("            Self::{variant} => {variant:?},"))
+                .zip(&labels)
+                .map(|(variant, label)| format!("            Self::{variant} => {label:?},"))
                 .collect::<Vec<_>>()
                 .join("\n");
             let ordinal_arms = variants
@@ -198,11 +222,53 @@ fn type_emission_for_with_facts_and_exceptions(
                 facts,
                 representations,
             );
+            let checked_value_of = crate::java_naming::ENUM_VALUE_OF_RESULT_METHOD;
+            // The source String ABI is unit-based. Keep native scalar callers
+            // usable through JavaTextView without projecting Java input to UTF-8.
+            let enum_name_lookup = if facts.java_string_identity_representation {
+                let choices = variants
+                    .iter()
+                    .zip(&labels)
+                    .map(|(variant, label)| {
+                        format!(
+                            "        if name.units() == {:?} {{ return Ok(Self::{variant}); }}",
+                            label.encode_utf16().collect::<Vec<_>>()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    r#"    pub fn {checked_value_of}<T: JavaTextView>(name: T) -> Result<Self, JavaException> {{
+{class_init_prefix}        let name = name.java_text_view();
+{choices}
+        let mut message = JavaUtf16::from_scalar({prefix:?});
+        message.push_text(&name);
+        Err(JavaException::new("IllegalArgumentException", JavaString::from_payload(message)))
+    }}
+
+    pub fn value_of<T: JavaTextView>(name: T) -> Self {{ Self::{checked_value_of}(name).unwrap_or_else(|error| std::panic::panic_any(error)) }}
+
+    pub fn __java_value_of_nullable_result(name: Option<&JavaString>) -> Result<Self, JavaException> {{
+{class_init_prefix}        let name = name.ok_or_else(|| JavaException::new("NullPointerException", "Name is null".to_string()))?;
+        Self::{checked_value_of}(name)
+    }}
+
+    #[allow(non_snake_case)]
+    pub fn valueOf<T: JavaTextView>(name: T) -> Self {{ Self::value_of(name) }}
+
+"#,
+                    prefix = format!("No enum constant {java_enum_name}.")
+                )
+            } else {
+                format!(
+                    "    pub fn {checked_value_of}<T: AsRef<str>>(name: T) -> Result<Self, JavaException> {{\n{class_init_prefix}        match name.as_ref() {{\n{value_of_arms}\n            other => Err(JavaException::new(\"IllegalArgumentException\", format!(\"No enum constant {{}}.{{}}\", {java_enum_name:?}, other))),\n        }}\n    }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{ Self::{checked_value_of}(name).unwrap_or_else(|error| std::panic::panic_any(error)) }}\n\n    pub fn __java_value_of_nullable_result(name: Option<&str>) -> Result<Self, JavaException> {{\n{class_init_prefix}        let name = name.ok_or_else(|| JavaException::new(\"NullPointerException\", \"Name is null\".to_string()))?;\n        Self::{checked_value_of}(name)\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n"
+                )
+            };
             let enum_item = format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ {values_body} }}\n\n{enum_name_lookup}    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             );
             RepresentationTypeEmission::RawRustItem(format!(
-                "{enum_item}\n\nimpl JavaAppendValue for {rust_enum_name} {{\n    fn into_java_append_string(self) -> String {{ self.name().to_string() }}\n}}\n\nimpl JavaAppendValue for &{rust_enum_name} {{\n    fn into_java_append_string(self) -> String {{ self.name().to_string() }}\n}}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"
+                "{enum_item}\n\nimpl JavaAppendValue for {rust_enum_name} {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ self.name().to_string().into() }}\n}}\n\nimpl JavaAppendValue for &{rust_enum_name} {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ self.name().to_string().into() }}\n}}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -358,6 +424,27 @@ pub(crate) fn source_hierarchy_carrier_field_setter_name(field_name: &str) -> St
         "__java_set_field_{}",
         crate::parser::to_snake_case(field_name)
     )
+}
+
+/// One authority for setter existence and its receiver mode. Value payloads
+/// need an exclusive carrier borrow; shared mutable payloads use their guard.
+/// A shared immutable/unsupported payload cannot expose a write operation.
+pub(crate) fn source_hierarchy_carrier_field_setter_mutable(
+    representations: &RepresentationPlan,
+    variants: &[String],
+) -> Option<bool> {
+    let mut needs_mutable_carrier = false;
+    for variant in variants {
+        let placement = storage_placement_for_emitted_type_name(representations, variant);
+        if placement.shared() {
+            if !placement.interior_mutable() || !placement.is_implemented() {
+                return None;
+            }
+        } else {
+            needs_mutable_carrier = true;
+        }
+    }
+    Some(needs_mutable_carrier)
 }
 
 fn source_hierarchy_virtual_dispatch_method_signature(
@@ -728,7 +815,7 @@ fn source_hierarchy_carrier_item(
         } else {
             format!(" where {}", bounds.join(", "))
         };
-        item.push_str(&format!("\n{} JavaArraysDeepToStringElement for {}{clause} {{\n    fn java_arrays_deep_to_string(&self) -> String {{ JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!(\"uncaught Java exception: {{:?}}\", error)) }}\n    fn java_object_display_result(&self) -> Result<String, JavaException> {{ match self {{ {} }} }}\n}}",
+        item.push_str(&format!("\n{} JavaArraysDeepToStringElement for {}{clause} {{\n    fn java_arrays_deep_to_string(&self) -> JavaLogicalString {{ JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!(\"uncaught Java exception: {{:?}}\", error)) }}\n    fn java_object_display_result(&self) -> Result<JavaLogicalString, JavaException> {{ match self {{ {} }} }}\n}}",
             source_hierarchy_carrier_impl_prefix(ty, support_program, representations),
             source_hierarchy_carrier_use_name(enum_name, ty), arms.join("\n")));
     }
@@ -890,7 +977,7 @@ fn source_hierarchy_carrier_java_append_value_impls(
     let impl_prefix = source_hierarchy_carrier_impl_prefix(owner, program, representations);
     let use_name = source_hierarchy_carrier_use_name(enum_name, owner);
     format!(
-        "{impl_prefix} JavaAppendValue for {use_name} where {use_name}: std::fmt::Display {{\n    fn into_java_append_string(self) -> String {{ format!(\"{{}}\", self) }}\n}}\n\n{impl_prefix} JavaAppendValue for &{use_name} where {use_name}: std::fmt::Display {{\n    fn into_java_append_string(self) -> String {{ format!(\"{{}}\", self) }}\n}}"
+        "{impl_prefix} JavaAppendValue for {use_name} where {use_name}: std::fmt::Display {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ format!(\"{{}}\", self).into() }}\n}}\n\n{impl_prefix} JavaAppendValue for &{use_name} where {use_name}: std::fmt::Display {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ format!(\"{{}}\", self).into() }}\n}}"
     )
 }
 
@@ -1105,7 +1192,7 @@ fn source_hierarchy_carrier_java_map_key_impl(
 pub(crate) fn source_hierarchy_equals_method<'a>(
     owner: &'a TypeDecl,
     program: &'a Program,
-    _facts: &FactSet,
+    facts: &FactSet,
 ) -> Option<(&'a TypeDecl, &'a MethodDecl)> {
     // Override facts record declaring owners, not every inheriting subclass.
     // The exact source declaration remains authoritative for both carriers
@@ -1115,7 +1202,9 @@ pub(crate) fn source_hierarchy_equals_method<'a>(
         .iter()
         .find_map(|member| match member {
             Member::Method(method)
-                if crate::semantic_analysis::method_overrides_object_equals(method) =>
+                if crate::semantic_analysis::method_overrides_object_equals(
+                    owner, method, program, facts,
+                ) =>
             {
                 Some((owner, method))
             }
@@ -1125,7 +1214,12 @@ pub(crate) fn source_hierarchy_equals_method<'a>(
             crate::inherited_members::inherited_instance_method_refs_for_type(owner, program)
                 .into_iter()
                 .find(|inherited| {
-                    crate::semantic_analysis::method_overrides_object_equals(inherited.method())
+                    crate::semantic_analysis::method_overrides_object_equals(
+                        inherited.declaring_ty(),
+                        inherited.method(),
+                        program,
+                        facts,
+                    )
                 })
                 .map(|inherited| (inherited.declaring_ty(), inherited.method()))
         })
@@ -1618,8 +1712,13 @@ fn source_hierarchy_carrier_runtime_class_method(
         .map(|variant| {
             let java_name = emitted_carrier_payload_types(support_program, variant)
                 .first()
-                .map(|ty| ty.name.as_str())
-                .unwrap_or(variant);
+                .map(|ty| {
+                    crate::java_naming::source_binary_class_name(
+                        ty,
+                        support_program.package.as_deref(),
+                    )
+                })
+                .unwrap_or_else(|| variant.clone());
             format!("            Self::{variant}(_) => JavaClass::<()>::literal({java_name:?}),")
         })
         .collect::<Vec<_>>()
@@ -1627,6 +1726,23 @@ fn source_hierarchy_carrier_runtime_class_method(
     format!(
         "    pub fn get_class(&self) -> JavaClass<()> {{\n        match self {{\n{arms}\n        }}\n    }}"
     )
+}
+
+#[test]
+fn carrier_runtime_class_names_use_original_binary_metadata() {
+    let parsed = crate::parser::parse_java_source(
+        "package identity.nested; class Outer { static class Child {} }",
+    );
+    let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let rendered = source_hierarchy_carrier_runtime_class_method(
+        &["Outer_Child".to_string()],
+        &resolved.program,
+    );
+    assert!(
+        rendered.contains("JavaClass::<()>::literal(\"identity.nested.Outer$Child\")"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("literal(\"Outer.Child\")"));
 }
 
 fn source_hierarchy_carrier_enum_item(
@@ -2838,13 +2954,15 @@ fn source_hierarchy_carrier_field_accessor(
     let getter = format!(
         "    pub fn {rust_name}(&self) -> {return_ty}{where_clause} {{\n        match self {{\n{arms}\n        }}\n    }}"
     );
-    let all_variants_have_mutable_storage = variants.iter().all(|variant| {
-        let placement = storage_placement_for_emitted_type_name(representations, variant);
-        placement.shared() && placement.interior_mutable() && placement.is_implemented()
-    });
     if has_anonymous_variant {
         return Some(getter);
     }
+    let Some(setter_mutable) =
+        source_hierarchy_carrier_field_setter_mutable(representations, variants)
+    else {
+        return Some(getter);
+    };
+    let all_variants_have_mutable_storage = !setter_mutable;
     let setter_name = source_hierarchy_carrier_field_setter_name(&field.name);
     let setter_arms = variants
         .iter()
@@ -2864,16 +2982,6 @@ fn source_hierarchy_carrier_field_accessor(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    // Value payloads can be mutated through an exclusive carrier borrow;
-    // shared mutable payloads already supply their own interior-mutability
-    // guard. Immutable shared payloads still have no legal write projection.
-    let has_immutable_shared_payload = variants.iter().any(|variant| {
-        let placement = storage_placement_for_emitted_type_name(representations, variant);
-        placement.shared() && !placement.interior_mutable()
-    });
-    if has_immutable_shared_payload {
-        return Some(getter);
-    }
     let setter_receiver = if all_variants_have_mutable_storage {
         "&self"
     } else {
@@ -3104,6 +3212,9 @@ fn java_enum_payload_accessor_methods(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> String {
+    if crate::constructor_plan::enum_requires_instance_initialization(ty) {
+        return String::new();
+    }
     let constructor = ty.members.iter().find_map(|member| match member {
         Member::Constructor(constructor) => Some(constructor),
         _ => None,
@@ -3132,7 +3243,7 @@ fn java_enum_payload_accessor_methods(
                 facts,
                 representations,
             )?;
-            let accessor_name = rust_identifier_token(&crate::parser::to_snake_case(&field_name));
+            let accessor_name = rust_identifier_token(&crate::java_naming::source_enum_field_accessor_name(ty, &field_name));
             let arms = variants
                 .iter()
                 .map(|variant| {
@@ -3194,7 +3305,7 @@ fn java_enum_payload_accessor_methods(
                 .collect::<Option<Vec<_>>>()?;
             let (rust_return_ty, rendered_values) =
                 java_enum_constant_accessor_values(&field.ty, &values)?;
-            let accessor_name = rust_identifier_token(&field_name);
+            let accessor_name = rust_identifier_token(&crate::java_naming::source_enum_field_accessor_name(ty, &field_name));
             let arms = variants
                 .iter()
                 .zip(rendered_values)
@@ -3229,7 +3340,7 @@ fn java_enum_payload_accessor_methods(
                     representations,
                 ),
             );
-            let accessor_name = rust_identifier_token(&field_name);
+            let accessor_name = rust_identifier_token(&crate::java_naming::source_enum_field_accessor_name(ty, &field_name));
             let state_name = format!("__java_{}_state", field_name);
             let setter_name = format!("__java_set_{}", field_name);
             Some(format!(
@@ -3248,6 +3359,13 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
 ) -> bool {
     if ty.kind != TypeKind::Enum {
         return false;
+    }
+    if crate::constructor_plan::enum_requires_instance_initialization(ty) {
+        return ty.members.iter().any(|member| {
+            matches!(member,
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static)
+                && crate::parser::to_snake_case(&field.name) == field_name)
+        });
     }
     if source_java_enum_field_uses_state(ty, field_name) {
         return ty.members.iter().any(|member| {
@@ -3303,6 +3421,13 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
 }
 
 pub(crate) fn source_java_enum_field_uses_state(ty: &TypeDecl, field_name: &str) -> bool {
+    if crate::constructor_plan::enum_requires_instance_initialization(ty) {
+        return ty.members.iter().any(|member| {
+            matches!(member,
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static)
+                && crate::parser::to_snake_case(&field.name) == field_name)
+        });
+    }
     ty.kind == TypeKind::Enum
         && ty.members.iter().any(|member| {
             let Member::Method(method) = member else {
@@ -3780,7 +3905,8 @@ fn java_enum_constant_args(ty: &TypeDecl) -> HashMap<String, Vec<Expr>> {
 }
 
 fn java_enum_constant_field_matches_type(field: &FieldDecl, enum_name: &str) -> bool {
-    field.modifiers.contains(&Modifier::Static)
+    field.is_enum_constant()
+        && field.modifiers.contains(&Modifier::Static)
         && field.modifiers.contains(&Modifier::Final)
         && matches!(&field.ty, JavaType::Named { name, .. } if name == enum_name)
 }
@@ -3883,16 +4009,7 @@ fn java_enum_payload_varargs_value(args: &[Expr], field_ty: &JavaType) -> Option
 }
 
 fn rust_type_for_primitive(primitive: PrimitiveType) -> RustType {
-    match primitive {
-        PrimitiveType::Boolean => RustType::Bool,
-        PrimitiveType::Byte => RustType::I8,
-        PrimitiveType::Short => RustType::I16,
-        PrimitiveType::Char => RustType::Char,
-        PrimitiveType::Int => RustType::I32,
-        PrimitiveType::Long => RustType::I64,
-        PrimitiveType::Float => RustType::F32,
-        PrimitiveType::Double => RustType::F64,
-    }
+    crate::operator_lowering::rust_type_for_java_primitive(primitive)
 }
 
 fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType, facts: &FactSet) -> Option<String> {
@@ -7108,7 +7225,7 @@ pub(crate) fn external_object_interface_trait_default_methods(
         return Vec::new();
     }
     vec![format!(
-        "    fn to_string(&self) -> String {{ match java_source_object_string_result(<Self as {trait_name}>::as_any(self)) {{ Some(result) => result.map(java_erased_object_string_display).unwrap_or_else(|error| panic!(\"uncaught Java exception in toString: {{:?}}\", error)), None => format!(\"{{}}@0\", {trait_name:?}) }} }}"
+        "    fn to_string(&self) -> JavaLogicalString {{ match java_source_object_string_result(<Self as {trait_name}>::as_any(self)) {{ Some(result) => result.map(java_erased_object_string_display).unwrap_or_else(|error| panic!(\"uncaught Java exception in toString: {{:?}}\", error)), None => format!(\"{{}}@0\", {trait_name:?}).into() }} }}"
     )]
 }
 
@@ -9683,7 +9800,10 @@ mod type_emission_tests {
         .expect("the parsed inherited declaration is sufficient evidence");
         assert_eq!(declaring.name, "Parent");
         assert!(crate::semantic_analysis::method_overrides_object_equals(
-            method
+            declaring,
+            method,
+            &resolved.program,
+            &crate::facts::FactSet::default()
         ));
         assert!(
             matches!(&method.params[0].ty, crate::java_ir::JavaType::Named { name, .. } if name == "Object")
@@ -10088,8 +10208,8 @@ final class Leaf extends Mid {}
         .expect("mid hierarchy carrier");
 
         assert!(
-            rendered.contains("pub fn key(&self) -> Option<String>")
-                && rendered.contains("pub fn value(&self) -> Option<String>"),
+            rendered.contains("pub fn key(&self) -> Option<JavaString>")
+                && rendered.contains("pub fn value(&self) -> Option<JavaString>"),
             "{rendered}"
         );
         assert!(
@@ -10196,7 +10316,7 @@ interface Joined extends Relay<String>, Named {}
                     &representations,
                 )
             ),
-            "Box<dyn Source<String>>"
+            "Box<dyn Source<JavaString>>"
         );
         let joined = resolved
             .program
@@ -10229,19 +10349,19 @@ interface Joined extends Relay<String>, Named {}
             false,
         );
         assert!(
-            rendered.contains("fn value(&self) -> String;"),
+            rendered.contains("fn value(&self) -> JavaString;"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("fn echo(&self, input: String) -> String;"),
+            rendered.contains("fn echo(&self, input: JavaString) -> JavaString;"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("impl Source<String> for __JavaInterfaceUpcastJoinedToSource"),
+            rendered.contains("impl Source<JavaString> for __JavaInterfaceUpcastJoinedToSource"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("impl Relay<String> for __JavaInterfaceUpcastJoinedToRelay"),
+            rendered.contains("impl Relay<JavaString> for __JavaInterfaceUpcastJoinedToRelay"),
             "{rendered}"
         );
     }
@@ -10543,7 +10663,7 @@ class Child extends Base<String> { void write(String value) {} }
         assert!(
             rendered.contains("Self::Child(__java_carrier_payload)")
                 && rendered.contains(
-                    "write(&*(Box::new(value) as Box<dyn std::any::Any>).downcast::<String>()"
+                    "write(&*(Box::new(value) as Box<dyn std::any::Any>).downcast::<JavaString>()"
                 ),
             "{rendered}"
         );
@@ -11568,7 +11688,7 @@ class Dog implements Named {
                 &semantic.facts,
             ),
             vec![
-                "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_any(&self) -> std::boxed::Box<dyn std::any::Any> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}".to_string()
+                "impl Named for Dog {\n    fn name(&self) -> JavaString { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_any(&self) -> std::boxed::Box<dyn std::any::Any> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}".to_string()
             ]
         );
     }
@@ -11675,7 +11795,7 @@ class NullName implements Named {
 
         assert_eq!(impls.len(), 1);
         assert!(
-            impls[0].contains("fn name(&self) -> Option<String> { NullName::name(self) }"),
+            impls[0].contains("fn name(&self) -> Option<JavaString> { NullName::name(self) }"),
             "{}",
             impls[0]
         );
@@ -12155,7 +12275,7 @@ interface Mapper {
             matches!(
                 emission,
                 RepresentationTypeEmission::RawRustItem(ref item)
-                    if item.contains("fn name_of<T: Base>(&self, value: &T) -> String where Self: Sized;")
+                    if item.contains("fn name_of<T: Base>(&self, value: &T) -> JavaString where Self: Sized;")
             ),
             "{emission:?}"
         );
@@ -12174,6 +12294,7 @@ mod type_lookup_tests {
 
     fn empty_type(name: &str) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),

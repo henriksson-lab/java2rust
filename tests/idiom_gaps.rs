@@ -4811,7 +4811,7 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("java_math_max_f64(left, right)")
             && translation.rust.contains("java_math_min_f64(left, right)")
             && translation.rust.contains("value.is_nan()")
-            && translation.rust.contains("value.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+            && translation.rust.contains("java_float_parse_f32(&value).map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
             && translation.rust.contains("return i32::try_from(value).map_err(|_err| JavaException::new(\"ArithmeticException\", \"integer overflow\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && translation
                 .rust
@@ -7797,7 +7797,7 @@ class NumericParseStaticCalls {
             .contains("return value.parse::<i32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && translation
                 .rust
-                .contains("return value.parse::<f64>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
+                .contains("return java_float_parse_f64(&value).map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));")
             && !translation.rust.contains("value.as_str().parse::<i32>()")
             && !translation.rust.contains("value.as_str().parse::<f64>()"),
         "{}",
@@ -45091,7 +45091,7 @@ class StringBuilderAppendMapGet {
     assert!(
         translation
             .rust
-            .contains("impl<T: JavaAppendValue + Clone> JavaAppendValue for &&T")
+            .contains("impl<T: ?Sized> JavaAppendValue for &&T")
             && translation.rust.contains(".append(values.get(")
             && !translation
                 .rust
@@ -53241,6 +53241,7 @@ class ExternalPackOwnedSourceEnumHashCodeJavaApi {
         mode: ExternalLibraryMode::ExternalFactModel,
         coverage: ExternalApiCoverage::Declared,
         rust_target: None,
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -65781,7 +65782,7 @@ class NdarrayMatrixLowering {
     assert!(
         translation
             .rust
-            .contains("scores[[row as usize, col as usize]] = value.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
+            .contains("scores[[row as usize, col as usize]] = java_float_parse_f32(&value).map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
             && !translation.rust.contains(
                 "scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"
             ),
@@ -65799,7 +65800,7 @@ class NdarrayMatrixLowering {
     assert!(
         translation
             .rust
-            .contains("scores[[row as usize, col as usize]] = tokenizer.next_token_result()?.parse::<f32>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
+            .contains("scores[[row as usize, col as usize]] = java_float_parse_f32(&tokenizer.next_token_result()?).map_err(|err| JavaException::from_display(\"NumberFormatException\", err))?;")
             && !translation.rust.contains("scores[[row as usize, col as usize]] = &tokenizer.next_token().parse::<f32>()"),
         "{}",
         translation.rust

@@ -875,6 +875,18 @@ fn expr_needs_parentheses(
     parent_op: Option<&str>,
     child_side: ExprChildSide,
 ) -> bool {
+    // A leading bare block in a statement-capable position is parsed as a
+    // completed statement, not the left operand of a following binary op.
+    // Shape/comment wrappers must not hide this grammar boundary.
+    if parent_op.is_some() && matches!(child_side, ExprChildSide::Left) {
+        match expr {
+            RustExpr::Block { .. } | RustExpr::MarkedBlock { .. } => return true,
+            RustExpr::Shaped { expr, .. } | RustExpr::PostfixComment { expr, .. } => {
+                return expr_needs_parentheses(expr, parent_prec, parent_op, child_side);
+            }
+            _ => {}
+        }
+    }
     let own_prec = expr_precedence(expr);
     own_prec < parent_prec
         || match (expr, parent_op, child_side) {
@@ -1164,6 +1176,19 @@ fn arithmetic_binary_op(op: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tuple_types_preserve_zero_one_and_multiple_field_arities() {
+        use crate::rust_ir::RustType;
+        assert_eq!(super::emit_type(&RustType::Tuple(vec![])), "()");
+        assert_eq!(
+            super::emit_type(&RustType::Tuple(vec![RustType::I32])),
+            "(i32,)"
+        );
+        assert_eq!(
+            super::emit_type(&RustType::Tuple(vec![RustType::I32, RustType::Bool])),
+            "(i32, bool)"
+        );
+    }
     use super::*;
 
     fn var(name: &str) -> RustExpr {
@@ -1211,6 +1236,74 @@ mod tests {
         let expr = binary("&&", binary("<", var("i"), var("n")), var("ready"));
 
         assert_eq!(emit_expr(&expr), "i < n && ready");
+    }
+
+    #[test]
+    fn staged_blocks_as_binary_left_operands_preserve_expression_grammar() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut source = "pub fn check(ready: bool, value: i32) {".to_string();
+        let block = RustExpr::Block {
+            stmts: vec![],
+            tail: Some(Box::new(var("value"))),
+        };
+        for left in [
+            block.clone(),
+            RustExpr::shaped(RustExprShape::PlainValue, block.clone()),
+            RustExpr::PostfixComment {
+                expr: Box::new(block),
+                comment: " /* staged */".into(),
+            },
+        ] {
+            let emitted = emit_expr(&binary("+", left, RustExpr::Literal("1".into())));
+            assert!(emitted.starts_with("({"), "{emitted}");
+            assert!(emitted.ends_with(") + 1"), "{emitted}");
+            source.push_str(&format!(
+                "let _: i32 = if ready {{ 0 }} else {{ {emitted} }};"
+            ));
+        }
+        source.push('}');
+        let directory = std::env::temp_dir().join(format!(
+            "java2rust-block-operand-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let metadata = directory.join("block_operand.rmeta");
+        // Check Rust's statement/expression grammar, not just spelling. The
+        // crate intentionally has no dependency on a second Rust parser.
+        let mut compiler = Command::new("rustc")
+            .args([
+                "--edition=2024",
+                "--crate-name=block_operand",
+                "--crate-type=lib",
+                "--emit=metadata",
+            ])
+            .arg("-o")
+            .arg(&metadata)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        compiler
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(source.as_bytes())
+            .unwrap();
+        let output = compiler.wait_with_output().unwrap();
+        let _ = std::fs::remove_file(&metadata);
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1832,8 +1925,12 @@ pub fn emit_type(ty: &RustType) -> String {
             args.iter().map(emit_type).collect::<Vec<_>>().join(", ")
         ),
         RustType::Tuple(items) => {
-            let items = items.iter().map(emit_type).collect::<Vec<_>>().join(", ");
-            format!("({items})")
+            let fields = items.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            if items.len() == 1 {
+                format!("({fields},)")
+            } else {
+                format!("({fields})")
+            }
         }
         RustType::FnPointer {
             params,

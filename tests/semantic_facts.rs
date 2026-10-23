@@ -2586,6 +2586,7 @@ fn indexed_external_pack_lookup_preserves_member_alias_fallback() {
         mode: ExternalLibraryMode::RustCrateMapping,
         coverage: ExternalApiCoverage::Mapped,
         rust_target: Some("dep_facade".to_string()),
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {

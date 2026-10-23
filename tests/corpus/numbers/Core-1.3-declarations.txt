@@ -1,0 +1,753 @@
+# Apache Commons Numbers 1.3 Core declaration inventory
+# Untouched upstream commit ae8abefb51c2c4d1a05882d61cefc8015e493a8f
+# Reproduce: bash scripts/list-commons-numbers-1.3-core-api.sh
+# Complete production closure: JDK only; all11 source files in focus-set manifest.
+# javap -p -s includes private helpers, constructors, nested types, static
+# initializers and compiler bridges. Bridges are not additional Java source APIs.
+# Behavioral coverage is tracked separately; declaration presence is not proof.
+
+Compiled from "Addition.java"
+public interface org.apache.commons.numbers.core.Addition<T> {
+  public abstract T add(T);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public abstract T zero();
+    descriptor: ()Ljava/lang/Object;
+
+  public abstract T negate();
+    descriptor: ()Ljava/lang/Object;
+
+  public default boolean isZero();
+    descriptor: ()Z
+}
+Compiled from "ArithmeticUtils.java"
+class org.apache.commons.numbers.core.ArithmeticUtils$NumbersArithmeticException extends java.lang.ArithmeticException {
+  private static final long serialVersionUID;
+    descriptor: J
+  org.apache.commons.numbers.core.ArithmeticUtils$NumbersArithmeticException(java.lang.String, java.lang.Object...);
+    descriptor: (Ljava/lang/String;[Ljava/lang/Object;)V
+}
+Compiled from "ArithmeticUtils.java"
+public final class org.apache.commons.numbers.core.ArithmeticUtils {
+  private static final java.lang.String NEGATIVE_EXPONENT_1;
+    descriptor: Ljava/lang/String;
+  private static final java.lang.String NEGATIVE_EXPONENT_2;
+    descriptor: Ljava/lang/String;
+  private org.apache.commons.numbers.core.ArithmeticUtils();
+    descriptor: ()V
+
+  public static int gcd(int, int);
+    descriptor: (II)I
+
+  public static long gcd(long, long);
+    descriptor: (JJ)J
+
+  public static int lcm(int, int);
+    descriptor: (II)I
+
+  public static long lcm(long, long);
+    descriptor: (JJ)J
+
+  public static int pow(int, int);
+    descriptor: (II)I
+
+  public static long pow(long, int);
+    descriptor: (JI)J
+
+  public static java.math.BigInteger pow(java.math.BigInteger, int);
+    descriptor: (Ljava/math/BigInteger;I)Ljava/math/BigInteger;
+
+  public static java.math.BigInteger pow(java.math.BigInteger, long);
+    descriptor: (Ljava/math/BigInteger;J)Ljava/math/BigInteger;
+
+  public static java.math.BigInteger pow(java.math.BigInteger, java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;Ljava/math/BigInteger;)Ljava/math/BigInteger;
+
+  public static boolean isPowerOfTwo(long);
+    descriptor: (J)Z
+
+  public static int remainderUnsigned(int, int);
+    descriptor: (II)I
+
+  public static long remainderUnsigned(long, long);
+    descriptor: (JJ)J
+
+  public static int divideUnsigned(int, int);
+    descriptor: (II)I
+
+  public static long divideUnsigned(long, long);
+    descriptor: (JJ)J
+}
+Compiled from "DD.java"
+public final class org.apache.commons.numbers.core.DD extends java.lang.Number implements org.apache.commons.numbers.core.NativeOperators<org.apache.commons.numbers.core.DD>, java.io.Serializable {
+  public static final org.apache.commons.numbers.core.DD ONE;
+    descriptor: Lorg/apache/commons/numbers/core/DD;
+  public static final org.apache.commons.numbers.core.DD ZERO;
+    descriptor: Lorg/apache/commons/numbers/core/DD;
+  private static final double MULTIPLIER;
+    descriptor: D
+  private static final int EXP_MASK;
+    descriptor: I
+  private static final int CMP_UNSIGNED_2046;
+    descriptor: I
+  private static final int CMP_UNSIGNED_MINUS_1;
+    descriptor: I
+  private static final int CMP_UNSIGNED_1022;
+    descriptor: I
+  private static final double TWO_POW_512;
+    descriptor: D
+  private static final double TWO_POW_M512;
+    descriptor: D
+  private static final double TWO_POW_53;
+    descriptor: D
+  private static final long HIGH32_MASK;
+    descriptor: J
+  private static final long UNSIGN_MASK;
+    descriptor: J
+  private static final long MANTISSA_MASK;
+    descriptor: J
+  private static final int EXPONENT_OFFSET;
+    descriptor: I
+  private static final double HALF;
+    descriptor: D
+  private static final double SAFE_MULTIPLY;
+    descriptor: D
+  private static final int TO_STRING_SIZE;
+    descriptor: I
+  private static final char FORMAT_START;
+    descriptor: C
+  private static final char FORMAT_END;
+    descriptor: C
+  private static final char FORMAT_SEP;
+    descriptor: C
+  private static final long serialVersionUID;
+    descriptor: J
+  private final double x;
+    descriptor: D
+  private final double xx;
+    descriptor: D
+  private org.apache.commons.numbers.core.DD(double, double);
+    descriptor: (DD)V
+
+  public static org.apache.commons.numbers.core.DD of(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  static org.apache.commons.numbers.core.DD of(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD of(int);
+    descriptor: (I)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD of(long);
+    descriptor: (J)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofUnsigned(int);
+    descriptor: (I)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofUnsigned(long);
+    descriptor: (J)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD from(java.math.BigDecimal);
+    descriptor: (Ljava/math/BigDecimal;)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofSum(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofDifference(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofProduct(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD ofSquare(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  public static org.apache.commons.numbers.core.DD fromQuotient(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public double hi();
+    descriptor: ()D
+
+  public double lo();
+    descriptor: ()D
+
+  public boolean isFinite();
+    descriptor: ()Z
+
+  public double doubleValue();
+    descriptor: ()D
+
+  public float floatValue();
+    descriptor: ()F
+
+  public int intValue();
+    descriptor: ()I
+
+  public long longValue();
+    descriptor: ()J
+
+  public java.math.BigDecimal bigDecimalValue();
+    descriptor: ()Ljava/math/BigDecimal;
+
+  static org.apache.commons.numbers.core.DD fastTwoSum(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  static double fastTwoSumLow(double, double, double);
+    descriptor: (DDD)D
+
+  static org.apache.commons.numbers.core.DD fastTwoDiff(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  private static double fastTwoDiffLow(double, double, double);
+    descriptor: (DDD)D
+
+  static org.apache.commons.numbers.core.DD twoSum(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  static double twoSumLow(double, double, double);
+    descriptor: (DDD)D
+
+  static org.apache.commons.numbers.core.DD twoDiff(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  private static double twoDiffLow(double, double, double);
+    descriptor: (DDD)D
+
+  static org.apache.commons.numbers.core.DD twoProd(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  static double twoProductLow(double, double, double);
+    descriptor: (DDD)D
+
+  static double twoProductLow(double, double, double, double, double);
+    descriptor: (DDDDD)D
+
+  static org.apache.commons.numbers.core.DD twoSquare(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  static double twoSquareLow(double, double);
+    descriptor: (DD)D
+
+  static double twoSquareLow(double, double, double);
+    descriptor: (DDD)D
+
+  static double highPart(double);
+    descriptor: (D)D
+
+  public org.apache.commons.numbers.core.DD negate();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD abs();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD floor();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD ceil();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD floorOrCeil(double, double, java.util.function.DoubleUnaryOperator);
+    descriptor: (DDLjava/util/function/DoubleUnaryOperator;)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD add(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD add(org.apache.commons.numbers.core.DD);
+    descriptor: (Lorg/apache/commons/numbers/core/DD;)Lorg/apache/commons/numbers/core/DD;
+
+  static org.apache.commons.numbers.core.DD add(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/core/DD;
+
+  static org.apache.commons.numbers.core.DD accurateAdd(double, double, double);
+    descriptor: (DDD)Lorg/apache/commons/numbers/core/DD;
+
+  static org.apache.commons.numbers.core.DD accurateAdd(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD subtract(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD subtract(org.apache.commons.numbers.core.DD);
+    descriptor: (Lorg/apache/commons/numbers/core/DD;)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD multiply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD multiply(double, double, double);
+    descriptor: (DDD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD multiply(org.apache.commons.numbers.core.DD);
+    descriptor: (Lorg/apache/commons/numbers/core/DD;)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD multiply(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD square();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD square(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD divide(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD divide(double, double, double);
+    descriptor: (DDD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD divide(org.apache.commons.numbers.core.DD);
+    descriptor: (Lorg/apache/commons/numbers/core/DD;)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD divide(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD reciprocal();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD reciprocal(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD sqrt();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  static boolean isNotNormal(double);
+    descriptor: (D)Z
+
+  public org.apache.commons.numbers.core.DD scalb(int);
+    descriptor: (I)Lorg/apache/commons/numbers/core/DD;
+
+  static double twoPow(int);
+    descriptor: (I)D
+
+  public org.apache.commons.numbers.core.DD frexp(int[]);
+    descriptor: ([I)Lorg/apache/commons/numbers/core/DD;
+
+  private static int getScale(double);
+    descriptor: (D)I
+
+  public org.apache.commons.numbers.core.DD pow(int);
+    descriptor: (I)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD computePow(double, double, int);
+    descriptor: (DDI)Lorg/apache/commons/numbers/core/DD;
+
+  public org.apache.commons.numbers.core.DD pow(int, long[]);
+    descriptor: (I[J)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD computePowScaled(long, double, double, int, long[]);
+    descriptor: (JDDI[J)Lorg/apache/commons/numbers/core/DD;
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public int hashCode();
+    descriptor: ()I
+
+  private static boolean equals(double, double);
+    descriptor: (DD)Z
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  public org.apache.commons.numbers.core.DD zero();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  public boolean isZero();
+    descriptor: ()Z
+
+  public org.apache.commons.numbers.core.DD one();
+    descriptor: ()Lorg/apache/commons/numbers/core/DD;
+
+  public boolean isOne();
+    descriptor: ()Z
+
+  public org.apache.commons.numbers.core.DD multiply(int);
+    descriptor: (I)Lorg/apache/commons/numbers/core/DD;
+
+  public java.lang.Object pow(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object multiply(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object divide(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object subtract(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object negate();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object zero();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object add(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object reciprocal();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object one();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object multiply(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "DDMath.java"
+final class org.apache.commons.numbers.core.DDMath$MDD {
+  private double x;
+    descriptor: D
+  private double xx;
+    descriptor: D
+  org.apache.commons.numbers.core.DDMath$MDD();
+    descriptor: ()V
+}
+Compiled from "DDMath.java"
+public final class org.apache.commons.numbers.core.DDMath {
+  private static final double HALF;
+    descriptor: D
+  private static final double SAFE_MULTIPLY;
+    descriptor: D
+  private org.apache.commons.numbers.core.DDMath();
+    descriptor: ()V
+
+  public static org.apache.commons.numbers.core.DD pow(org.apache.commons.numbers.core.DD, int, long[]);
+    descriptor: (Lorg/apache/commons/numbers/core/DD;I[J)Lorg/apache/commons/numbers/core/DD;
+
+  private static org.apache.commons.numbers.core.DD computePowScaled(long, double, double, int, long[]);
+    descriptor: (JDDI[J)Lorg/apache/commons/numbers/core/DD;
+
+  private static double norm3(double, double, double, double, org.apache.commons.numbers.core.DDMath$MDD);
+    descriptor: (DDDDLorg/apache/commons/numbers/core/DDMath$MDD;)D
+
+  private static org.apache.commons.numbers.core.DD inverse3(double, double, double);
+    descriptor: (DDD)Lorg/apache/commons/numbers/core/DD;
+
+  private static double multiply3(double, double, double, double, org.apache.commons.numbers.core.DDMath$MDD);
+    descriptor: (DDDDLorg/apache/commons/numbers/core/DDMath$MDD;)D
+
+  private static double add3(double, double, double, double, org.apache.commons.numbers.core.DDMath$MDD);
+    descriptor: (DDDDLorg/apache/commons/numbers/core/DDMath$MDD;)D
+
+  private static double add3(double, double, double, double, double, double, org.apache.commons.numbers.core.DDMath$MDD);
+    descriptor: (DDDDDDLorg/apache/commons/numbers/core/DDMath$MDD;)D
+}
+Compiled from "ExtendedPrecision.java"
+final class org.apache.commons.numbers.core.ExtendedPrecision {
+  private static final double SAFE_UPPER;
+    descriptor: D
+  private static final double SAFE_LOWER;
+    descriptor: D
+  private static final double DOWN_SCALE;
+    descriptor: D
+  private static final double UP_SCALE;
+    descriptor: D
+  private static final double UP_SCALE2;
+    descriptor: D
+  private static final double DOWN_SCALE2;
+    descriptor: D
+  private org.apache.commons.numbers.core.ExtendedPrecision();
+    descriptor: ()V
+
+  static double productLow(double, double, double);
+    descriptor: (DDD)D
+}
+Compiled from "Multiplication.java"
+public interface org.apache.commons.numbers.core.Multiplication<T> {
+  public abstract T multiply(T);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public abstract T one();
+    descriptor: ()Ljava/lang/Object;
+
+  public abstract T reciprocal();
+    descriptor: ()Ljava/lang/Object;
+
+  public default boolean isOne();
+    descriptor: ()Z
+}
+Compiled from "NativeOperators.java"
+public interface org.apache.commons.numbers.core.NativeOperators<T> extends org.apache.commons.numbers.core.Addition<T>, org.apache.commons.numbers.core.Multiplication<T> {
+  public abstract T subtract(T);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public abstract T divide(T);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public abstract T multiply(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public abstract T pow(int);
+    descriptor: (I)Ljava/lang/Object;
+}
+Compiled from "Norm.java"
+interface org.apache.commons.numbers.core.Norm$Array {
+  public abstract double of(double[]);
+    descriptor: ([D)D
+}
+Compiled from "Norm.java"
+interface org.apache.commons.numbers.core.Norm$Three {
+  public abstract double of(double, double, double);
+    descriptor: (DDD)D
+}
+Compiled from "Norm.java"
+interface org.apache.commons.numbers.core.Norm$Two {
+  public abstract double of(double, double);
+    descriptor: (DD)D
+}
+Compiled from "Norm.java"
+public final class org.apache.commons.numbers.core.Norm extends java.lang.Enum<org.apache.commons.numbers.core.Norm> {
+  public static final org.apache.commons.numbers.core.Norm L1;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  public static final org.apache.commons.numbers.core.Norm MANHATTAN;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  public static final org.apache.commons.numbers.core.Norm L2;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  public static final org.apache.commons.numbers.core.Norm EUCLIDEAN;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  public static final org.apache.commons.numbers.core.Norm LINF;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  public static final org.apache.commons.numbers.core.Norm MAXIMUM;
+    descriptor: Lorg/apache/commons/numbers/core/Norm;
+  private static final double SMALL_THRESH;
+    descriptor: D
+  private static final double LARGE_THRESH;
+    descriptor: D
+  private static final double SAFE_SCALE_UP_THRESH;
+    descriptor: D
+  private static final double SCALE_DOWN;
+    descriptor: D
+  private static final double SCALE_UP;
+    descriptor: D
+  private static final int EXP_DIFF_THRESHOLD_2D;
+    descriptor: I
+  private final org.apache.commons.numbers.core.Norm$Two two;
+    descriptor: Lorg/apache/commons/numbers/core/Norm$Two;
+  private final org.apache.commons.numbers.core.Norm$Three three;
+    descriptor: Lorg/apache/commons/numbers/core/Norm$Three;
+  private final org.apache.commons.numbers.core.Norm$Array array;
+    descriptor: Lorg/apache/commons/numbers/core/Norm$Array;
+  private static final org.apache.commons.numbers.core.Norm[] $VALUES;
+    descriptor: [Lorg/apache/commons/numbers/core/Norm;
+  public static org.apache.commons.numbers.core.Norm[] values();
+    descriptor: ()[Lorg/apache/commons/numbers/core/Norm;
+
+  public static org.apache.commons.numbers.core.Norm valueOf(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/core/Norm;
+
+  private org.apache.commons.numbers.core.Norm(org.apache.commons.numbers.core.Norm$Two, org.apache.commons.numbers.core.Norm$Three, org.apache.commons.numbers.core.Norm$Array);
+    descriptor: (Ljava/lang/String;ILorg/apache/commons/numbers/core/Norm$Two;Lorg/apache/commons/numbers/core/Norm$Three;Lorg/apache/commons/numbers/core/Norm$Array;)V
+
+  private org.apache.commons.numbers.core.Norm(org.apache.commons.numbers.core.Norm);
+    descriptor: (Ljava/lang/String;ILorg/apache/commons/numbers/core/Norm;)V
+
+  public double of(double, double);
+    descriptor: (DD)D
+
+  public double of(double, double, double);
+    descriptor: (DDD)D
+
+  public double of(double[]);
+    descriptor: ([D)D
+
+  private static double manhattan(double, double);
+    descriptor: (DD)D
+
+  private static double manhattan(double, double, double);
+    descriptor: (DDD)D
+
+  private static double manhattan(double[]);
+    descriptor: ([D)D
+
+  private static double euclidean(double, double);
+    descriptor: (DD)D
+
+  private static double euclidean(double, double, double);
+    descriptor: (DDD)D
+
+  private static double euclidean(double[]);
+    descriptor: ([D)D
+
+  private static double euclideanNormSpecial(double[], int);
+    descriptor: ([DI)D
+
+  private static double maximum(double, double);
+    descriptor: (DD)D
+
+  private static double maximum(double, double, double);
+    descriptor: (DDD)D
+
+  private static double maximum(double[]);
+    descriptor: ([D)D
+
+  private static void ensureNonEmpty(double[]);
+    descriptor: ([D)V
+
+  private static org.apache.commons.numbers.core.Norm[] $values();
+    descriptor: ()[Lorg/apache/commons/numbers/core/Norm;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Precision.java"
+class org.apache.commons.numbers.core.Precision$1 implements org.apache.commons.numbers.core.Precision$DoubleEquivalence {
+  private final double epsilon;
+    descriptor: D
+  final double val$eps;
+    descriptor: D
+  org.apache.commons.numbers.core.Precision$1();
+    descriptor: (D)V
+
+  public int compare(double, double);
+    descriptor: (DD)I
+}
+Compiled from "Precision.java"
+public interface org.apache.commons.numbers.core.Precision$DoubleEquivalence {
+  public default boolean eq(double, double);
+    descriptor: (DD)Z
+
+  public default boolean eqZero(double);
+    descriptor: (D)Z
+
+  public default boolean lt(double, double);
+    descriptor: (DD)Z
+
+  public default boolean lte(double, double);
+    descriptor: (DD)Z
+
+  public default boolean gt(double, double);
+    descriptor: (DD)Z
+
+  public default boolean gte(double, double);
+    descriptor: (DD)Z
+
+  public default double signum(double);
+    descriptor: (D)D
+
+  public abstract int compare(double, double);
+    descriptor: (DD)I
+}
+Compiled from "Precision.java"
+public final class org.apache.commons.numbers.core.Precision {
+  public static final double EPSILON;
+    descriptor: D
+  public static final double SAFE_MIN;
+    descriptor: D
+  private static final long EXPONENT_OFFSET;
+    descriptor: J
+  private static final double POSITIVE_ZERO;
+    descriptor: D
+  private org.apache.commons.numbers.core.Precision();
+    descriptor: ()V
+
+  public static int compareTo(double, double, double);
+    descriptor: (DDD)I
+
+  public static int compareTo(double, double, int);
+    descriptor: (DDI)I
+
+  public static boolean equals(float, float);
+    descriptor: (FF)Z
+
+  public static boolean equalsIncludingNaN(float, float);
+    descriptor: (FF)Z
+
+  public static boolean equals(float, float, float);
+    descriptor: (FFF)Z
+
+  public static boolean equalsIncludingNaN(float, float, float);
+    descriptor: (FFF)Z
+
+  public static boolean equals(float, float, int);
+    descriptor: (FFI)Z
+
+  public static boolean equalsIncludingNaN(float, float, int);
+    descriptor: (FFI)Z
+
+  public static boolean equals(double, double);
+    descriptor: (DD)Z
+
+  public static boolean equalsIncludingNaN(double, double);
+    descriptor: (DD)Z
+
+  public static boolean equals(double, double, double);
+    descriptor: (DDD)Z
+
+  public static boolean equalsWithRelativeTolerance(double, double, double);
+    descriptor: (DDD)Z
+
+  public static boolean equalsIncludingNaN(double, double, double);
+    descriptor: (DDD)Z
+
+  public static boolean equals(double, double, int);
+    descriptor: (DDI)Z
+
+  public static boolean equalsIncludingNaN(double, double, int);
+    descriptor: (DDI)Z
+
+  public static double round(double, int);
+    descriptor: (DI)D
+
+  public static double round(double, int, java.math.RoundingMode);
+    descriptor: (DILjava/math/RoundingMode;)D
+
+  public static double representableDelta(double, double);
+    descriptor: (DD)D
+
+  public static org.apache.commons.numbers.core.Precision$DoubleEquivalence doubleEquivalenceOfEpsilon(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/Precision$DoubleEquivalence;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Sum.java"
+public final class org.apache.commons.numbers.core.Sum implements java.util.function.DoubleSupplier,java.util.function.DoubleConsumer {
+  private double sum;
+    descriptor: D
+  private double comp;
+    descriptor: D
+  private org.apache.commons.numbers.core.Sum(double);
+    descriptor: (D)V
+
+  public org.apache.commons.numbers.core.Sum add(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/Sum;
+
+  public org.apache.commons.numbers.core.Sum add(double...);
+    descriptor: ([D)Lorg/apache/commons/numbers/core/Sum;
+
+  public org.apache.commons.numbers.core.Sum addProduct(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/Sum;
+
+  public org.apache.commons.numbers.core.Sum addProducts(double[], double[]);
+    descriptor: ([D[D)Lorg/apache/commons/numbers/core/Sum;
+
+  public org.apache.commons.numbers.core.Sum add(org.apache.commons.numbers.core.Sum);
+    descriptor: (Lorg/apache/commons/numbers/core/Sum;)Lorg/apache/commons/numbers/core/Sum;
+
+  public org.apache.commons.numbers.core.Sum subtract(org.apache.commons.numbers.core.Sum);
+    descriptor: (Lorg/apache/commons/numbers/core/Sum;)Lorg/apache/commons/numbers/core/Sum;
+
+  private org.apache.commons.numbers.core.Sum add(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/core/Sum;
+
+  public void accept(double);
+    descriptor: (D)V
+
+  public double getAsDouble();
+    descriptor: ()D
+
+  public static org.apache.commons.numbers.core.Sum create();
+    descriptor: ()Lorg/apache/commons/numbers/core/Sum;
+
+  public static org.apache.commons.numbers.core.Sum of(double);
+    descriptor: (D)Lorg/apache/commons/numbers/core/Sum;
+
+  public static org.apache.commons.numbers.core.Sum of(double...);
+    descriptor: ([D)Lorg/apache/commons/numbers/core/Sum;
+
+  public static org.apache.commons.numbers.core.Sum ofProducts(double[], double[]);
+    descriptor: ([D[D)Lorg/apache/commons/numbers/core/Sum;
+}

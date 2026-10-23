@@ -15,6 +15,12 @@ pub enum MemberAccessOp {
     StaticConstant {
         owner: String,
     },
+    /// A mapped immutable value need not be a Rust associated constant (e.g.
+    /// an arbitrary-precision value requiring allocation). Its external pack
+    /// owns the Rust construction expression as well as its declared type.
+    MappedStaticValue {
+        rust_value: String,
+    },
     RustField {
         rust_name: String,
     },
@@ -189,15 +195,21 @@ pub fn plan_member_access_with_facts(
     let policy = java_member_access_policy_with_facts(receiver, member, env, facts)?;
     let op = match policy.kind() {
         JavaMemberAccessKind::ArrayLength => array_length_member_access_op(receiver, env),
-        JavaMemberAccessKind::StaticConstant => MemberAccessOp::StaticConstant {
-            owner: external_static_constant_rust_owner(
-                receiver,
-                policy.member(),
-                policy.java_ty(),
-                facts,
-            )
-            .or_else(|| static_constant_owner(receiver, policy.member(), env))?,
-        },
+        JavaMemberAccessKind::StaticConstant => {
+            if let Some(rust_value) = mapped_static_value(receiver, member, env, facts) {
+                MemberAccessOp::MappedStaticValue { rust_value }
+            } else {
+                MemberAccessOp::StaticConstant {
+                    owner: external_static_constant_rust_owner(
+                        receiver,
+                        policy.member(),
+                        policy.java_ty(),
+                        facts,
+                    )
+                    .or_else(|| static_constant_owner(receiver, policy.member(), env))?,
+                }
+            }
+        }
         JavaMemberAccessKind::InstanceField => {
             let rust_name = crate::parser::to_snake_case(policy.member());
             if runtime_backed_instance_field_uses_getter(receiver, policy.member(), env) {
@@ -214,6 +226,35 @@ pub fn plan_member_access_with_facts(
         shape,
         op,
     ))
+}
+
+fn mapped_static_value(
+    receiver: &Expr,
+    member: &str,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<String> {
+    let owner = static_receiver_java_name(receiver)?;
+    let owner = env.static_type_alias(&owner).unwrap_or(&owner);
+    if crate::call_plan::java_type_owner_is_parsed_source(owner, env, facts)
+        || !external_type_is_rust_crate_mapped(owner, facts)
+        || matches!(receiver, Expr::Var(name) if env.local_type(name).is_some() || env.field_type(name).is_some())
+    {
+        return None;
+    }
+    let field = external_field_fact_for_owner(owner, member, facts)?;
+    if field.field_kind != crate::facts::ExternalFieldKind::StaticFinal {
+        return None;
+    }
+    facts
+        .external_field_value_for(owner, member)
+        .cloned()
+        .or_else(|| {
+            (!facts.disable_builtin_external_packs)
+                .then(|| crate::external_packs::external_field_value_for(owner, member))
+                .flatten()
+        })
+        .map(|value| value.rust_value)
 }
 
 fn runtime_backed_instance_field_uses_getter(receiver: &Expr, member: &str, env: &TypeEnv) -> bool {

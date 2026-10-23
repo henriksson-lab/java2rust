@@ -56,3 +56,46 @@ focused_verify_translation_producer() {
     return 1
   fi
 }
+
+# Capture runtime code from the actual producer, then reuse only that verified
+# snapshot during assembly resumes (which may use another validator binary).
+focused_emit_runtime_support() {
+  local producer="$1" producer_digest="$2" support_kind="$3" support_path="$4"
+  local metadata="$support_path.provenance.tsv" key value digest
+  local recorded_producer="" recorded_support="" recorded_kind="" temporary
+  if [[ ! "$support_kind" =~ ^[a-z0-9-]+$ || ! "$producer_digest" =~ ^[a-f0-9]{64}$ ]]; then
+    echo "runtime support requires known translation producer provenance" >&2
+    return 1
+  fi
+  if [[ -f "$support_path" && -f "$metadata" ]]; then
+    while IFS=$'\t' read -r key value; do
+      case "$key" in
+        producer_sha256) recorded_producer="$value" ;;
+        support_sha256) recorded_support="$value" ;;
+        kind) recorded_kind="$value" ;;
+      esac
+    done < "$metadata"
+    digest="$(sha256sum < "$support_path")" || return 1
+    if [[ "$recorded_producer" != "$producer_digest" || "$recorded_kind" != "$support_kind" \
+          || "$recorded_support" != "${digest%% *}" ]]; then
+      echo "runtime support snapshot provenance mismatch: $support_path" >&2
+      return 1
+    fi
+  else
+    focused_verify_translation_producer "$producer" "$producer_digest" || return 1
+    temporary="$(mktemp "$support_path.pending.XXXXXX")" || return 1
+    if ! "$producer" emit-runtime-support "$support_kind" > "$temporary"; then
+      echo "runtime export failed; use a matching producer/packager (partial output: $temporary)" >&2
+      return 1
+    fi
+    focused_verify_translation_producer "$producer" "$producer_digest" || return 1
+    digest="$(sha256sum < "$temporary")" || return 1
+    mv -- "$temporary" "$support_path" || return 1
+    {
+      printf 'producer_sha256\t%s\n' "$producer_digest"
+      printf 'support_sha256\t%s\n' "${digest%% *}"
+      printf 'kind\t%s\n' "$support_kind"
+    } > "$metadata" || return 1
+  fi
+  cat "$support_path"
+}

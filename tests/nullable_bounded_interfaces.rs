@@ -21,6 +21,7 @@ impl Network<String, i32> for NoCloneNetwork {
     fn size(&self) -> i32 { 3 }
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn clone_box(&self) -> Box<dyn Network<String, i32>> { panic!("forwarding must borrow, not clone") }
+    fn clone_any(&self) -> Box<dyn std::any::Any> { panic!("forwarding must borrow, not erase-clone") }
 }
 trait Value { fn value(self) -> bool; }
 impl Value for bool { fn value(self) -> bool { self } }

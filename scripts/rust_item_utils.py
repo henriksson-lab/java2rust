@@ -244,6 +244,35 @@ def has_associated_definitions(impl_text: str) -> bool:
     return False
 
 
+def attached_outer_item_start(lines: list[str], start: int) -> int:
+    """Keep outer attributes/doc comments attached when moving an item.
+
+    Reuse the delimiter scanner for multiline/nested attributes and quoted
+    brackets. Inner attributes belong to the module, not the following item.
+    """
+    index = start
+    while index > 0:
+        previous = lines[index - 1].strip()
+        if previous.startswith("///") or previous.startswith("/**") and previous.endswith("*/"):
+            index -= 1
+            continue
+        if not previous.endswith("]"):
+            break
+        depths = (0, 0, 0)
+        candidate = index
+        while candidate > 0:
+            candidate -= 1
+            delta = _rust_delimiter_depths(lines[candidate], (0, 0, 0))
+            depths = tuple(left + right for left, right in zip(depths, delta))
+            if depths == (0, 0, 0):
+                if lines[candidate].lstrip().startswith("#["):
+                    index = candidate
+                break
+        if index != candidate:
+            break
+    return index
+
+
 def top_level_macro_items(text: str) -> list[dict]:
     """Return top-level ``macro_rules!`` definitions and macro invocations.
 

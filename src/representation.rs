@@ -6165,6 +6165,7 @@ class PlainFieldMap {
 
     fn interface_type(name: &str, method: &str) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Interface,
             name: name.to_string(),
             type_params: Vec::new(),
@@ -6192,6 +6193,7 @@ class PlainFieldMap {
 
     fn class_type(name: &str, members: Vec<Member>) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: name.to_string(),
             type_params: Vec::new(),

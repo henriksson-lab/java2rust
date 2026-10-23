@@ -342,6 +342,10 @@ pub struct RustMatchArm {
 /// the answer; recording it here is what stops the consumer from guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustExprShape {
+    /// A compiler-generated contextual NPE error value. Source rewrites can
+    /// preserve the original operation without recognizing diagnostic prose
+    /// or changing a source-written exception message.
+    SourceNullDiagnostic,
     /// A completed Java value whose operand effects have already been lowered.
     /// It is not a Rust Result, even if evaluating its operands can throw.
     PlainValue,

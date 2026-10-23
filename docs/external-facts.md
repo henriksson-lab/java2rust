@@ -283,7 +283,8 @@ external-pack-unsupported dep.variant dep.variant.Reader rawDecode requires runt
 ```
 
 `external-pack PACK TYPE_PREFIX MODE COVERAGE [target=RUST_PATH]
-[rust-type=RUST_TYPE] [package=CARGO_PACKAGE] [path=DEPENDENCY_PATH]` records
+[rust-type=RUST_TYPE] [package=CARGO_PACKAGE] [path=DEPENDENCY_PATH]
+[string-abi=utf8|utf16]` records
 library ownership and the default coverage state for types under that prefix.
 Supported modes are `external-fact-model`, `rust-crate-mapping`,
 `ffi-boundary`, and `conservative-boundary`. `target=` is semantic input: it
@@ -298,6 +299,19 @@ not the canonical place to name a type. `package=` and `path=` are
 dependency-assembly metadata consumed by generated-crate tooling; semantic
 analysis accepts them but does not use them for type, ownership, nullability,
 or lowering decisions.
+
+For Rust-crate mappings, `string-abi=utf16` opts Java String values into a
+unit-preserving native text ABI: constructor/receiver arguments use owned
+`Vec<u16>`, optional parameters use `Option<Vec<u16>>`, and String results use
+the same carriers inside their existing nullable/Result wrappers. Native
+getMessage adapters declared for exceptions must return `Option<Vec<u16>>`
+too. Java argument evaluation precedes native null checks and encoding.
+Omitted metadata retains the existing `utf8` ABI. This is a text-value bridge,
+not an alias-preserving foreign Java String reference protocol; native APIs
+that return or retain reference identity need an explicit identity contract.
+Custom `rust-return=` declarations retain their authority. This option uses
+the existing mapped constructor/receiver paths; it does not add support for
+otherwise-unmodeled APIs or change source-owned signatures.
 
 `external-pack-api PACK RECEIVER METHOD COVERAGE ROLE MUTABILITY [NULLABILITY]
 [args=N] [return=TYPE] [throws=TYPE_A,TYPE_B] [rust=RUST_FN]

@@ -467,6 +467,7 @@ mod tests {
         );
         assert_eq!(
             plan_unsupported_member(&Member::Type(TypeDecl {
+                source_names: None,
                 static_init_blocks: Vec::new(),
                 kind: TypeKind::Class,
                 name: "Nested".to_string(),

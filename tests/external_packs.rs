@@ -1304,6 +1304,7 @@ fn external_library_pack_member_lookup_refuses_cross_package_simple_alias() {
         mode: ExternalLibraryMode::ExternalFactModel,
         coverage: ExternalApiCoverage::Semantic,
         rust_target: None,
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
@@ -2681,6 +2682,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
             mode: ExternalLibraryMode::ExternalFactModel,
             coverage: ExternalApiCoverage::Semantic,
             rust_target: None,
+            string_abi: Default::default(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {

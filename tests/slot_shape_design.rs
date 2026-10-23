@@ -466,6 +466,7 @@ fn rust_crate_mapped_external_slots_render_facade_type_identity() {
         mode: ExternalLibraryMode::RustCrateMapping,
         coverage: ExternalApiCoverage::Mapped,
         rust_target: Some("sqlite_facade".to_string()),
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_library_packs.push(ExternalLibraryPackFact {
@@ -474,6 +475,7 @@ fn rust_crate_mapped_external_slots_render_facade_type_identity() {
         mode: ExternalLibraryMode::RustCrateMapping,
         coverage: ExternalApiCoverage::Mapped,
         rust_target: Some("hdf5_facade".to_string()),
+        string_abi: Default::default(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -44310,7 +44312,7 @@ fn stream_plan_lowers_temporary_arrays_stream_with_owned_lambda_items() {
 
     assert_eq!(
         emit::emit_expr(&lowered.expr()),
-        "line.split(\",\").collect::<Vec<_>>().into_iter().map(|value| value.parse::<f64>().map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))).collect::<Vec<_>>()"
+        "line.split(\",\").collect::<Vec<_>>().into_iter().map(|value| java_float_parse_f64(&value).map_err(|err| JavaException::from_display(\"NumberFormatException\", err)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))).collect::<Vec<_>>()"
     );
     assert!(matches!(
         lowered.expr(),

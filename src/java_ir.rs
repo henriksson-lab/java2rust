@@ -20,6 +20,9 @@ pub struct ImportDecl {
 pub struct TypeDecl {
     pub kind: TypeKind,
     pub name: String,
+    /// Original Java runtime identity, preserved across emitted-name and
+    /// compilation-unit merge rewrites. Synthetic/non-named types may lack it.
+    pub source_names: Option<SourceTypeNames>,
     pub type_params: Vec<String>,
     pub type_param_bounds: Vec<Option<JavaType>>,
     pub modifiers: Vec<Modifier>,
@@ -29,6 +32,12 @@ pub struct TypeDecl {
     pub members: Vec<Member>,
     pub static_init_blocks: Vec<StaticInitBlock>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTypeNames {
+    pub canonical: String,
+    pub binary: String,
 }
 
 impl TypeDecl {
@@ -77,6 +86,14 @@ pub struct FieldDecl {
     pub modifiers: Vec<Modifier>,
     pub initializer: Option<Expr>,
     pub span: Span,
+}
+
+impl FieldDecl {
+    /// Declaration provenance, equivalent to the JVM enum-constant flag.
+    /// A self-typed field or static alias is not an enum constant.
+    pub fn is_enum_constant(&self) -> bool {
+        self.modifiers.contains(&Modifier::EnumConstant)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +166,8 @@ pub enum Modifier {
     Final,
     Sealed,
     Abstract,
+    /// Set only by an enum constant declaration, not a Java source modifier.
+    EnumConstant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -625,6 +644,34 @@ pub enum Literal {
     Double(f64),
     String(String),
     Char(char),
+    /// Java text not representable by Rust's Unicode-scalar String/char.
+    /// Preserve the source value; emission must not substitute U+FFFD or zero.
+    StringUtf16(Vec<u16>),
+    CharUtf16(u16),
+}
+
+impl Literal {
+    pub fn from_java_string_units(units: Vec<u16>) -> Self {
+        match String::from_utf16(&units) {
+            Ok(value) => Self::String(value),
+            Err(_) => Self::StringUtf16(units),
+        }
+    }
+
+    pub fn from_java_char_unit(unit: u16) -> Self {
+        match char::from_u32(u32::from(unit)) {
+            Some(value) => Self::Char(value),
+            None => Self::CharUtf16(unit),
+        }
+    }
+
+    pub fn java_char_unit(&self) -> Option<u16> {
+        match self {
+            Self::Char(value) => u16::try_from(u32::from(*value)).ok(),
+            Self::CharUtf16(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

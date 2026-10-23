@@ -45,6 +45,9 @@ pub(crate) fn apply_fallible_optional_receiver_slot_projection(
 pub(crate) fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics() {
         let (from, to) = (*from, *to);
+        if from == to {
+            return expr;
+        }
         if to == PrimitiveType::Char {
             return java_char_from_u32_mask_projection(expr);
         }
@@ -295,32 +298,24 @@ mod tests {
         let lowered_char = apply_cast_conversion(RustExpr::Var("value".to_string()), &int_to_char);
         assert_eq!(
             lowered_char,
-            RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Call {
-                    function: Box::new(RustExpr::path(["char", "from_u32"])),
-                    args: vec![RustExpr::Binary {
-                        op: "&".to_string(),
-                        left: Box::new(RustExpr::Cast {
-                            expr: Box::new(RustExpr::Var("value".to_string())),
-                            ty: "u32".to_string(),
-                        }),
-                        right: Box::new(RustExpr::Literal("0xffff".to_string())),
-                    }],
-                }),
-                method: "unwrap_or".to_string(),
-                args: vec![RustExpr::Literal("'\\0'".to_string())],
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaCodeUnit", "narrow_i32"])),
+                args: vec![RustExpr::Cast {
+                    expr: Box::new(RustExpr::Var("value".to_string())),
+                    ty: "i32".to_string(),
+                }],
             }
         );
         assert_eq!(
             crate::emit::emit_expr(&lowered_char),
-            "char::from_u32(value as u32 & 0xffff).unwrap_or('\\0')"
+            "JavaCodeUnit::narrow_i32(value as i32)"
         );
         assert_eq!(
             crate::emit::emit_expr(&apply_cast_conversion(
                 RustExpr::Raw("value + 1".to_string()),
                 &int_to_char,
             )),
-            "char::from_u32(((value + 1) as u32) & 0xffff).unwrap_or('\\0')"
+            "JavaCodeUnit::narrow_i32((value + 1) as i32)"
         );
 
         let char_to_long_coercion =
@@ -342,20 +337,21 @@ mod tests {
         assert_eq!(
             lowered_long,
             RustExpr::Cast {
-                expr: Box::new(RustExpr::Cast {
-                    expr: Box::new(RustExpr::Var("ch".to_string())),
-                    ty: "u32".to_string(),
+                expr: Box::new(RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("ch".to_string())),
+                    method: "as_u16".to_string(),
+                    args: vec![],
                 }),
                 ty: "i64".to_string(),
             }
         );
-        assert_eq!(crate::emit::emit_expr(&lowered_long), "(ch as u32) as i64");
+        assert_eq!(crate::emit::emit_expr(&lowered_long), "ch.as_u16() as i64");
         assert_eq!(
             crate::emit::emit_expr(&apply_cast_conversion(
                 RustExpr::Raw("next_char()".to_string()),
                 &char_to_long,
             )),
-            "((next_char()) as u32) as i64"
+            "(next_char()).as_u16() as i64"
         );
 
         let animal_shape = RustSlotShape::conservative(crate::java_ir::JavaType::Named {
@@ -519,7 +515,7 @@ mod tests {
         );
         assert_eq!(
             crate::emit::emit_expr(&converted_display),
-            "box_value.value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+            "box_value.value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string().into())"
         );
     }
 

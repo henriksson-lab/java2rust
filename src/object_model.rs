@@ -1091,14 +1091,8 @@ pub fn java_enum_variant_names(ty: &TypeDecl) -> Vec<String> {
     if ty.kind != TypeKind::Enum {
         return Vec::new();
     }
-    ty.members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) if field.ty == named_type(&ty.name) => {
-                Some(rust_enum_variant_name_from_parsed_constant(&field.name))
-            }
-            _ => None,
-        })
+    crate::constructor_plan::enum_constant_fields(ty)
+        .map(|field| rust_enum_variant_name_from_parsed_constant(&field.name))
         .collect()
 }
 
@@ -1369,13 +1363,6 @@ fn parsed_constant_name_is_valid_rust_variant(name: &str) -> bool {
     };
     (first == '_' || first.is_ascii_uppercase())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn named_type(name: &str) -> JavaType {
-    JavaType::Named {
-        name: name.to_string(),
-        args: Vec::new(),
-    }
 }
 
 fn collect_type_strategy(

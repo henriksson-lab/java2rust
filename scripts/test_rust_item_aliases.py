@@ -7,10 +7,71 @@ import sys
 import tempfile
 import unittest
 
-from rust_item_utils import expand_inherent_impl_alias, has_associated_definitions, impl_header_parts
+from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_header_parts
 
 
 class AliasImplTests(unittest.TestCase):
+    def test_trait_only_aliases_and_private_contracts_follow_nominal_owner(self):
+        kernel = r"""
+pub struct Store<T>(pub T);
+pub type Text = Store<Vec<u16>>;
+pub type View = Text;
+trait Units { fn units(&self) -> &[u16]; }
+impl From<Vec<u16>> for View {
+    fn from(value: Vec<u16>) -> Self { Store(value) }
+}
+impl Units for Text {
+    fn units(&self) -> &[u16] { &self.0 }
+}
+impl<'a> Units for &'a View {
+    fn units(&self) -> &[u16] { &self.0 }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="new-java2rust-alias-traits-", dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            generated = root / "generated"
+            generated.mkdir()
+            for name in ["First", "Second"]:
+                (generated / f"{name}.rs").write_text(kernel + f"\npub struct {name};\n")
+            shared = root / "shared.rs"
+            result = subprocess.run([
+                sys.executable, str(Path(__file__).with_name("merge-shared-support-facades.py")),
+                "--generated-dir", str(generated), "--shared-support", str(shared),
+                "--shared-types", str(root / "types.tsv"), "--conflicts", str(root / "conflicts.tsv"),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            text = shared.read_text()
+            self.assertEqual(text.count("trait Units"), 1, text)
+            self.assertEqual(text.count("impl From<Vec<u16>> for View"), 1, text)
+            source = root / "probe.rs"
+            source.write_text(text + '''
+fn main() {
+    let value = View::from(vec![0xd800, 65, 0xdc00]);
+    assert_eq!(Units::units(&value), &[0xd800, 65, 0xdc00]);
+    assert_eq!(Units::units(&&value), &[0xd800, 65, 0xdc00]);
+}
+''')
+            binary = root / "probe"
+            result = subprocess.run(["rustc", "--edition=2024", str(source), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            subprocess.run([str(binary)], check=True)
+
+    def test_moved_items_keep_all_outer_attributes(self):
+        lines = '''pub struct Earlier;
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+/// A unit retaining its representation.
+#[cfg_attr(
+    feature = "quoted ] [ braces { }",
+    allow(dead_code)
+)]
+pub struct Unit(u16);
+'''.splitlines(keepends=True)
+        self.assertEqual(attached_outer_item_start(lines, len(lines) - 1), 2)
+        self.assertEqual(attached_outer_item_start(["#![allow(dead_code)]\n", "pub struct Unit;\n"], 1), 1)
+        self.assertEqual(attached_outer_item_start(["let value = [1, 2];\n", "pub struct Unit;\n"], 1), 1)
+
     def test_associated_contracts_survive_actual_trait_promotion(self):
         kernel = r"""
 pub trait AllocationAccess {

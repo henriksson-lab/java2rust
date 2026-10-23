@@ -1700,7 +1700,7 @@ fn stream_static_method_references_use_call_target_plan() {
             .contains("value.as_str().parse::<i32>().map_err")
             && translation
                 .rust
-                .contains("value.as_str().parse::<f64>().map_err")
+                .contains("java_float_parse_f64(value.as_str()).map_err")
             && !translation.rust.contains("Integer::parse_int")
             && !translation.rust.contains("Double::parse_double")
             && !translation.rust.contains("*value.as_str().parse"),

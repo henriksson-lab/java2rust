@@ -273,14 +273,24 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
     let JavaType::Named { name, .. } = alias.aliased_ty() else {
         return false;
     };
+    if effective.native_text_reference_carrier(alias.aliased_ty())
+        && alias.original_ty.as_ref().is_some_and(|original| {
+            effective.native_text_reference_carrier(original)
+                && facts
+                    .hierarchy_subtype_policy(original, alias.aliased_ty())
+                    .reaches()
+        })
+    {
+        return true;
+    }
     let placement = facts.storage_placement_for(name);
     if placement.shared() && placement.interior_mutable() && placement.is_implemented() {
         return true;
     }
-    // A native SAM value captures the source implementor's canonical handle;
-    // its own facade type does not have a source storage placement. Require
-    // the same source identity/subtype and implemented mutable-handle proofs
-    // as the conversion, rather than treating every interface alias as safe.
+    // A native SAM or object-safe source interface retains the implementor's
+    // canonical handle; its facade type need not have source storage placement.
+    // Require the same subtype and implemented mutable-handle proofs as the
+    // conversion, rather than treating every nominal interface alias as safe.
     let Some(JavaType::Named {
         name: original_name,
         ..
@@ -300,9 +310,12 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
             && source_placement.interior_mutable()
             && source_placement.is_implemented();
     }
-    if effective
-        .native_functional_carrier(alias.aliased_ty())
-        .is_none()
+    let source_interface_adapter = effective.has_parsed_source_type_capability_for_name(name)
+        && facts.object_safe_trait_fact_for_name(name) == Some(true);
+    if (!source_interface_adapter
+        && effective
+            .native_functional_carrier(alias.aliased_ty())
+            .is_none())
         || !effective.has_parsed_source_type_capability_for_name(original_name)
         || !facts
             .hierarchy_subtype_policy(alias.original_ty.as_ref().unwrap(), alias.aliased_ty())
@@ -1466,6 +1479,20 @@ mod tests {
         let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
         let usage = crate::usage::analyze_usage_with_facts(&resolved.program, facts);
         observable_aliases_with_facts(&resolved.program, &usage, facts)
+    }
+
+    #[test]
+    fn source_interface_alias_requires_canonical_mutable_handle_evidence() {
+        let aliases = aliases_in(include_str!(
+            "../tests/corpus/numbers/NullableInterfaceAliasProbe.java"
+        ));
+        assert!(!aliases.is_empty());
+        for alias in aliases {
+            assert!(!direct_local_alias_mutation_is_represented(
+                &alias,
+                &FactSet::default(),
+            ));
+        }
     }
 
     fn external_record_set_flag_fact(mutability: ReceiverMutabilityFact) -> FactSet {

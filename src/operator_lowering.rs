@@ -75,6 +75,7 @@ pub enum EqualityComparisonPlan {
 pub enum StringEqualityOperandView {
     NativeString,
     BorrowedStr,
+    JavaUnits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +114,20 @@ impl NumericBinaryPromotionPlan {
         self.promoted
     }
 
+    /// Numeric promotion describes the operands, not necessarily the result.
+    /// Comparisons keep their boolean result even when the operands widen.
+    pub fn result_primitive(&self, op: BinaryOp) -> PrimitiveType {
+        match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => PrimitiveType::Boolean,
+            _ => self.promoted,
+        }
+    }
+
     pub fn left(&self) -> &[Coercion] {
         &self.left
     }
@@ -127,7 +142,7 @@ pub fn rust_type_for_java_primitive(primitive: PrimitiveType) -> RustType {
         PrimitiveType::Boolean => RustType::Bool,
         PrimitiveType::Byte => RustType::I8,
         PrimitiveType::Short => RustType::I16,
-        PrimitiveType::Char => RustType::Char,
+        PrimitiveType::Char => RustType::Named("JavaCodeUnit".to_string()),
         PrimitiveType::Int => RustType::I32,
         PrimitiveType::Long => RustType::I64,
         PrimitiveType::Float => RustType::F32,
@@ -687,8 +702,16 @@ fn plan_canonical_equality_comparison(
         && right.java_ty == JavaType::String
     {
         return EqualityComparisonPlan::StringView {
-            left_view: string_equality_operand_view(left),
-            right_view: string_equality_operand_view(right),
+            left_view: if facts.java_string_identity_representation {
+                StringEqualityOperandView::JavaUnits
+            } else {
+                string_equality_operand_view(left)
+            },
+            right_view: if facts.java_string_identity_representation {
+                StringEqualityOperandView::JavaUnits
+            } else {
+                string_equality_operand_view(right)
+            },
         };
     }
     if let Some(handle_path) = shared_handle_identity_path(left, right, facts, source) {
@@ -1247,7 +1270,15 @@ pub fn lower_equality_comparison_expr_for_op(
 }
 
 fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView) -> RustExpr {
-    string_equality_operand_projection(expr, matches!(view, StringEqualityOperandView::BorrowedStr))
+    match view {
+        StringEqualityOperandView::JavaUnits => {
+            receiver_method_call_projection_exact(expr, "units", Vec::new())
+        }
+        _ => string_equality_operand_projection(
+            expr,
+            matches!(view, StringEqualityOperandView::BorrowedStr),
+        ),
+    }
 }
 
 fn option_as_ref(expr: RustExpr) -> RustExpr {

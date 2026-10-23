@@ -22,9 +22,15 @@ pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else if bare_name_local_type(name, env).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        if let Some(owner) =
-            static_member_import_owner(name, env).or_else(|| env.static_field_access_owner(name))
-        {
+        // A field with no external owner is declared in the lexical frame.
+        // An import of the same spelling must not redirect that declaration.
+        if let Some(owner) = env.static_field_access_owner(name).map(|owner| {
+            if env.current_type() == Some(owner) {
+                owner
+            } else {
+                static_member_import_owner(name, env).unwrap_or(owner)
+            }
+        }) {
             owner_associated_path_projection(
                 &rust_name_for_static_member_owner(owner, env),
                 static_name,
@@ -37,6 +43,29 @@ pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
+}
+
+pub(crate) fn lower_bare_name_with_facts(
+    name: &str,
+    env: &ShapeEnv,
+    facts: &crate::facts::FactSet,
+) -> RustExpr {
+    if bare_name_local_type(name, env).is_none()
+        && env.field_type(name).is_none()
+        && let Some(owner) = static_member_import_owner(name, env)
+    {
+        let receiver = Expr::Var(owner.to_string());
+        if let Some(plan) = crate::member_access_plan::plan_member_access_with_facts(
+            &receiver,
+            name,
+            env.type_env(),
+            facts,
+        ) && matches!(plan.op(), MemberAccessOp::MappedStaticValue { .. })
+        {
+            return apply_member_access_plan(&plan, RustExpr::Var(owner.to_string()));
+        }
+    }
+    lower_bare_name(name, env)
 }
 
 fn rust_name_for_static_member_owner(owner: &str, env: &ShapeEnv) -> String {
@@ -237,6 +266,9 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
             };
             associated_const_projection(&owner, &rust_associated_const_ident(plan.member()))
         }
+        MemberAccessOp::MappedStaticValue { rust_value } => {
+            RustExpr::Grouped(Box::new(RustExpr::Raw(rust_value.clone())))
+        }
         MemberAccessOp::RustField { rust_name } => field_projection(receiver, rust_name),
         MemberAccessOp::RustGetter { rust_name } => {
             crate::coercion::receiver_method_call_projection_exact(receiver, rust_name, Vec::new())
@@ -264,6 +296,79 @@ mod tests {
 
     fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
         crate::emit::emit_expr(&lower_bare_name(name, env))
+    }
+
+    #[test]
+    fn mapped_static_values_reuse_pack_expressions_and_respect_source_owners() {
+        let parsed = parse_external_pack_manifest(
+            "external-pack dep.token dep.Token rust-crate-mapping mapped target=dep_runtime rust-type=Token\nexternal-pack-field dep.token dep.Token CURRENT mapped type=dep.Token value=dep_runtime::current()\n",
+        );
+        assert!(
+            !parsed.diagnostics().has_errors(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let mut env = TypeEnv::default();
+        env.insert_static_type_alias("Token", "dep.Token");
+        let owner = Expr::Var("Token".into());
+        let plan = crate::member_access_plan::plan_member_access_with_facts(
+            &owner,
+            "CURRENT",
+            &env,
+            parsed.facts(),
+        )
+        .unwrap();
+        assert!(matches!(
+            plan.op(),
+            MemberAccessOp::MappedStaticValue { .. }
+        ));
+        assert_eq!(
+            crate::emit::emit_expr(&apply_member_access_plan(
+                &plan,
+                RustExpr::Var("Token".into())
+            )),
+            "(dep_runtime::current())"
+        );
+        let source = crate::parser::parse_java_source(
+            "package dep; class Token { static int CURRENT = 7; }",
+        );
+        let mut emitted = crate::source_emission::SourceEmissionPlan::default();
+        emitted.add_program(&source.program);
+        env.set_source_emission(std::sync::Arc::new(emitted));
+        let plan = crate::member_access_plan::plan_member_access_with_facts(
+            &owner,
+            "CURRENT",
+            &env,
+            parsed.facts(),
+        )
+        .unwrap();
+        assert!(!matches!(
+            plan.op(),
+            MemberAccessOp::MappedStaticValue { .. }
+        ));
+    }
+
+    #[test]
+    fn lexical_static_field_shadows_imported_mapped_value() {
+        let parsed = parse_external_pack_manifest(
+            "external-pack dep.token dep.Token rust-crate-mapping mapped target=dep_runtime\nexternal-pack-field dep.token dep.Token CURRENT mapped type=int value=dep_runtime::current()\n",
+        );
+        let mut env = ShapeEnv::new();
+        env.set_current_type("Probe");
+        env.insert_static_member_import("CURRENT", "dep.Token");
+        let shape = RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int));
+        env.insert_static_field_shape("CURRENT", shape.clone());
+        assert_eq!(
+            crate::emit::emit_expr(&lower_bare_name_with_facts("CURRENT", &env, parsed.facts())),
+            "Self::CURRENT"
+        );
+        env.insert_static_field_shape_for_owner_with_access_name(
+            "Probe", "CURRENT", "CURRENT", shape,
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&lower_bare_name_with_facts("CURRENT", &env, parsed.facts())),
+            "Probe::CURRENT"
+        );
     }
 
     #[test]

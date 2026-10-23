@@ -5973,6 +5973,7 @@ fn callable_type_param_reaches_source_capability<'a>(
                 | SourceCallableCapability::ArrayDeepDisplay
                 | SourceCallableCapability::ReferenceIdentity
                 | SourceCallableCapability::JavaHashCode
+                | SourceCallableCapability::JavaAny
         ) && let Some(owner) = caller_owner
         {
             for (name, ty) in search.inherited_fields(owner, support_programs) {
@@ -6026,6 +6027,46 @@ fn callable_type_param_reaches_source_capability<'a>(
                 return;
             }
             if capability == SourceCallableCapability::ReferenceIdentity
+                || capability == SourceCallableCapability::JavaAny
+                || capability == SourceCallableCapability::Clone
+            {
+                let source_receiver = match expr {
+                    Expr::Call {
+                        receiver: Some(receiver),
+                        ..
+                    } => {
+                        let ty = infer_expr_type(receiver, types);
+                        let ty = optional_element_type(&ty).unwrap_or(ty);
+                        match ty {
+                            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                                source_type_bound_decl(&name, support_programs).is_some()
+                            }
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                if !source_receiver
+                    && let Some(append) = crate::java_append_plan::plan_object_append(
+                        expr,
+                        types,
+                        &FactSet::default(),
+                    )
+                {
+                    let field_copy = matches!(append.argument, Expr::FieldAccess(..))
+                        || matches!(append.argument, Expr::Var(name) if types.local_type(name).is_none() && types.field_type(name).is_some());
+                    if (capability != SourceCallableCapability::Clone || field_copy)
+                        && java_type_contains_type_param(
+                            &infer_expr_type(append.argument, types),
+                            type_param,
+                        )
+                    {
+                        requires_capability = true;
+                        return;
+                    }
+                }
+            }
+            if capability == SourceCallableCapability::ReferenceIdentity
                 && generic_identity_uses_capability(expr, type_param, &types)
             {
                 requires_capability = true;
@@ -6056,12 +6097,33 @@ fn callable_type_param_reaches_source_capability<'a>(
                     args,
                     ..
                 } = expr
-                && matches!(name.as_str(), "toString" | "to_string")
-                && args.is_empty()
-                && types.is_unbounded_object_type_parameter(&infer_expr_type(receiver, &types))
-                && matches!(crate::types::optional_element_type(&infer_expr_type(receiver, &types))
+                && ((matches!(name.as_str(), "toString" | "to_string")
+                    && args.is_empty()
+                    && types
+                        .is_unbounded_object_type_parameter(&infer_expr_type(receiver, &types))
+                    && matches!(crate::types::optional_element_type(&infer_expr_type(receiver, &types))
                     .unwrap_or_else(|| infer_expr_type(receiver, &types)),
-                    JavaType::Named { name, args } if args.is_empty() && name == type_param)
+                    JavaType::Named { name, args } if args.is_empty() && name == type_param))
+                    || (name == "equals"
+                        && args.len() == 1
+                        && java_type_contains_type_param(
+                            &infer_expr_type(&args[0], types),
+                            type_param,
+                        )
+                        && {
+                            let receiver_ty = infer_expr_type(receiver, types);
+                            let receiver_ty =
+                                optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+                            let owner = match &receiver_ty {
+                                JavaType::Named { name, .. } => {
+                                    source_type_bound_decl(name, support_programs)
+                                }
+                                _ => None,
+                            };
+                            owner.is_some_and(|owner| owner.kind == TypeKind::Interface
+                                && !owner.members.iter().any(|member| matches!(member,
+                                    Member::Method(method) if method.name == "equals" && method.params.len() == 1)))
+                        }))
             {
                 // The virtual object-string protocol observes the reified
                 // Java payload. Carry its Any obligation through the same
@@ -6149,11 +6211,49 @@ fn callable_type_param_reaches_source_capability<'a>(
             }
             if let Expr::Call {
                 receiver,
+                name,
                 args,
-                resolved: Some(call),
+                type_args,
+                resolved,
                 ..
             } = expr
             {
+                let selected_call;
+                let call = if let Some(call) = resolved {
+                    call
+                } else {
+                    // Copied defaults can retain unresolved Object calls even
+                    // though the concrete receiver has one unique source slot.
+                    // Reuse the same conservative selection as Clone analysis;
+                    // do not propagate a bound from an arbitrary namesake.
+                    let Some((owner, method, rust_name)) = source_call_for_capability_requirement(
+                        None,
+                        receiver.as_deref(),
+                        name,
+                        args.len(),
+                        &types,
+                        support_programs,
+                    ) else {
+                        return;
+                    };
+                    selected_call = crate::java_ir::ResolvedCall {
+                        declaring_type: owner.name.clone(),
+                        rust_name,
+                        kind: if method.modifiers.contains(&Modifier::Static) {
+                            crate::java_ir::CallKind::Static
+                        } else {
+                            crate::java_ir::CallKind::Instance
+                        },
+                        type_args: type_args.clone(),
+                        return_type: method.return_type.clone(),
+                        arg_target_types: args
+                            .iter()
+                            .map(|arg| infer_expr_type(arg, &types))
+                            .collect(),
+                        arg_coercions: vec![],
+                    };
+                    &selected_call
+                };
                 let receiver_ty = match receiver.as_deref() {
                     None | Some(Expr::This) => caller_owner.map(|owner| JavaType::Named {
                         name: owner.name.clone(),
@@ -7386,6 +7486,7 @@ mod tests {
 
     fn test_type_decl(name: &str, kind: TypeKind, extends: Option<&str>) -> TypeDecl {
         TypeDecl {
+            source_names: None,
             kind,
             name: name.to_string(),
             type_params: Vec::new(),
@@ -8196,6 +8297,52 @@ class Cycle<T> {
     }
 
     #[test]
+    fn unresolved_unique_self_calls_propagate_reference_capabilities() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class C<T> {
+    T value;
+    boolean equal(Object other) { return other == value; }
+    boolean qualified(Object other) { return this.equal(other); }
+    boolean unqualified(Object other) { return equal(other); }
+    boolean select(Object other) { return other == value; }
+    boolean select(String other) { return false; }
+    boolean ambiguous(Object other) { return select(other); }
+}
+"#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let owner = &parsed.program.types[0];
+        for (name, required) in [
+            ("qualified", true),
+            ("unqualified", true),
+            ("ambiguous", false),
+        ] {
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == name => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let bounds = source_method_class_type_param_where_bounds(
+                owner,
+                method,
+                None,
+                &[&parsed.program],
+            );
+            assert_eq!(
+                bounds
+                    .iter()
+                    .any(|bound| bound == "T: JavaReferenceIdentity"),
+                required,
+                "{name}: {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
     fn method_binders_do_not_become_owner_capability_requirements() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -8879,6 +9026,7 @@ class Holder {
     #[test]
     fn constructor_return_field_recovery_happens_before_move_reordering() {
         let ty = TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: "Owner".to_string(),
             type_params: Vec::new(),
@@ -8917,6 +9065,7 @@ class Holder {
     #[test]
     fn constructor_return_block_field_recovery_happens_before_move_reordering() {
         let ty = TypeDecl {
+            source_names: None,
             kind: TypeKind::Class,
             name: "Owner".to_string(),
             type_params: Vec::new(),
@@ -8997,6 +9146,24 @@ pub(crate) fn constructor_default_field_value_with_facts(
     shape: RustSlotShape,
     facts: &FactSet,
 ) -> (String, RustExpr) {
+    if field_name == "__java_super"
+        && let JavaType::Named { name, .. } | JavaType::Unknown(name) = &shape.java_ty
+        && crate::stdlib::is_known_throwable_carrier_type(name)
+    {
+        // This is the real no-argument platform constructor, not a dummy
+        // Default value for an as-yet uninitialized base subobject.
+        return (
+            field_name,
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "from_constructor"])),
+                args: vec![
+                    RustExpr::Literal(format!("{name:?}")),
+                    RustExpr::Var("None".into()),
+                    RustExpr::Var("None".into()),
+                ],
+            },
+        );
+    }
     (field_name, default_expr_for_slot_with_facts(&shape, facts))
 }
 
@@ -10591,7 +10758,7 @@ fn source_call_for_capability_requirement<'a>(
     // receiver even though lowering can still use a unique source member.  Use
     // the same canonical Java-to-Rust method-name policy here and refuse
     // overload ambiguity rather than inventing a second name mapping.
-    let receiver_ty = infer_expr_type(receiver?, caller_types);
+    let receiver_ty = infer_expr_type(receiver.unwrap_or(&Expr::This), caller_types);
     let JavaType::Named { name, .. } = receiver_ty else {
         return None;
     };
@@ -10662,6 +10829,7 @@ fn source_constructor_for_capability_requirement<'a>(
 /// and renamed parameters disagree with the resolver.
 fn source_callable_type_env(ty: &TypeDecl, params: &[crate::java_ir::Param]) -> TypeEnv {
     let mut env = TypeEnv::new();
+    env.bind_this_type(ty);
     for (index, name) in ty.type_params.iter().enumerate() {
         env.insert_type_param_declaration(
             name.clone(),
@@ -10901,14 +11069,20 @@ fn struct_fields_for_type(
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
         let outer_rust_name = rust_name_for_java_named_type(outer_type);
         let outer_decl = find_type_decl_by_rust_name(support_program, &outer_rust_name);
-        let outer_rust_type = crate::slot_render::rust_source_outer_capture_type(
-            outer_type,
-            outer_decl
-                .map(|outer| outer.type_params.as_slice())
-                .unwrap_or(&[]),
-            facts,
-            representations,
-        );
+        let outer_rust_type = if let Some((_, fields)) =
+            crate::outer_field_capture::selected(&ty.name, facts, signatures, representations)
+        {
+            RustType::Tuple(fields)
+        } else {
+            crate::slot_render::rust_source_outer_capture_type(
+                outer_type,
+                outer_decl
+                    .map(|outer| outer.type_params.as_slice())
+                    .unwrap_or(&[]),
+                facts,
+                representations,
+            )
+        };
         fields.push(RustField {
             name: "__outer".to_string(),
             ty: outer_rust_type,
@@ -10993,7 +11167,9 @@ fn struct_fields_for_type(
                         // representation chosen for ordinary Java references.
                         match inherited.field_type() {
                             JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-                                RustType::Named(rust_name_for_java_named_type(name))
+                                RustType::Named(
+                                    crate::external_packs::embedded_external_super_rust_name(name),
+                                )
                             }
                             _ => rust_type_for_slot_with_facts(&shape, facts),
                         }
@@ -12371,7 +12547,7 @@ fn is_static_final_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
 }
 
-fn associated_consts_for_type(
+pub(crate) fn associated_consts_for_type(
     ty: &TypeDecl,
     value_overrides: &std::collections::BTreeMap<String, RustExpr>,
     support_program: &Program,
@@ -12427,12 +12603,13 @@ fn static_final_const_infos(ty: &TypeDecl) -> Vec<StaticFinalConstInfo> {
             let string_value = field.initializer.as_ref().and_then(|initializer| {
                 const_string_expr_value(initializer, &infos, Some(&field.ty))
             });
-            let has_associated_const = field
-                .initializer
-                .as_ref()
-                .and_then(|initializer| const_type_and_value(&field.ty, initializer, &infos))
-                .or_else(|| non_literal_static_final_const_type_and_value(field))
-                .is_some();
+            let has_associated_const = !matches!(field.ty, JavaType::Array(_))
+                && field
+                    .initializer
+                    .as_ref()
+                    .and_then(|initializer| const_type_and_value(&field.ty, initializer, &infos))
+                    .or_else(|| non_literal_static_final_const_type_and_value(field))
+                    .is_some();
             infos.push(StaticFinalConstInfo {
                 normalized: crate::parser::to_snake_case(&field.name),
                 original: field.name.clone(),
@@ -12465,6 +12642,12 @@ fn associated_const_for_field(
     const_infos: &[StaticFinalConstInfo],
     value_override: Option<&RustExpr>,
 ) -> Option<RustAssociatedConst> {
+    // `final` freezes the Java reference, not the array allocation. A const
+    // slice would lose writes and reference identity, including through aliases
+    // stored in generic components. Keep arrays on the ordinary storage path.
+    if matches!(field.ty, JavaType::Array(_)) {
+        return None;
+    }
     let (ty, mut value) = field
         .initializer
         .as_ref()
@@ -12601,14 +12784,9 @@ fn const_rust_type_for_java_type(ty: &JavaType) -> Option<RustType> {
             lifetime: Some("'static".to_string()),
             inner: Box::new(RustType::Str),
         }),
-        JavaType::Primitive(PrimitiveType::Boolean) => Some(RustType::Bool),
-        JavaType::Primitive(PrimitiveType::Byte) => Some(RustType::I8),
-        JavaType::Primitive(PrimitiveType::Short) => Some(RustType::I16),
-        JavaType::Primitive(PrimitiveType::Int) => Some(RustType::I32),
-        JavaType::Primitive(PrimitiveType::Long) => Some(RustType::I64),
-        JavaType::Primitive(PrimitiveType::Float) => Some(RustType::F32),
-        JavaType::Primitive(PrimitiveType::Double) => Some(RustType::F64),
-        JavaType::Primitive(PrimitiveType::Char) => Some(RustType::Char),
+        JavaType::Primitive(primitive) => Some(
+            crate::operator_lowering::rust_type_for_java_primitive(*primitive),
+        ),
         _ => None,
     }
 }

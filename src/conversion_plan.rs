@@ -174,6 +174,12 @@ pub enum ViewCoercionPolicy {
     NoViewChange,
     BorrowStringView,
     OwnStringFromView,
+    /// A view of an identity-preserving String borrows its reference carrier,
+    /// never the scalar payload. This contract also admits a UTF-16 payload.
+    BorrowStringReferenceView {
+        source_borrowed: bool,
+    },
+    OwnStringReferenceFromView,
     BorrowSequenceSliceView,
     BorrowSequenceMutSliceView,
 }
@@ -524,6 +530,9 @@ pub enum OptionalShapeCoercionPolicy {
     MapElement {
         actual_element_ty: JavaType,
         target_element_ty: JavaType,
+        /// Erasing a retained Java reference copies its handle without moving
+        /// the source Option shell, irrespective of local use-count estimates.
+        borrow_receiver: bool,
         element_plan: Box<ShapeCoercionPlan>,
     },
     NoChange,
@@ -759,9 +768,25 @@ pub fn optional_present_construction_plan_for_actual_with_representations(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> OptionalPresentConstructionPlan {
+    let mut projected_target_element =
+        crate::shape_projection::return_shape_for_java_type(representations, &element_ty);
+    if let Some(projected_target_element) = projected_target_element.as_mut() {
+        projected_target_element.ownership = OwnershipShape::Owned;
+        projected_target_element.view = crate::slot_shape::ViewShape::Native;
+    }
+    let mut physical_target = target.clone();
+    if let Some(projected) = projected_target_element.as_ref()
+        && matches!(projected.dispatch, DispatchShape::ClosedEnum { .. })
+    {
+        // Optionality cannot discard the solved source hierarchy carrier.
+        // A new Sub in an Option<BaseValue> slot first becomes BaseValue,
+        // then Some; it is not an unsupported plain-class upcast.
+        physical_target.dispatch = projected.dispatch.clone();
+        physical_target.view = projected.view.clone();
+    }
     let mut plan = optional_present_construction_plan_for_actual(
         actual_element_shape,
-        target,
+        &physical_target,
         element_ty.clone(),
         source,
         facts,
@@ -773,12 +798,6 @@ pub fn optional_present_construction_plan_for_actual_with_representations(
     // immediately before wrapping it in `Some`.  Preserve the actual shape
     // when the representation plan proves both spellings are the same closed
     // carrier; the optional shell is the only conversion required.
-    let mut projected_target_element =
-        crate::shape_projection::return_shape_for_java_type(representations, &element_ty);
-    if let Some(projected_target_element) = projected_target_element.as_mut() {
-        projected_target_element.ownership = OwnershipShape::Owned;
-        projected_target_element.view = crate::slot_shape::ViewShape::Native;
-    }
     if actual_element_shape.ownership == OwnershipShape::Owned
         && actual_element_shape.optional_element_type().is_none()
         && actual_element_shape.java_ty == element_ty
@@ -1470,17 +1489,9 @@ fn reifiable_raw_collection_runtime_target(java_ty: &JavaType) -> Option<String>
 }
 
 fn boxed_primitive_runtime_rust_type(primitive: PrimitiveType) -> String {
-    match primitive {
-        PrimitiveType::Boolean => "bool",
-        PrimitiveType::Byte => "i8",
-        PrimitiveType::Short => "i16",
-        PrimitiveType::Char => "char",
-        PrimitiveType::Int => "i32",
-        PrimitiveType::Long => "i64",
-        PrimitiveType::Float => "f32",
-        PrimitiveType::Double => "f64",
-    }
-    .to_string()
+    crate::emit::emit_type(&crate::operator_lowering::rust_type_for_java_primitive(
+        primitive,
+    ))
 }
 
 pub fn runtime_type_target_policy(java_ty: &JavaType) -> RuntimeTypeTargetPolicy {
@@ -1636,19 +1647,34 @@ pub fn view_coercion_policy_with_effective_facts(
     {
         return ViewCoercionPolicy::NoViewChange;
     }
+    let identity_string_view = actual.java_ty == JavaType::String
+        && target.java_ty == JavaType::String
+        && facts.uses_java_string_identity_representation();
     if actual.ownership == OwnershipShape::Owned
         && actual.view == ViewShape::Native
         && target.ownership == OwnershipShape::SharedBorrow
         && target.view == ViewShape::Str
     {
-        return ViewCoercionPolicy::BorrowStringView;
+        return if identity_string_view {
+            ViewCoercionPolicy::BorrowStringReferenceView {
+                source_borrowed: false,
+            }
+        } else {
+            ViewCoercionPolicy::BorrowStringView
+        };
     }
     if actual.ownership == OwnershipShape::SharedBorrow
         && actual.view == ViewShape::Native
         && target.ownership == OwnershipShape::SharedBorrow
         && target.view == ViewShape::Str
     {
-        return ViewCoercionPolicy::BorrowStringView;
+        return if identity_string_view {
+            ViewCoercionPolicy::BorrowStringReferenceView {
+                source_borrowed: true,
+            }
+        } else {
+            ViewCoercionPolicy::BorrowStringView
+        };
     }
     // The source ABI occasionally retains `Owned` ownership metadata for a
     // string slot whose rendered view is still `&str`.  Representation is the
@@ -1658,7 +1684,20 @@ pub fn view_coercion_policy_with_effective_facts(
         && target.ownership == OwnershipShape::Owned
         && target.view == ViewShape::Native
     {
-        return ViewCoercionPolicy::OwnStringFromView;
+        return if identity_string_view {
+            ViewCoercionPolicy::OwnStringReferenceFromView
+        } else {
+            ViewCoercionPolicy::OwnStringFromView
+        };
+    }
+    if identity_string_view
+        && actual.view == ViewShape::Str
+        && target.view == ViewShape::Str
+        && target.ownership == OwnershipShape::SharedBorrow
+    {
+        return ViewCoercionPolicy::BorrowStringReferenceView {
+            source_borrowed: actual.ownership == OwnershipShape::SharedBorrow,
+        };
     }
     ViewCoercionPolicy::NoViewChange
 }
@@ -2011,14 +2050,23 @@ pub fn optional_shape_coercion_policy_with_facts(
         actual.optional_element_type(),
         target.optional_element_type(),
     ) {
-        let actual_element =
+        let mut actual_element =
             optional_element_slot_shape_with_facts(actual, actual_element_ty.clone(), facts);
         let target_element =
             optional_element_slot_shape_with_facts(target, target_element_ty.clone(), facts);
+        let borrow_receiver = target_element.dispatch == DispatchShape::ErasedObject
+            && actual_element.dispatch != DispatchShape::ErasedObject
+            && actual.ownership == OwnershipShape::Owned
+            && target_element.ownership == OwnershipShape::Owned
+            && optional_element_handle_placement(actual, facts).is_some();
+        if borrow_receiver {
+            actual_element.ownership = OwnershipShape::SharedBorrow;
+        }
         if actual_element != target_element {
             return OptionalShapeCoercionPolicy::MapElement {
                 actual_element_ty,
                 target_element_ty,
+                borrow_receiver,
                 element_plan: Box::new(shape_coercion_plan_with_facts(
                     &actual_element,
                     &target_element,
@@ -2098,6 +2146,7 @@ pub(crate) fn optional_element_slot_shape_with_facts(
     } else {
         element_shape.java_ty = element_ty;
     }
+    element_shape.normalize_owned_string_payload_view();
     if matches!(element_shape.java_ty, JavaType::String)
         && matches!(element_shape.ownership, OwnershipShape::SharedBorrow)
         && matches!(element_shape.view, ViewShape::Str)
@@ -2158,7 +2207,17 @@ pub fn borrowed_element_recovery_policy_with_effective_facts(
         && element_shape.ownership == OwnershipShape::SharedBorrow
         && element_shape.view == ViewShape::Str
     {
-        BorrowedElementRecoveryPolicy::StringViewToOwned
+        if element_shape.java_ty == JavaType::String
+            && facts.uses_java_string_identity_representation()
+        {
+            BorrowedElementRecoveryPolicy::CloneElements {
+                policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: JavaType::String,
+                },
+            }
+        } else {
+            BorrowedElementRecoveryPolicy::StringViewToOwned
+        }
     } else if matches!(
         &element_shape.java_ty,
         JavaType::Named { name, .. } if crate::stdlib::boxed_primitive_type(name).is_some()
@@ -2251,6 +2310,7 @@ pub struct BorrowedElementSlotAdapterPolicy {
     carrier: BorrowedElementCarrier,
     matches: bool,
     adapter: Option<BorrowedElementAdapterPolicy>,
+    string_reference_view: bool,
 }
 
 impl BorrowedElementSlotAdapterPolicy {
@@ -2269,7 +2329,12 @@ impl BorrowedElementSlotAdapterPolicy {
             carrier,
             matches,
             adapter,
+            string_reference_view: false,
         }
+    }
+
+    pub fn string_reference_view(&self) -> bool {
+        self.string_reference_view
     }
 
     pub fn target(&self) -> &RustSlotShape {
@@ -2317,7 +2382,15 @@ pub(crate) fn borrowed_element_adapter_policy_with_unwrap(
     let recovery = if matches!(element_shape.java_ty, JavaType::String)
         && matches!(element_shape.view, ViewShape::Str)
     {
-        BorrowedElementRecoveryPolicy::StringViewToOwned
+        if facts.java_string_identity_representation {
+            BorrowedElementRecoveryPolicy::CloneElements {
+                policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: JavaType::String,
+                },
+            }
+        } else {
+            BorrowedElementRecoveryPolicy::StringViewToOwned
+        }
     } else {
         borrowed_element_recovery_policy(element_shape, facts)
     };
@@ -2385,14 +2458,19 @@ pub fn borrowed_element_slot_adapter_policy(
     } else {
         None
     };
-    BorrowedElementSlotAdapterPolicy::new(
+    let string_reference_view = facts.java_string_identity_representation
+        && (target.java_ty == JavaType::String
+            || target.optional_element_type() == Some(JavaType::String));
+    let mut plan = BorrowedElementSlotAdapterPolicy::new(
         target,
         carrier_shape.clone(),
         element_shape.clone(),
         carrier,
         matches,
         adapter,
-    )
+    );
+    plan.string_reference_view = string_reference_view;
+    plan
 }
 
 fn normalize_borrowed_element_adapter_target(
@@ -3475,10 +3553,14 @@ pub fn shape_coercion_plan_with_facts(
                 shape.view = ViewShape::Native;
             }
             if native_sam {
-                // Native SAM values already own their shared callback handle.
-                // Propagated allocation requirements constrain its captured
-                // source, not a second outer handle or a different SAM ABI.
-                shape.native_allocation = Default::default();
+                // The shared callback handle is internal to the facade. Local
+                // alias requirements do not add another wrapper, but the
+                // synchronized tier is part of its actual callback ABI.
+                shape.native_allocation = if shape.native_allocation.sync() {
+                    crate::storage_strategy::StoragePlacement::new(true, false, true)
+                } else {
+                    Default::default()
+                };
             }
             std::borrow::Cow::Owned(shape)
         } else {
@@ -3792,6 +3874,10 @@ fn syntax_slot_coercion_policy_from_content(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfCheck {
+    ThrowableType {
+        class_name: String,
+        optional: bool,
+    },
     JavaSerializableMarker,
     /// `java.lang.Number` is an abstract supertype whose translated boxed
     /// values use their native Rust scalar carriers.  A nominal
@@ -3958,6 +4044,15 @@ fn erased_runtime_target_type(
     target_type: String,
     facts: &FactSet,
 ) -> String {
+    if target.java_ty == JavaType::String {
+        // Erasure stores the canonical owning carrier, never a borrowed view
+        // or its nominal Java/Rust spelling. Keep type tests and downcasts on
+        // the same String/JavaString representation as producer slot planning.
+        return crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
+            &RustSlotShape::for_storage(JavaType::String),
+            facts,
+        ));
+    }
     let JavaType::Named { name, .. } = &target.java_ty else {
         return target_type;
     };
@@ -3988,6 +4083,23 @@ pub fn plan_instanceof_check_with_facts(
     }
     if is_java_number_marker_type(&target.java_ty) {
         return InstanceOfCheck::JavaNumberMarker;
+    }
+    let actual_ty = actual
+        .optional_element_type()
+        .unwrap_or_else(|| actual.java_ty.clone());
+    if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &actual_ty
+        && (name == "JavaException"
+            || (crate::stdlib::is_known_throwable_carrier_type(name)
+                && !EffectiveFacts::new(facts).has_parsed_source_type_capability_for_name(name)))
+        && let JavaType::Named {
+            name: class_name, ..
+        }
+        | JavaType::Unknown(class_name) = &target.java_ty
+    {
+        return InstanceOfCheck::ThrowableType {
+            class_name: class_name.clone(),
+            optional: actual.optional_element_type().is_some(),
+        };
     }
     if let Some(method) = external_capability_instanceof_method(&actual.java_ty, &target.java_ty) {
         return InstanceOfCheck::ExternalCapabilityMethod {
@@ -6160,8 +6272,8 @@ mod tests {
             trait_name: "Parent".to_string(),
         };
         let expected = DispatchCoercionPolicy::UpcastBoxedDynTrait {
-            source_trait: "Middle<String>".to_string(),
-            target_trait: "Parent<String>".to_string(),
+            source_trait: "Middle<JavaString>".to_string(),
+            target_trait: "Parent<JavaString>".to_string(),
             clone_source: true,
         };
         assert_eq!(

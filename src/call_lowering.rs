@@ -41,10 +41,10 @@ use crate::coercion::{
     optional_get_owned_value_result_projection, optional_of_projection,
     optional_or_else_owned_value_projection, owned_collection_to_vec_projection_for_receiver_type,
     owned_map_keys_vec_projection, owned_map_values_vec_projection,
-    owner_associated_path_projection, primitive_compare_to_projection,
-    primitive_f64_binary_method_projection, primitive_f64_method_projection,
-    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
-    primitive_parse_projection, primitive_parse_radix_projection, receiver_method_call_projection,
+    owner_associated_path_projection, primitive_f64_binary_method_projection,
+    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
+    primitive_number_value_projection, primitive_parse_projection,
+    primitive_parse_radix_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, rust_string_literal_projection,
     rust_type_associated_path_projection, self_associated_path_projection,
     sequence_index_of_projection, string_char_at_result_projection,
@@ -374,9 +374,12 @@ fn apply_native_java_instance_method(
                 tail: Some(Box::new(RustExpr::Var(stream_name.to_string()))),
             }
         }
-        NativeJavaInstanceMethod::StringLen => {
-            len_i32_projection(strip_redundant_java_null_expect_after_unwrap(receiver))
-        }
+        NativeJavaInstanceMethod::StringLen => function_call_projection(
+            RustExpr::path(["java_string_length"]),
+            vec![force_shared_borrow_projection(
+                strip_redundant_java_null_expect_after_unwrap(receiver),
+            )],
+        ),
         NativeJavaInstanceMethod::StringIsEmpty => {
             receiver_method_call_projection(receiver, "is_empty", args)
         }
@@ -435,7 +438,9 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::StringReplaceFirst => apply_string_replace_first(receiver, args),
         NativeJavaInstanceMethod::StringReplaceAll => apply_string_replace_all(receiver, args),
         NativeJavaInstanceMethod::StringMatches => apply_string_matches_helper(receiver, args),
-        NativeJavaInstanceMethod::StringSplit => apply_string_split(receiver, args),
+        NativeJavaInstanceMethod::StringSplit | NativeJavaInstanceMethod::StringSplitLiteral => {
+            apply_string_split(receiver, args)
+        }
         NativeJavaInstanceMethod::StringSubstring => apply_string_substring(receiver, args),
         NativeJavaInstanceMethod::StringToCharArray => string_to_char_array_projection(receiver),
         NativeJavaInstanceMethod::StringHashCode => string_hash_code_projection(receiver),
@@ -492,6 +497,21 @@ fn apply_native_java_instance_method(
             };
             receiver_method_call_projection(receiver, "format", vec![value])
         }
+        NativeJavaInstanceMethod::VirtualObjectEquals => {
+            let Some(other) = args.into_iter().next() else {
+                return compile_error_call("Java equals requires one argument");
+            };
+            function_call_projection(
+                RustExpr::path(["java_erased_any_equals_result"]),
+                vec![
+                    force_shared_borrow_projection(receiver),
+                    function_call_projection(
+                        RustExpr::path(["Some"]),
+                        vec![force_shared_borrow_projection(other)],
+                    ),
+                ],
+            )
+        }
         NativeJavaInstanceMethod::Equals => {
             let Some(other) = args.into_iter().next() else {
                 return compile_error_call("Java equals requires one argument");
@@ -515,12 +535,16 @@ fn apply_primitive_number_value(
 fn apply_primitive_compare_to(
     receiver: RustExpr,
     args: Vec<RustExpr>,
-    _source: PrimitiveType,
+    source: PrimitiveType,
 ) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
         return compile_error_call("Java boxed primitive compareTo requires one argument");
     };
-    primitive_compare_to_projection(owned_primitive_receiver(receiver), other)
+    crate::coercion::typed_primitive_compare_projection(
+        owned_primitive_receiver(receiver),
+        other,
+        source,
+    )
 }
 
 fn owned_primitive_receiver(receiver: RustExpr) -> RustExpr {
@@ -670,11 +694,114 @@ fn apply_string_split(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     string_split_projection(receiver, regex, limit)
 }
 
+pub(crate) fn native_checked_numeric_result_projection(
+    method: NativeJavaStaticMethod,
+    args: &[RustExpr],
+) -> Option<RustExpr> {
+    let (primitive, remainder) = match method {
+        NativeJavaStaticMethod::MathMultiplyExact { primitive } => (primitive, None),
+        NativeJavaStaticMethod::IntegralUnsignedDivision {
+            primitive,
+            remainder,
+        } => (primitive, Some(remainder)),
+        _ => return None,
+    };
+    let [left, right] = args else {
+        return None;
+    };
+    Some(crate::coercion::integral_checked_binary_result_projection(
+        left.clone(),
+        right.clone(),
+        primitive,
+        remainder,
+    ))
+}
+
 fn apply_native_java_static_method(
     method: NativeJavaStaticMethod,
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
+        NativeJavaStaticMethod::MathMultiplyExact { .. }
+        | NativeJavaStaticMethod::IntegralUnsignedDivision { .. } => {
+            let Some(result) = native_checked_numeric_result_projection(method, &args) else {
+                return compile_error_call("checked numeric operation requires two arguments");
+            };
+            crate::coercion::unwrap_result_or_panic_uncaught_java_exception(result)
+        }
+        NativeJavaStaticMethod::MathScalb { primitive } => {
+            if args.len() != 2 {
+                return compile_error_call("Math.scalb requires two arguments");
+            }
+            function_call_projection(
+                RustExpr::path([if primitive == PrimitiveType::Double {
+                    "java_math_scalb_f64"
+                } else {
+                    "java_math_scalb_f32"
+                }]),
+                args,
+            )
+        }
+        NativeJavaStaticMethod::MathGetExponent { source } => {
+            let Some(value) = args.into_iter().next() else {
+                return compile_error_call("Math.getExponent requires one argument");
+            };
+            crate::coercion::math_get_exponent_projection(value, source)
+        }
+        NativeJavaStaticMethod::MathCopySign {
+            primitive,
+            magnitude,
+            sign,
+        } => {
+            let mut args = args.into_iter();
+            let (Some(left), Some(right)) = (args.next(), args.next()) else {
+                return compile_error_call("Math.copySign requires two arguments");
+            };
+            crate::coercion::math_copy_sign_projection(left, right, primitive, magnitude, sign)
+        }
+        NativeJavaStaticMethod::IntegralFormat { primitive, radix } => {
+            let Some(value) = args.into_iter().next() else {
+                return compile_error_call("integral radix formatting requires one argument");
+            };
+            RustExpr::MacroCall {
+                macro_name: "format".into(),
+                args: vec![
+                    rust_string_literal_projection(match radix {
+                        16 => "{:x}",
+                        8 => "{:o}",
+                        _ => "{:b}",
+                    }),
+                    RustExpr::Cast {
+                        expr: Box::new(value),
+                        ty: if primitive == PrimitiveType::Long {
+                            "u64"
+                        } else {
+                            "u32"
+                        }
+                        .into(),
+                    },
+                ],
+            }
+        }
+        NativeJavaStaticMethod::IntegerToUnsignedLong => {
+            let Some(value) = args.into_iter().next() else {
+                return compile_error_call("Integer.toUnsignedLong requires one argument");
+            };
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::Cast {
+                    expr: Box::new(value),
+                    ty: "u32".into(),
+                }),
+                ty: "i64".into(),
+            }
+        }
+        NativeJavaStaticMethod::FloatingCompare { primitive } => {
+            let mut args = args.into_iter();
+            let (Some(left), Some(right)) = (args.next(), args.next()) else {
+                return compile_error_call("floating comparison requires two arguments");
+            };
+            crate::coercion::typed_primitive_compare_projection(left, right, primitive)
+        }
         NativeJavaStaticMethod::MathMax { primitive } => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
@@ -844,14 +971,28 @@ fn apply_native_java_static_method(
             let arg = java_integral_parse_null_argument_as_number_format(arg);
             primitive_parse_projection(arg, PrimitiveType::Int)
         }
-        NativeJavaStaticMethod::IntegralBitCount => {
+        NativeJavaStaticMethod::IntegralBitCount { primitive }
+        | NativeJavaStaticMethod::IntegralZeroCount { primitive, .. } => {
             let Some(arg) = args.into_iter().next() else {
-                return compile_error_call("Integer.bitCount/Long.bitCount requires one argument");
+                return compile_error_call("integral bit counting requires one argument");
+            };
+            let operation = match method {
+                NativeJavaStaticMethod::IntegralZeroCount { leading: true, .. } => "leading_zeros",
+                NativeJavaStaticMethod::IntegralZeroCount { leading: false, .. } => {
+                    "trailing_zeros"
+                }
+                _ => "count_ones",
+            };
+            let arg = RustExpr::Cast {
+                expr: Box::new(arg),
+                ty: crate::emit::emit_type(
+                    &crate::operator_lowering::rust_type_for_java_primitive(primitive),
+                ),
             };
             RustExpr::Cast {
                 expr: Box::new(receiver_method_call_projection_exact(
                     RustExpr::Grouped(Box::new(arg)),
-                    "count_ones",
+                    operation,
                     Vec::new(),
                 )),
                 ty: "i32".to_string(),
@@ -3442,14 +3583,19 @@ pub(crate) fn wrap_source_hierarchy_carrier_variant_value(
     wrap_source_hierarchy_carrier_handle_value(payload, owner_name, representations)
 }
 
-fn constructor_owner_associated_path_projection(
+pub(crate) fn constructor_owner_associated_path_projection(
     owner_shape: &crate::slot_shape::RustSlotShape,
     member: &str,
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
     if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &owner_shape.java_ty {
-        let owner = crate::java_naming::rust_name_for_java_named_type(name);
+        // Construction and value slots must name the same native carrier.
+        // Keep this exact-qualified: a source builder lookalike is not a JDK
+        // builder and retains its ordinary declaration name.
+        let owner = crate::java_append_plan::qualified_native_builder_name(name)
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::java_naming::rust_name_for_java_named_type(name));
         if let JavaType::Named { args, .. } = &owner_shape.java_ty
             && !args.is_empty()
             && facts
@@ -4175,7 +4321,7 @@ mod tests {
 
         assert_eq!(
             emit::emit_expr(&lowered),
-            "value.chars().nth((index) as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+            "java_string_char_at_result(&value, index).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
         );
     }
 
@@ -4348,5 +4494,27 @@ mod tests {
         );
 
         assert_eq!(emit::emit_expr(&path), "Wrapper::new");
+    }
+
+    #[test]
+    fn constructor_owner_path_distinguishes_native_and_source_builders() {
+        for (java_name, rust_name) in [
+            ("java.lang.StringBuilder", "StringBuilder"),
+            ("java.lang.StringBuffer", "StringBuffer"),
+            ("example.StringBuilder", "ExampleStringBuilder"),
+            ("example.StringBuffer", "ExampleStringBuffer"),
+        ] {
+            let owner = crate::slot_shape::RustSlotShape::for_storage(JavaType::Named {
+                name: java_name.into(),
+                args: vec![],
+            });
+            let path = constructor_owner_associated_path_projection(
+                &owner,
+                "new_0",
+                &FactSet::default(),
+                None,
+            );
+            assert_eq!(emit::emit_expr(&path), format!("{rust_name}::new_0"));
+        }
     }
 }

@@ -1,0 +1,291 @@
+Compiled from "Quaternion.java"
+public final class org.apache.commons.numbers.quaternion.Quaternion implements java.io.Serializable {
+  public static final org.apache.commons.numbers.quaternion.Quaternion ZERO;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  public static final org.apache.commons.numbers.quaternion.Quaternion ONE;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  public static final org.apache.commons.numbers.quaternion.Quaternion I;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  public static final org.apache.commons.numbers.quaternion.Quaternion J;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  public static final org.apache.commons.numbers.quaternion.Quaternion K;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  private static final long serialVersionUID;
+    descriptor: J
+  private static final java.lang.String ILLEGAL_NORM_MSG;
+    descriptor: Ljava/lang/String;
+  private static final java.lang.String FORMAT_START;
+    descriptor: Ljava/lang/String;
+  private static final java.lang.String FORMAT_END;
+    descriptor: Ljava/lang/String;
+  private static final java.lang.String FORMAT_SEP;
+    descriptor: Ljava/lang/String;
+  private static final int VECTOR_DIMENSIONS;
+    descriptor: I
+  private static final int NUMBER_OF_PARTS;
+    descriptor: I
+  private final org.apache.commons.numbers.quaternion.Quaternion$Type type;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+  private final double w;
+    descriptor: D
+  private final double x;
+    descriptor: D
+  private final double y;
+    descriptor: D
+  private final double z;
+    descriptor: D
+  private org.apache.commons.numbers.quaternion.Quaternion(org.apache.commons.numbers.quaternion.Quaternion$Type, double, double, double, double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion$Type;DDDD)V
+
+  private org.apache.commons.numbers.quaternion.Quaternion(org.apache.commons.numbers.quaternion.Quaternion$Type, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion$Type;Lorg/apache/commons/numbers/quaternion/Quaternion;)V
+
+  public static org.apache.commons.numbers.quaternion.Quaternion of(double, double, double, double);
+    descriptor: (DDDD)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion of(double, double[]);
+    descriptor: (D[D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion of(double[]);
+    descriptor: ([D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion conjugate();
+    descriptor: ()Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion multiply(org.apache.commons.numbers.quaternion.Quaternion, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion multiply(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion add(org.apache.commons.numbers.quaternion.Quaternion, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion add(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion subtract(org.apache.commons.numbers.quaternion.Quaternion, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion subtract(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static double dot(org.apache.commons.numbers.quaternion.Quaternion, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  public double dot(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  public double norm();
+    descriptor: ()D
+
+  public double normSq();
+    descriptor: ()D
+
+  public org.apache.commons.numbers.quaternion.Quaternion normalize();
+    descriptor: ()Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public int hashCode();
+    descriptor: ()I
+
+  public boolean equals(org.apache.commons.numbers.quaternion.Quaternion, double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;D)Z
+
+  public boolean isUnit(double);
+    descriptor: (D)Z
+
+  public boolean isPure(double);
+    descriptor: (D)Z
+
+  public org.apache.commons.numbers.quaternion.Quaternion positivePolarForm();
+    descriptor: ()Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion negate();
+    descriptor: ()Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion inverse();
+    descriptor: ()Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public double getW();
+    descriptor: ()D
+
+  public double getX();
+    descriptor: ()D
+
+  public double getY();
+    descriptor: ()D
+
+  public double getZ();
+    descriptor: ()D
+
+  public double getScalarPart();
+    descriptor: ()D
+
+  public double[] getVectorPart();
+    descriptor: ()[D
+
+  public org.apache.commons.numbers.quaternion.Quaternion multiply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public org.apache.commons.numbers.quaternion.Quaternion divide(double);
+    descriptor: (D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion parse(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Quaternion.java"
+class org.apache.commons.numbers.quaternion.Quaternion$1 {
+  static final int[] $SwitchMap$org$apache$commons$numbers$quaternion$Quaternion$Type;
+    descriptor: [I
+  static {};
+    descriptor: ()V
+}
+Compiled from "Quaternion.java"
+final class org.apache.commons.numbers.quaternion.Quaternion$QuaternionParsingException extends java.lang.NumberFormatException {
+  private static final long serialVersionUID;
+    descriptor: J
+  org.apache.commons.numbers.quaternion.Quaternion$QuaternionParsingException(java.lang.String);
+    descriptor: (Ljava/lang/String;)V
+
+  org.apache.commons.numbers.quaternion.Quaternion$QuaternionParsingException(java.lang.String, java.lang.Throwable);
+    descriptor: (Ljava/lang/String;Ljava/lang/Throwable;)V
+}
+Compiled from "Quaternion.java"
+final class org.apache.commons.numbers.quaternion.Quaternion$Type extends java.lang.Enum<org.apache.commons.numbers.quaternion.Quaternion$Type> {
+  public static final org.apache.commons.numbers.quaternion.Quaternion$Type DEFAULT;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+  public static final org.apache.commons.numbers.quaternion.Quaternion$Type NORMALIZED;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+  public static final org.apache.commons.numbers.quaternion.Quaternion$Type POSITIVE_POLAR_FORM;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+  private final java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> normSq;
+    descriptor: Ljava/util/function/ToDoubleFunction;
+  private final java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> norm;
+    descriptor: Ljava/util/function/ToDoubleFunction;
+  private final java.util.function.BiPredicate<org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double> testIsUnit;
+    descriptor: Ljava/util/function/BiPredicate;
+  private static final org.apache.commons.numbers.quaternion.Quaternion$Type[] $VALUES;
+    descriptor: [Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+  public static org.apache.commons.numbers.quaternion.Quaternion$Type[] values();
+    descriptor: ()[Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+
+  public static org.apache.commons.numbers.quaternion.Quaternion$Type valueOf(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+
+  private org.apache.commons.numbers.quaternion.Quaternion$Type(java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion>, java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion>, java.util.function.BiPredicate<org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double>);
+    descriptor: (Ljava/lang/String;ILjava/util/function/ToDoubleFunction;Ljava/util/function/ToDoubleFunction;Ljava/util/function/BiPredicate;)V
+
+  double normSq(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  double norm(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  boolean isUnit(org.apache.commons.numbers.quaternion.Quaternion, double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;D)Z
+
+  private static org.apache.commons.numbers.quaternion.Quaternion$Type[] $values();
+    descriptor: ()[Lorg/apache/commons/numbers/quaternion/Quaternion$Type;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Quaternion.java"
+final class org.apache.commons.numbers.quaternion.Quaternion$Type$Default {
+  static final java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> NORMSQ;
+    descriptor: Ljava/util/function/ToDoubleFunction;
+  private static final java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> NORM;
+    descriptor: Ljava/util/function/ToDoubleFunction;
+  private static final java.util.function.BiPredicate<org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double> IS_UNIT;
+    descriptor: Ljava/util/function/BiPredicate;
+  private org.apache.commons.numbers.quaternion.Quaternion$Type$Default();
+    descriptor: ()V
+
+  private static boolean lambda$static$2(org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Ljava/lang/Double;)Z
+
+  private static double lambda$static$1(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  private static double lambda$static$0(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Quaternion.java"
+final class org.apache.commons.numbers.quaternion.Quaternion$Type$Normalized {
+  static final java.util.function.ToDoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> NORM;
+    descriptor: Ljava/util/function/ToDoubleFunction;
+  static final java.util.function.BiPredicate<org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double> IS_UNIT;
+    descriptor: Ljava/util/function/BiPredicate;
+  private org.apache.commons.numbers.quaternion.Quaternion$Type$Normalized();
+    descriptor: ()V
+
+  private static boolean lambda$static$1(org.apache.commons.numbers.quaternion.Quaternion, java.lang.Double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Ljava/lang/Double;)Z
+
+  private static double lambda$static$0(org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;)D
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Slerp.java"
+public class org.apache.commons.numbers.quaternion.Slerp implements java.util.function.DoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> {
+  private static final double MAX_DOT_THRESHOLD;
+    descriptor: D
+  private final org.apache.commons.numbers.quaternion.Quaternion start;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  private final org.apache.commons.numbers.quaternion.Quaternion end;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Quaternion;
+  private final java.util.function.DoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> algo;
+    descriptor: Ljava/util/function/DoubleFunction;
+  public org.apache.commons.numbers.quaternion.Slerp(org.apache.commons.numbers.quaternion.Quaternion, org.apache.commons.numbers.quaternion.Quaternion);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Quaternion;Lorg/apache/commons/numbers/quaternion/Quaternion;)V
+
+  public org.apache.commons.numbers.quaternion.Quaternion apply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public java.lang.Object apply(double);
+    descriptor: (D)Ljava/lang/Object;
+}
+Compiled from "Slerp.java"
+final class org.apache.commons.numbers.quaternion.Slerp$Linear implements java.util.function.DoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> {
+  final org.apache.commons.numbers.quaternion.Slerp this$0;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Slerp;
+  org.apache.commons.numbers.quaternion.Slerp$Linear(org.apache.commons.numbers.quaternion.Slerp);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Slerp;)V
+
+  public org.apache.commons.numbers.quaternion.Quaternion apply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public java.lang.Object apply(double);
+    descriptor: (D)Ljava/lang/Object;
+}
+Compiled from "Slerp.java"
+final class org.apache.commons.numbers.quaternion.Slerp$Spherical implements java.util.function.DoubleFunction<org.apache.commons.numbers.quaternion.Quaternion> {
+  private final double theta;
+    descriptor: D
+  private final double sinTheta;
+    descriptor: D
+  final org.apache.commons.numbers.quaternion.Slerp this$0;
+    descriptor: Lorg/apache/commons/numbers/quaternion/Slerp;
+  org.apache.commons.numbers.quaternion.Slerp$Spherical(org.apache.commons.numbers.quaternion.Slerp, double);
+    descriptor: (Lorg/apache/commons/numbers/quaternion/Slerp;D)V
+
+  public org.apache.commons.numbers.quaternion.Quaternion apply(double);
+    descriptor: (D)Lorg/apache/commons/numbers/quaternion/Quaternion;
+
+  public java.lang.Object apply(double);
+    descriptor: (D)Ljava/lang/Object;
+}

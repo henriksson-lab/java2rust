@@ -1,0 +1,36 @@
+Compiled from "BrentSolver.java"
+public class org.apache.commons.numbers.rootfinder.BrentSolver {
+  private final double relativeAccuracy;
+    descriptor: D
+  private final double absoluteAccuracy;
+    descriptor: D
+  private final double functionValueAccuracy;
+    descriptor: D
+  public org.apache.commons.numbers.rootfinder.BrentSolver(double, double, double);
+    descriptor: (DDD)V
+
+  public double findRoot(java.util.function.DoubleUnaryOperator, double, double);
+    descriptor: (Ljava/util/function/DoubleUnaryOperator;DD)D
+
+  public double findRoot(java.util.function.DoubleUnaryOperator, double, double, double);
+    descriptor: (Ljava/util/function/DoubleUnaryOperator;DDD)D
+
+  private double brent(java.util.function.DoubleUnaryOperator, double, double, double, double);
+    descriptor: (Ljava/util/function/DoubleUnaryOperator;DDDD)D
+
+  private static boolean equalsZero(double);
+    descriptor: (D)Z
+}
+Compiled from "SolverException.java"
+class org.apache.commons.numbers.rootfinder.SolverException extends java.lang.IllegalArgumentException {
+  static final java.lang.String TOO_LARGE;
+    descriptor: Ljava/lang/String;
+  static final java.lang.String OUT_OF_RANGE;
+    descriptor: Ljava/lang/String;
+  static final java.lang.String BRACKETING;
+    descriptor: Ljava/lang/String;
+  private static final long serialVersionUID;
+    descriptor: J
+  org.apache.commons.numbers.rootfinder.SolverException(java.lang.String, java.lang.Object...);
+    descriptor: (Ljava/lang/String;[Ljava/lang/Object;)V
+}

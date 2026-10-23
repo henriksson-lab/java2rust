@@ -49,7 +49,7 @@ impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self
         |keep| partial.retain(keep),
         |value| {
             calls += 1;
-            if *value == 2 { Err(JavaException::new("Failure", "membership".into())) }
+            if *value == 2 { Err(JavaException::new("Failure", "membership")) }
             else { Ok(false) }
         }).unwrap_err();
     assert_eq!(error.class_name(), "Failure");
@@ -78,7 +78,7 @@ impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self
             let last = receiver.borrow().len() - 1;
             receiver.borrow_mut().list_set_result(last as i32, 9)?;
             source.borrow_mut().list_set_result(0, 2)?;
-            if *query == 3 { Err(JavaException::new("IllegalStateException", "equals".into())) }
+            if *query == 3 { Err(JavaException::new("IllegalStateException", "equals")) }
             else { Ok(query == stored) }
         };
         let error = if keep {
@@ -97,7 +97,7 @@ impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self
         Ok(item == 2)
     }).unwrap());
     assert_eq!(calls, 2);
-    assert_eq!(java_collection_any_result([1], |_| Err(JavaException::new("Failure", "equals".into())))
+    assert_eq!(java_collection_any_result([1], |_| Err(JavaException::new("Failure", "equals")))
         .unwrap_err().class_name(), "Failure");
 }
 "#,

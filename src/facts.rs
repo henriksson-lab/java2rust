@@ -926,8 +926,17 @@ impl<'a> ExternalFactLookupIndex<'a> {
                     .then_some(index)
             })
             .collect::<Vec<_>>();
-        if !type_name.contains('.') && indices.len() != 1 {
-            return None;
+        if !type_name.contains('.') {
+            let selected = &self.facts.external_library_packs[*indices.last()?];
+            // Analyses merge their input facts into the effective set. Repeated
+            // evidence for the same pack is not a competing imported owner.
+            // Distinct mappings must still require a qualified lookup.
+            if indices
+                .iter()
+                .any(|index| &self.facts.external_library_packs[*index] != selected)
+            {
+                return None;
+            }
         }
         indices
             .into_iter()
@@ -982,11 +991,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 .iter()
                 .any(|fact| {
                     member_type_matches(&fact.type_name)
-                        && (fact
-                            .pack_name
-                            .as_deref()
-                            .is_some_and(|pack_name| pack.pack_name == pack_name)
-                            || external_pack_owns_type(pack, &fact.type_name))
+                        && external_pack_owns_type(pack, &fact.type_name)
                 })
     }
 }
@@ -1846,6 +1851,15 @@ pub enum ExternalApiCoverage {
     Unsupported,
 }
 
+/// Physical Rust ABI for Java String values crossing a mapped pack boundary.
+/// UTF-16 uses owned Vec<u16> values; Java null remains the ordinary Option.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExternalStringAbi {
+    #[default]
+    Utf8,
+    Utf16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalLibraryPackFact {
     pub pack_name: String,
@@ -1853,6 +1867,7 @@ pub struct ExternalLibraryPackFact {
     pub mode: ExternalLibraryMode,
     pub coverage: ExternalApiCoverage,
     pub rust_target: Option<String>,
+    pub string_abi: ExternalStringAbi,
     pub provenance: FactProvenance,
 }
 
@@ -2305,9 +2320,37 @@ pub struct NodeId(pub usize);
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureFacts {
     pub owners: Vec<CaptureOwner>,
+    pub outer_field_plans: Vec<OuterFieldCapturePlan>,
+    pub has_lifetime_observers: bool,
+}
+
+/// Source-proven environment reduction; storage is admitted after solving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterFieldCapturePlan {
+    pub inner_type: String,
+    pub outer_type: String,
+    pub fields: Vec<OuterCapturedField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterCapturedField {
+    pub key: FieldKey,
+    pub rust_name: String,
+    pub java_ty: JavaType,
 }
 
 impl CaptureFacts {
+    pub(crate) fn outer_field_plan(&self, type_name: &str) -> Option<&OuterFieldCapturePlan> {
+        if self.has_lifetime_observers {
+            return None;
+        }
+        let key = crate::stdlib::canonical_external_receiver_type_key(type_name);
+        let mut plans = self.outer_field_plans.iter().filter(|plan| {
+            crate::stdlib::canonical_external_receiver_type_key(&plan.inner_type) == key
+        });
+        let plan = plans.next()?;
+        plans.all(|other| other == plan).then_some(plan)
+    }
     pub fn outer_this_capture_for_type(&self, type_name: &str) -> Option<&Capture> {
         self.owners
             .iter()
@@ -2352,7 +2395,7 @@ pub enum CaptureOwnerKind {
     InnerClass,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CaptureOrigin {
     Method {
         type_name: String,
@@ -2434,6 +2477,10 @@ impl FactSet {
             .extend_from(other.storage_strategies);
         self.notes.extend(other.notes);
         self.captures.owners.extend(other.captures.owners);
+        self.captures
+            .outer_field_plans
+            .extend(other.captures.outer_field_plans);
+        self.captures.has_lifetime_observers |= other.captures.has_lifetime_observers;
         self.hierarchy_overrides.extend(other.hierarchy_overrides);
         self.closed_hierarchy_facts
             .extend(other.closed_hierarchy_facts);
@@ -5534,6 +5581,46 @@ fn push_java_type_conflict(
 mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
+
+    #[test]
+    fn constructor_pack_group_does_not_make_unrelated_types_competing_owners() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.group example.Number rust-crate-mapping mapped target=number_runtime\nexternal-pack dep.group example.Mode rust-crate-mapping mapped target=number_runtime\nexternal-pack-constructor dep.group example.Number 1 mapped rust-type=Number rust=new rust-result=true\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let facts = parsed.facts();
+        for name in ["Number", "example.Number"] {
+            let pack = facts.external_library_pack_for_type(name).unwrap();
+            assert_eq!(pack.package_prefix, "example.Number");
+        }
+        assert!(
+            facts
+                .external_library_pack_for_type("other.Number")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn duplicate_pack_evidence_preserves_unambiguous_simple_owner() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.widget example.Widget rust-crate-mapping mapped target=widget_runtime\nexternal-pack-api dep.widget example.Widget size mapped getter read-only definitely-non-null args=0 return=int\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut facts = parsed.facts().clone();
+        assert!(facts.external_library_pack_for_type("Widget").is_some());
+        facts.extend_from(parsed.facts().clone());
+        assert!(facts.external_library_pack_for_type("Widget").is_some());
+        let mut competing = parsed.facts().external_library_packs[0].clone();
+        competing.pack_name = "other.widget".into();
+        competing.rust_target = Some("other_runtime".into());
+        facts.external_library_packs.push(competing);
+        assert!(facts.external_library_pack_for_type("Widget").is_none());
+        assert!(
+            facts
+                .external_library_pack_for_type("example.Widget")
+                .is_some()
+        );
+    }
 
     #[test]
     fn callable_header_prefilter_preserves_direct_and_alias_matching() {

@@ -933,6 +933,28 @@ fn emit_stream_lambda_body_with_locals_prec_impl(
         ),
         Expr::Binary { op, left, right } => {
             let prec = stream_binary_precedence(*op);
+            let mut numeric_env = ctx
+                .env
+                .map(|env| env.type_env().clone())
+                .unwrap_or_default();
+            if let Some(shape) = param_shape {
+                // Primitive lambda parameters are represented as values. A
+                // non-null boxed primitive has that same physical carrier;
+                // nullable unboxing remains a separate checked operation.
+                let mut ty = shape.java_ty.clone();
+                if let JavaType::Named { name, args } = &ty
+                    && args.is_empty()
+                    && let Some(primitive) = crate::stdlib::boxed_primitive_type(name)
+                {
+                    ty = JavaType::Primitive(primitive);
+                }
+                numeric_env.insert_local(param, ty);
+            }
+            let numeric_plan = crate::operator_lowering::plan_numeric_binary_promotion(
+                *op,
+                &crate::types::infer_expr_type(left, &numeric_env),
+                &crate::types::infer_expr_type(right, &numeric_env),
+            );
             let left = emit_stream_lambda_body_with_locals_prec(
                 left,
                 param,
@@ -955,7 +977,25 @@ fn emit_stream_lambda_body_with_locals_prec_impl(
                 prec,
                 true,
             )?;
-            stream_lambda_expr(stream_binary_expr_projection(*op, left, right), prec)
+            if let Some(plan) = numeric_plan {
+                let expr = if let Some(checked) =
+                    crate::operator_lowering::lower_checked_java_integer_div_rem_expr(
+                        *op,
+                        left.expr.clone(),
+                        right.expr.clone(),
+                        plan.clone(),
+                    ) {
+                    stream_result_boundary(checked, ctx)
+                } else {
+                    crate::operator_lowering::lower_numeric_binary_expr(
+                        *op, left.expr, right.expr, plan,
+                    )
+                };
+                let precedence = crate::emit::expr_precedence(&expr);
+                stream_lambda_expr(expr, precedence)
+            } else {
+                stream_lambda_expr(stream_binary_expr_projection(*op, left, right), prec)
+            }
         }
         Expr::Unary { op, expr } => {
             let op = stream_unary_prefix(*op)?;
@@ -1470,7 +1510,8 @@ fn emit_stream_lambda_member_access_through_plan_expr(
         crate::member_access_plan::MemberAccessOp::LenAsI32
         | crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
         | crate::member_access_plan::MemberAccessOp::Array2ColsAsI32 => 6,
-        crate::member_access_plan::MemberAccessOp::StaticConstant { .. } => 12,
+        crate::member_access_plan::MemberAccessOp::StaticConstant { .. }
+        | crate::member_access_plan::MemberAccessOp::MappedStaticValue { .. } => 12,
         crate::member_access_plan::MemberAccessOp::RustField { .. }
         | crate::member_access_plan::MemberAccessOp::RustGetter { .. } => 11,
     };
@@ -2218,9 +2259,7 @@ fn render_stream_terminal_expr(
     if item_is_result
         && matches!(
             plan.terminal(),
-            StreamTerminal::Iterator
-                | StreamTerminal::Reduce(_)
-                | StreamTerminal::CollectToMap { .. }
+            StreamTerminal::Iterator | StreamTerminal::CollectToMap { .. }
         )
     {
         // These boundaries still need a fallible callback/traversal contract;
@@ -2369,7 +2408,7 @@ fn render_stream_terminal_expr(
             })
         }
         StreamTerminal::Reduce(reduce) => {
-            let identity = emit_stream_lambda_body_with_locals_prec(
+            let mut identity = emit_stream_lambda_body_with_locals_prec(
                 reduce.identity(),
                 "__java_unused_reduce_item",
                 "__java_unused_reduce_item",
@@ -2381,27 +2420,100 @@ fn render_stream_terminal_expr(
                 false,
             )?
             .expr;
+            let identity_type = crate::types::infer_expr_type(
+                reduce.identity(),
+                &ctx.env
+                    .map(|env| env.type_env().clone())
+                    .unwrap_or_default(),
+            );
+            if let JavaType::Primitive(primitive) = identity_type
+                && crate::types::is_numeric_primitive_type(primitive)
+            {
+                // Rust method-call inference does not constrain a wrapping
+                // accumulator from an unsuffixed identity literal. Java has
+                // already fixed that literal/expression's primitive type.
+                identity = RustExpr::Cast {
+                    expr: Box::new(identity),
+                    ty: crate::emit::emit_type(
+                        &crate::operator_lowering::rust_type_for_java_primitive(primitive),
+                    ),
+                };
+            }
             let accumulator = reduce.accumulator();
             let left = accumulator.left_param_name();
             let right = accumulator.right_param_name();
             let left_rust = accumulator.left_rust_param_name();
             let right_rust = accumulator.right_rust_param_name();
             let locals = [left, right];
+            let mut reducer_env = ctx.env.cloned().unwrap_or_default();
+            let mut reducer_shape = item_shape.clone();
+            if let JavaType::Named { name, args } = &reducer_shape.java_ty
+                && args.is_empty()
+                && let Some(primitive) = crate::stdlib::boxed_primitive_type(name)
+            {
+                reducer_shape.java_ty = JavaType::Primitive(primitive);
+            }
+            reducer_env.insert_local_shape(left.to_string(), reducer_shape.clone());
+            reducer_env.insert_local_shape(right.to_string(), reducer_shape);
+            let reducer_ctx = StreamRenderContext {
+                env: Some(&reducer_env),
+                ..ctx
+            };
             let body = emit_stream_lambda_body_with_locals_prec(
                 accumulator.body().return_expr()?,
                 left,
                 left_rust,
                 StreamLambdaValue::OwnedItem,
                 &locals,
-                ctx,
+                reducer_ctx,
                 Some(item_shape),
                 0,
                 false,
             )?
             .expr;
-            Some(stream_reduce_terminal_projection(
-                receiver, identity, left_rust, right_rust, body,
-            ))
+            if item_is_result || body.has_unbound_try() {
+                let mut statements = Vec::new();
+                if item_is_result {
+                    statements.push(RustStmt::Let {
+                        mutable: false,
+                        name: right_rust.to_string(),
+                        ty: None,
+                        value: Some(propagate_result_projection(RustExpr::Var(
+                            right_rust.to_string(),
+                        ))),
+                    });
+                }
+                let fold = receiver_method_call_projection_exact(
+                    receiver,
+                    "try_fold",
+                    vec![
+                        identity,
+                        RustExpr::Closure {
+                            is_move: false,
+                            params: vec![
+                                RustClosureParam {
+                                    pattern: left_rust.to_string(),
+                                    ty: None,
+                                },
+                                RustClosureParam {
+                                    pattern: right_rust.to_string(),
+                                    ty: None,
+                                },
+                            ],
+                            return_type: None,
+                            body: RustClosureBody::Expr(Box::new(RustExpr::Block {
+                                stmts: statements,
+                                tail: Some(Box::new(stream_callback_result_expr(body))),
+                            })),
+                        },
+                    ],
+                );
+                Some(stream_result_boundary(fold, ctx))
+            } else {
+                Some(stream_reduce_terminal_projection(
+                    receiver, identity, left_rust, right_rust, body,
+                ))
+            }
         }
         StreamTerminal::CollectToMap { key, value } => {
             let lambda_value = if item_is_borrowed {

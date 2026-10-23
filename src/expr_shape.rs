@@ -1146,6 +1146,10 @@ impl ShapeEnv {
         self.current_type = Some(name.into());
     }
 
+    pub(crate) fn bind_this_type(&mut self, ty: &TypeDecl) {
+        self.types.bind_this_type(ty);
+    }
+
     /// The source type whose lexical member scope this environment models.
     pub(crate) fn current_type(&self) -> Option<&str> {
         self.current_type.as_deref()
@@ -1593,6 +1597,26 @@ fn infer_expr_shape_with_context_and_external_index(
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
+    // Native append returns the same non-null builder allocation. Prove this
+    // contract from the declared receiver before trying generic call planners:
+    // those otherwise repeatedly infer every prefix of a fluent chain. Keep
+    // resolved declarations and source/user-owned lookalikes authoritative.
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        resolved: None,
+        ..
+    } = expr
+        && name == "append"
+        && args.len() == 1
+        && let Some(facts) = ctx.facts
+        && let Some(ty) =
+            crate::java_append_plan::native_builder_receiver_type(receiver, env.type_env(), facts)
+        && crate::effective_facts::EffectiveFacts::new(facts).native_text_reference_carrier(&ty)
+    {
+        return value_shape_or_conservative(ctx, ty);
+    }
     if let Some(shape) = native_functional_call_result_shape(expr, env, ctx) {
         return shape;
     }
@@ -1607,12 +1631,58 @@ fn infer_expr_shape_with_context_and_external_index(
     {
         return shape;
     }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.is_empty()
+        && let Some(index) = crate::call_plan::native_map_entry_accessor_index(name)
+    {
+        let parent =
+            infer_expr_shape_with_context_and_external_index(receiver, env, ctx, external_index);
+        if let Some(facts) = ctx.facts
+            && crate::effective_facts::EffectiveFacts::new(facts)
+                .native_map_entry_type_args(&parent.java_ty)
+                .is_some()
+            && let Some(child) = RustSlotShape::native_child_type_at_path(&parent.java_ty, &[index])
+        {
+            let mut shape = RustSlotShape::for_storage(
+                crate::types::generic_read_type_preserving_optional(&child),
+            );
+            shape.inherit_native_collection_child(&parent, index);
+            if shape.native_allocation.shared() || !shape.nested_native_allocations.is_empty() {
+                return shape;
+            }
+        }
+    }
     match expr {
         Expr::Literal(lit) => RustSlotShape::conservative(crate::types::literal_type(lit)),
         Expr::Var(name) => env
             .local_shape(name)
             .cloned()
-            .or_else(|| env.field_shape(name).cloned())
+            .or_else(|| {
+                env.field_shape(name).cloned().map(|shape| {
+                    if shape.java_ty == JavaType::String
+                        && env.static_field_access_name(name).is_some()
+                        && env.static_storage_field_access_name(name).is_none()
+                        && ctx
+                            .facts
+                            .is_some_and(|facts| facts.java_string_identity_representation)
+                    {
+                        value_shape_or_conservative(ctx, JavaType::String)
+                    } else {
+                        shape
+                    }
+                })
+            })
+            .or_else(|| {
+                let owner = env.type_env().static_member_import_owner(name)?;
+                let receiver = Expr::Var(owner.to_string());
+                infer_field_access_shape(&receiver, name, env, ctx)
+                    .or_else(|| planned_member_access_shape(&receiver, name, env, ctx))
+            })
             .unwrap_or_else(|| RustSlotShape::conservative(JavaType::Unknown(name.clone()))),
         Expr::FieldAccess(receiver, field) if is_this_expr(receiver) => env
             .field_shape(field)
@@ -1957,6 +2027,14 @@ fn native_java_call_expr_shape(
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Option<RustSlotShape> {
+    if let Some(shape) =
+        inherited_native_throwable_accessor_shape(receiver, name, args.len(), env, ctx)
+    {
+        // The source subclass embeds JavaException, not a foreign pack's
+        // throwable value. Its physical accessor ABI precedes generic mapped
+        // native-call result planning, after source signatures have won.
+        return Some(shape);
+    }
     let default_facts;
     let facts = match ctx.facts {
         Some(facts) => facts,
@@ -2187,6 +2265,74 @@ pub(crate) fn native_functional_call_result_shape(
     )
 }
 
+fn inherited_native_throwable_accessor_shape(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let facts = ctx.facts?;
+    // Source signature lookup precedes this fallback. An inherited runtime
+    // accessor still owns its physical result contract even though the source
+    // subclass's spelling is not itself a native Throwable name.
+    if let Some(receiver) = receiver
+        && let Some((return_ty, _)) =
+            crate::stdlib::native_throwable_accessor_contract(name, arg_count)
+    {
+        // Accessors can be chained through another inherited accessor (for
+        // example source.getCause().getMessage()). The solved producer result,
+        // not nominal TypeEnv guessing, owns that receiver's logical carrier.
+        let receiver_ty = infer_expr_shape_with_context(receiver, env, ctx).java_ty;
+        let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+        let receiver_owner = crate::stdlib::external_api_method_receiver_owner_key(
+            &receiver_ty,
+            env.type_env(),
+            name,
+        );
+        let explicit_contract = facts
+            .external_api_effect_for_receiver_with_arity(
+                receiver_owner.as_deref(),
+                name,
+                Some(arg_count),
+            )
+            .is_some_and(|effect| {
+                matches!(
+                    effect.provenance,
+                    crate::facts::FactProvenance::ParsedSource
+                        | crate::facts::FactProvenance::UserOverride
+                )
+            });
+        if !explicit_contract {
+            let effective = crate::effective_facts::EffectiveFacts::new(facts);
+            if let Some(base) = receiver_owner
+                .into_iter()
+                .chain(
+                    facts
+                        .reachable_hierarchy_edges_for_type(&receiver_ty)
+                        .into_iter()
+                        .map(|edge| edge.super_name),
+                )
+                .find(|base| {
+                    crate::stdlib::is_known_throwable_carrier_type(base)
+                        && !effective.has_parsed_source_type_capability_for_name(base)
+                })
+            {
+                return Some(
+                    crate::call_plan::known_external_call_lowered_type(
+                        Some(&base),
+                        name,
+                        arg_count,
+                        return_ty,
+                    )
+                    .into_slot_shape(),
+                );
+            }
+        }
+    }
+    None
+}
+
 fn external_call_expr_shape(
     receiver: Option<&Expr>,
     name: &str,
@@ -2273,6 +2419,13 @@ fn shape_env_for_type_with_fields(
 ) -> ShapeEnv {
     let mut env = ShapeEnv::new();
     env.set_current_type(&ty.name);
+    // A trait receiver is already the dispatch surface. Class methods can
+    // instead hold a payload borrow or a canonical handle companion; until
+    // that distinction is represented in this frame, a nominal class `this`
+    // must not be mistaken for an Rc/Arc value by physical receiver lowering.
+    if include_instance_fields && ty.kind == crate::java_ir::TypeKind::Interface {
+        env.bind_this_type(ty);
+    }
     seed_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
     let source_instance_field_rust_names = crate::java_naming::source_instance_field_rust_names(ty);
     let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
@@ -2845,7 +2998,17 @@ fn infer_field_access_shape(
             .field_shape(&owner, field)
             .or_else(|| signatures.field_shape(&owner, &crate::parser::to_snake_case(field)))
         {
-            return Some(field_access_shape_from_signature_shape(shape));
+            return Some(
+                if shape.java_ty == JavaType::String
+                    && ctx
+                        .facts
+                        .is_some_and(|facts| facts.java_string_identity_representation)
+                {
+                    value_shape_or_conservative(ctx, JavaType::String)
+                } else {
+                    field_access_shape_from_signature_shape(shape)
+                },
+            );
         }
     }
     let receiver_ty = infer_expr_type(receiver, env.type_env());
@@ -3024,6 +3187,40 @@ mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
     use crate::slot_shape::{DispatchShape, OwnershipShape};
+
+    #[test]
+    fn imported_static_value_uses_member_shape_and_respects_lexical_shadows() {
+        let parsed = crate::external_packs::parse_external_pack_manifest(
+            "external-pack dep.widget example.Widget rust-crate-mapping mapped target=widget_runtime\nexternal-pack-field dep.widget example.Widget CURRENT mapped type=example.Widget value=widget_runtime::Widget::current()\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut env = ShapeEnv::new();
+        env.insert_static_member_import("CURRENT", "example.Widget");
+        let ctx = ExprShapeContext::new(None, None, Some(parsed.facts()));
+        let imported = infer_expr_shape_with_context(&Expr::Var("CURRENT".into()), &env, ctx);
+        let qualified = infer_expr_shape_with_context(
+            &Expr::FieldAccess(
+                Box::new(Expr::Var("example.Widget".into())),
+                "CURRENT".into(),
+            ),
+            &env,
+            ctx,
+        );
+        assert_eq!(imported, qualified);
+        assert!(!matches!(imported.java_ty, JavaType::Unknown(_)));
+        let field = RustSlotShape::for_storage(JavaType::String);
+        env.insert_field_shape("CURRENT", field.clone());
+        assert_eq!(
+            infer_expr_shape_with_context(&Expr::Var("CURRENT".into()), &env, ctx),
+            field
+        );
+        let local = RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int));
+        env.insert_local_shape("CURRENT", local.clone());
+        assert_eq!(
+            infer_expr_shape_with_context(&Expr::Var("CURRENT".into()), &env, ctx),
+            local
+        );
+    }
 
     #[test]
     fn null_ternary_preserves_the_other_branchs_allocation_and_dispatch() {
