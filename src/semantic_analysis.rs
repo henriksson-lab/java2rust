@@ -5543,6 +5543,25 @@ fn collect_exception_facts(
     hierarchy_index: &HierarchyFactLookupIndex,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) -> Vec<ExceptionFact> {
+    fn source_names(
+        ty: &TypeDecl,
+        package: Option<&str>,
+        names: &mut std::collections::HashMap<String, String>,
+    ) {
+        names.insert(
+            ty.name.clone(),
+            crate::java_naming::source_binary_class_name(ty, package),
+        );
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                source_names(nested, package, names);
+            }
+        }
+    }
+    let mut binary_names = std::collections::HashMap::new();
+    for ty in &program.types {
+        source_names(ty, program.package.as_deref(), &mut binary_names);
+    }
     let mut exception_names = HashSet::new();
     for ty in &program.types {
         collect_exception_candidate_names(
@@ -5556,6 +5575,7 @@ fn collect_exception_facts(
     exception_names
         .into_iter()
         .map(|type_name| ExceptionFact {
+            binary_name: binary_names.get(&type_name).cloned(),
             kind: classify_exception_type(&type_name, hierarchy_index, diagnostics),
             type_name,
             provenance: FactProvenance::ParsedSource,

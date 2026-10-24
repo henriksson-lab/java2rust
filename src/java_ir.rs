@@ -89,6 +89,12 @@ pub struct FieldDecl {
 }
 
 impl FieldDecl {
+    /// Primitive fields have a Java default even without a source initializer.
+    /// Reference defaults additionally require nullable storage planning.
+    pub(crate) fn has_initializer_or_primitive_default(&self) -> bool {
+        self.initializer.is_some() || matches!(self.ty, JavaType::Primitive(_))
+    }
+
     /// Declaration provenance, equivalent to the JVM enum-constant flag.
     /// A self-typed field or static alias is not an enum constant.
     pub fn is_enum_constant(&self) -> bool {
@@ -217,6 +223,9 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     VarDecl {
+        /// Source declaration fact; a final primitive/String constant can be
+        /// folded by javac without allocating a JVM local register.
+        is_final: bool,
         ty: JavaType,
         name: String,
         source_name: String,

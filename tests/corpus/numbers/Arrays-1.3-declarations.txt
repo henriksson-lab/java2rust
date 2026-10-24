@@ -1,0 +1,595 @@
+Compiled from "BitIndexUpdatingInterval.java"
+final class org.apache.commons.numbers.arrays.BitIndexUpdatingInterval implements org.apache.commons.numbers.arrays.UpdatingInterval {
+  private static final long LONG_MASK;
+    descriptor: J
+  private static final int DIVIDE_BY_64;
+    descriptor: I
+  private final long[] data;
+    descriptor: [J
+  private final int offset;
+    descriptor: I
+  private int left;
+    descriptor: I
+  private int right;
+    descriptor: I
+  org.apache.commons.numbers.arrays.BitIndexUpdatingInterval(int, int);
+    descriptor: (II)V
+
+  private org.apache.commons.numbers.arrays.BitIndexUpdatingInterval(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  private static int getLongIndex(int);
+    descriptor: (I)I
+
+  private static long getLongBit(int);
+    descriptor: (I)J
+
+  void set(int);
+    descriptor: (I)V
+
+  private int nextIndex(int);
+    descriptor: (I)I
+
+  private int previousIndex(int);
+    descriptor: (I)I
+
+  public int left();
+    descriptor: ()I
+
+  public int right();
+    descriptor: ()I
+
+  public int updateLeft(int);
+    descriptor: (I)I
+
+  public int updateRight(int);
+    descriptor: (I)I
+
+  public org.apache.commons.numbers.arrays.UpdatingInterval splitLeft(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/arrays/UpdatingInterval;
+}
+Compiled from "HashIndexSet.java"
+final class org.apache.commons.numbers.arrays.HashIndexSet {
+  private static final java.lang.String INVALID_INDEX;
+    descriptor: Ljava/lang/String;
+  private static final int MAX_CAPACITY;
+    descriptor: I
+  private static final int MIN_SIZE;
+    descriptor: I
+  private static final int PHI;
+    descriptor: I
+  private final int[] set;
+    descriptor: [I
+  private int size;
+    descriptor: I
+  private org.apache.commons.numbers.arrays.HashIndexSet(int);
+    descriptor: (I)V
+
+  static org.apache.commons.numbers.arrays.HashIndexSet create(int);
+    descriptor: (I)Lorg/apache/commons/numbers/arrays/HashIndexSet;
+
+  private static int nextPow2(int);
+    descriptor: (I)I
+
+  boolean add(int);
+    descriptor: (I)Z
+
+  private static int mix(int);
+    descriptor: (I)I
+}
+Compiled from "IndexSupport.java"
+final class org.apache.commons.numbers.arrays.IndexSupport {
+  private static final int INSERTION_SORT_SIZE;
+    descriptor: I
+  private org.apache.commons.numbers.arrays.IndexSupport();
+    descriptor: ()V
+
+  static org.apache.commons.numbers.arrays.UpdatingInterval createUpdatingInterval(int[], int);
+    descriptor: ([II)Lorg/apache/commons/numbers/arrays/UpdatingInterval;
+
+  private static boolean isAscending(int[], int);
+    descriptor: ([II)Z
+
+  private static int compressDuplicates(int[], int);
+    descriptor: ([II)I
+
+  private static int ceilLog2(int);
+    descriptor: (I)I
+
+  private static org.apache.commons.numbers.arrays.UpdatingInterval newUpdatingInterval(int[], int);
+    descriptor: ([II)Lorg/apache/commons/numbers/arrays/UpdatingInterval;
+
+  static int countIndices(org.apache.commons.numbers.arrays.UpdatingInterval, int);
+    descriptor: (Lorg/apache/commons/numbers/arrays/UpdatingInterval;I)I
+
+  static void checkFromToIndex(int, int, int);
+    descriptor: (III)V
+
+  static void checkIndices(int, int, int[]);
+    descriptor: (II[I)V
+
+  static void checkIndex(int, int, int);
+    descriptor: (III)V
+
+  private static java.lang.String msgRangeOutOfBounds(int, int, int);
+    descriptor: (III)Ljava/lang/String;
+
+  private static java.lang.String msgIndexOutOfBounds(int, int, int);
+    descriptor: (III)Ljava/lang/String;
+}
+Compiled from "KeyUpdatingInterval.java"
+final class org.apache.commons.numbers.arrays.KeyUpdatingInterval implements org.apache.commons.numbers.arrays.UpdatingInterval {
+  private static final int SCAN_SIZE;
+    descriptor: I
+  private final int[] keys;
+    descriptor: [I
+  private int l;
+    descriptor: I
+  private int r;
+    descriptor: I
+  org.apache.commons.numbers.arrays.KeyUpdatingInterval(int[], int);
+    descriptor: ([II)V
+
+  private org.apache.commons.numbers.arrays.KeyUpdatingInterval(int[], int, int);
+    descriptor: ([III)V
+
+  public int left();
+    descriptor: ()I
+
+  public int right();
+    descriptor: ()I
+
+  public int updateLeft(int);
+    descriptor: (I)I
+
+  public int updateRight(int);
+    descriptor: (I)I
+
+  public org.apache.commons.numbers.arrays.UpdatingInterval splitLeft(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/arrays/UpdatingInterval;
+
+  int size();
+    descriptor: ()I
+
+  static int searchLessOrEqual(int[], int, int, int);
+    descriptor: ([IIII)I
+}
+Compiled from "MultidimensionalCounter.java"
+public final class org.apache.commons.numbers.arrays.MultidimensionalCounter {
+  private final int dimension;
+    descriptor: I
+  private final int[] uniCounterOffset;
+    descriptor: [I
+  private final int[] size;
+    descriptor: [I
+  private final int totalSize;
+    descriptor: I
+  private final int last;
+    descriptor: I
+  private org.apache.commons.numbers.arrays.MultidimensionalCounter(int...);
+    descriptor: ([I)V
+
+  public static org.apache.commons.numbers.arrays.MultidimensionalCounter of(int...);
+    descriptor: ([I)Lorg/apache/commons/numbers/arrays/MultidimensionalCounter;
+
+  public int getDimension();
+    descriptor: ()I
+
+  public int[] toMulti(int);
+    descriptor: (I)[I
+
+  public int toUni(int...);
+    descriptor: ([I)I
+
+  public int getSize();
+    descriptor: ()I
+
+  public int[] getSizes();
+    descriptor: ()[I
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  private static void checkStrictlyPositive(java.lang.String, int);
+    descriptor: (Ljava/lang/String;I)V
+
+  private static java.lang.String createIndexOutOfBoundsMessage(int, int);
+    descriptor: (II)Ljava/lang/String;
+}
+Compiled from "QuickSelect.java"
+final class org.apache.commons.numbers.arrays.QuickSelect {
+  static final int MODE_FR_SAMPLING;
+    descriptor: I
+  static final int MODE_SAMPLING;
+    descriptor: I
+  static final int MODE_ADAPTION;
+    descriptor: I
+  static final int MODE_STRICT;
+    descriptor: I
+  private static final int MIN_SORTSELECT_SIZE;
+    descriptor: I
+  private static final int LINEAR_SORTSELECT_SIZE;
+    descriptor: I
+  private static final int DP_SORTSELECT_SIZE;
+    descriptor: I
+  private static final int FR_SAMPLING_SIZE;
+    descriptor: I
+  private static final int RECURSION_INCREMENT;
+    descriptor: I
+  private static final int SORTSELECT_MASK;
+    descriptor: I
+  private static final double STEP_LEFT;
+    descriptor: D
+  private static final double STEP_RIGHT;
+    descriptor: D
+  private static final double STEP_FAR_LEFT;
+    descriptor: D
+  private static final double STEP_FAR_RIGHT;
+    descriptor: D
+  private org.apache.commons.numbers.arrays.QuickSelect();
+    descriptor: ()V
+
+  static void heapSelect(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  static void heapSelectLeft(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  private static void maxHeapSiftDown(double[], double, int, int, int);
+    descriptor: ([DDIII)V
+
+  static void heapSelectRight(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  private static void minHeapSiftDown(double[], double, int, int, int);
+    descriptor: ([DDIII)V
+
+  static void sortSelect(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  static void sortSelectLeft(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  static void sortSelectRight(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  static void select(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  static int select(double[], int, int, int[], int);
+    descriptor: ([DII[II)I
+
+  static int quickSelectAdaptive(double[], int, int, int, int, int[], int);
+    descriptor: ([DIIII[II)I
+
+  private static int sampleStep(double[], int, int, int, int[]);
+    descriptor: ([DIII[I)I
+
+  private static int repeatedStep(double[], int, int, int, int[], int);
+    descriptor: ([DIII[II)I
+
+  private static int repeatedStepLeft(double[], int, int, int, int[], int);
+    descriptor: ([DIII[II)I
+
+  private static int repeatedStepRight(double[], int, int, int, int[], int);
+    descriptor: ([DIII[II)I
+
+  private static int repeatedStepFarLeft(double[], int, int, int, int[], int);
+    descriptor: ([DIII[II)I
+
+  private static int repeatedStepFarRight(double[], int, int, int, int[], int);
+    descriptor: ([DIII[II)I
+
+  static int expandPartition(double[], int, int, int, int, int, int, int[]);
+    descriptor: ([DIIIIII[I)I
+
+  static void dualPivotQuickSelect(double[], int, int, org.apache.commons.numbers.arrays.UpdatingInterval, int);
+    descriptor: ([DIILorg/apache/commons/numbers/arrays/UpdatingInterval;I)V
+
+  private static int partition(double[], int, int, int[]);
+    descriptor: ([DII[I)I
+
+  static void heapSelect(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void heapSelectLeft(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  private static void maxHeapSiftDown(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void heapSelectRight(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  private static void minHeapSiftDown(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void sortSelect(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void sortSelectLeft(int[], int, int, int);
+    descriptor: ([IIII)V
+
+  static void sortSelectRight(int[], int, int, int);
+    descriptor: ([IIII)V
+
+  static void select(int[], int, int, int);
+    descriptor: ([IIII)V
+
+  static void select(int[], int, int, int[], int);
+    descriptor: ([III[II)V
+
+  static int quickSelectAdaptive(int[], int, int, int, int, int[], int);
+    descriptor: ([IIIII[II)I
+
+  private static int sampleStep(int[], int, int, int, int[]);
+    descriptor: ([IIII[I)I
+
+  private static int repeatedStep(int[], int, int, int, int[], int);
+    descriptor: ([IIII[II)I
+
+  private static int repeatedStepLeft(int[], int, int, int, int[], int);
+    descriptor: ([IIII[II)I
+
+  private static int repeatedStepRight(int[], int, int, int, int[], int);
+    descriptor: ([IIII[II)I
+
+  private static int repeatedStepFarLeft(int[], int, int, int, int[], int);
+    descriptor: ([IIII[II)I
+
+  private static int repeatedStepFarRight(int[], int, int, int, int[], int);
+    descriptor: ([IIII[II)I
+
+  static int expandPartition(int[], int, int, int, int, int, int, int[]);
+    descriptor: ([IIIIIII[I)I
+
+  static void dualPivotQuickSelect(int[], int, int, org.apache.commons.numbers.arrays.UpdatingInterval, int);
+    descriptor: ([IIILorg/apache/commons/numbers/arrays/UpdatingInterval;I)V
+
+  private static int partition(int[], int, int, int[]);
+    descriptor: ([III[I)I
+
+  static void heapSelect(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  static void heapSelectLeft(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  private static void maxHeapSiftDown(long[], long, int, int, int);
+    descriptor: ([JJIII)V
+
+  static void heapSelectRight(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  private static void minHeapSiftDown(long[], long, int, int, int);
+    descriptor: ([JJIII)V
+
+  static void sortSelect(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  static void sortSelectLeft(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  static void sortSelectRight(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  static void select(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  static void select(long[], int, int, int[], int);
+    descriptor: ([JII[II)V
+
+  static int quickSelectAdaptive(long[], int, int, int, int, int[], int);
+    descriptor: ([JIIII[II)I
+
+  private static int sampleStep(long[], int, int, int, int[]);
+    descriptor: ([JIII[I)I
+
+  private static int repeatedStep(long[], int, int, int, int[], int);
+    descriptor: ([JIII[II)I
+
+  private static int repeatedStepLeft(long[], int, int, int, int[], int);
+    descriptor: ([JIII[II)I
+
+  private static int repeatedStepRight(long[], int, int, int, int[], int);
+    descriptor: ([JIII[II)I
+
+  private static int repeatedStepFarLeft(long[], int, int, int, int[], int);
+    descriptor: ([JIII[II)I
+
+  private static int repeatedStepFarRight(long[], int, int, int, int[], int);
+    descriptor: ([JIII[II)I
+
+  static int expandPartition(long[], int, int, int, int, int, int, int[]);
+    descriptor: ([JIIIIII[I)I
+
+  static void dualPivotQuickSelect(long[], int, int, org.apache.commons.numbers.arrays.UpdatingInterval, int);
+    descriptor: ([JIILorg/apache/commons/numbers/arrays/UpdatingInterval;I)V
+
+  private static int partition(long[], int, int, int[]);
+    descriptor: ([JII[I)I
+
+  private static int mapDistance(int, int, int, int);
+    descriptor: (IIII)I
+
+  private static int dualPivotFlags(int, int, int, int);
+    descriptor: (IIII)I
+
+  static int dualPivotFlags(int, int);
+    descriptor: (II)I
+
+  static int dualPivotMaxDepth(int);
+    descriptor: (I)I
+
+  private static int dualPivotSortSelectSize(int, int);
+    descriptor: (II)I
+}
+Compiled from "Selection.java"
+public final class org.apache.commons.numbers.arrays.Selection {
+  private org.apache.commons.numbers.arrays.Selection();
+    descriptor: ()V
+
+  public static void select(double[], int);
+    descriptor: ([DI)V
+
+  public static void select(double[], int[]);
+    descriptor: ([D[I)V
+
+  public static void select(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  public static void select(double[], int, int, int[]);
+    descriptor: ([DII[I)V
+
+  private static void doSelect(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  private static void doSelect(double[], int, int, int[]);
+    descriptor: ([DII[I)V
+
+  public static void select(int[], int);
+    descriptor: ([II)V
+
+  public static void select(int[], int[]);
+    descriptor: ([I[I)V
+
+  public static void select(int[], int, int, int);
+    descriptor: ([IIII)V
+
+  public static void select(int[], int, int, int[]);
+    descriptor: ([III[I)V
+
+  public static void select(long[], int);
+    descriptor: ([JI)V
+
+  public static void select(long[], int[]);
+    descriptor: ([J[I)V
+
+  public static void select(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  public static void select(long[], int, int, int[]);
+    descriptor: ([JII[I)V
+}
+Compiled from "SortInPlace.java"
+class org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger {
+  private final double key;
+    descriptor: D
+  private final int value;
+    descriptor: I
+  org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger(double, int);
+    descriptor: (DI)V
+
+  double key();
+    descriptor: ()D
+
+  int value();
+    descriptor: ()I
+}
+Compiled from "SortInPlace.java"
+public final class org.apache.commons.numbers.arrays.SortInPlace extends java.lang.Enum<org.apache.commons.numbers.arrays.SortInPlace> {
+  public static final org.apache.commons.numbers.arrays.SortInPlace ASCENDING;
+    descriptor: Lorg/apache/commons/numbers/arrays/SortInPlace;
+  public static final org.apache.commons.numbers.arrays.SortInPlace DESCENDING;
+    descriptor: Lorg/apache/commons/numbers/arrays/SortInPlace;
+  private final java.util.Comparator<org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger> comparator;
+    descriptor: Ljava/util/Comparator;
+  private static final org.apache.commons.numbers.arrays.SortInPlace[] $VALUES;
+    descriptor: [Lorg/apache/commons/numbers/arrays/SortInPlace;
+  public static org.apache.commons.numbers.arrays.SortInPlace[] values();
+    descriptor: ()[Lorg/apache/commons/numbers/arrays/SortInPlace;
+
+  public static org.apache.commons.numbers.arrays.SortInPlace valueOf(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/arrays/SortInPlace;
+
+  private org.apache.commons.numbers.arrays.SortInPlace(java.util.Comparator<org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger>);
+    descriptor: (Ljava/lang/String;ILjava/util/Comparator;)V
+
+  public void apply(double[], double[]...);
+    descriptor: ([D[[D)V
+
+  private static int lambda$static$1(org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger, org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger);
+    descriptor: (Lorg/apache/commons/numbers/arrays/SortInPlace$PairDoubleInteger;Lorg/apache/commons/numbers/arrays/SortInPlace$PairDoubleInteger;)I
+
+  private static int lambda$static$0(org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger, org.apache.commons.numbers.arrays.SortInPlace$PairDoubleInteger);
+    descriptor: (Lorg/apache/commons/numbers/arrays/SortInPlace$PairDoubleInteger;Lorg/apache/commons/numbers/arrays/SortInPlace$PairDoubleInteger;)I
+
+  private static org.apache.commons.numbers.arrays.SortInPlace[] $values();
+    descriptor: ()[Lorg/apache/commons/numbers/arrays/SortInPlace;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "Sorting.java"
+final class org.apache.commons.numbers.arrays.Sorting {
+  private org.apache.commons.numbers.arrays.Sorting();
+    descriptor: ()V
+
+  static void sort(double[], int, int);
+    descriptor: ([DII)V
+
+  static void sort3(double[], int, int, int);
+    descriptor: ([DIII)V
+
+  static void sort5(double[], int, int, int, int, int);
+    descriptor: ([DIIIII)V
+
+  static void lowerMedian4(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  static void upperMedian4(double[], int, int, int, int);
+    descriptor: ([DIIII)V
+
+  static void sort(int[], int, int);
+    descriptor: ([III)V
+
+  static void sort3(int[], int, int, int);
+    descriptor: ([IIII)V
+
+  static void sort5(int[], int, int, int, int, int);
+    descriptor: ([IIIIII)V
+
+  static void lowerMedian4(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void upperMedian4(int[], int, int, int, int);
+    descriptor: ([IIIII)V
+
+  static void sort(long[], int, int);
+    descriptor: ([JII)V
+
+  static void sort3(long[], int, int, int);
+    descriptor: ([JIII)V
+
+  static void sort5(long[], int, int, int, int, int);
+    descriptor: ([JIIIII)V
+
+  static void lowerMedian4(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  static void upperMedian4(long[], int, int, int, int);
+    descriptor: ([JIIII)V
+
+  static int insertionSortIndices(int[], int);
+    descriptor: ([II)I
+
+  static int sortIndices(int[], int);
+    descriptor: ([II)I
+}
+Compiled from "UpdatingInterval.java"
+interface org.apache.commons.numbers.arrays.UpdatingInterval {
+  public abstract int left();
+    descriptor: ()I
+
+  public abstract int right();
+    descriptor: ()I
+
+  public abstract int updateLeft(int);
+    descriptor: (I)I
+
+  public abstract int updateRight(int);
+    descriptor: (I)I
+
+  public abstract org.apache.commons.numbers.arrays.UpdatingInterval splitLeft(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/arrays/UpdatingInterval;
+}

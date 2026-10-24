@@ -5,8 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 checkout="${NUMBERS_SOURCE_ROOT:-$repo_root/.tmp/commons-numbers-1.3-src}"
 module="${NUMBERS_MODULE:-core}"
 case "$module" in
-  primes|rootfinder|core|complex) modules=("$module") ;;
-  quaternion|angle) modules=(core "$module") ;;
+  primes|rootfinder|core|complex|arrays) modules=("$module") ;;
+  quaternion|angle|fraction) modules=(core "$module") ;;
   *) echo 'Unknown Commons Numbers module' >&2; exit 1 ;;
 esac
 out_dir="${NUMBERS_API_OUT:-$repo_root/.tmp/commons-numbers-1.3-$module-api}"

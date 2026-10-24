@@ -2,6 +2,91 @@
 mod common;
 
 #[test]
+fn decimal_division_runtime_matches_independent_jdk_requests() {
+    use std::process::Command;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scratch = std::env::temp_dir().join(format!(
+        "java2rust-decimal-division-oracle-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let compiled = common::run_with_watchdog(
+        Command::new("javac")
+            .arg("-d")
+            .arg(&scratch)
+            .arg(root.join("tests/corpus/numbers/BigDecimalDivisionOracle.java")),
+        Duration::from_secs(30),
+    );
+    assert!(
+        compiled.status.is_some_and(|s| s.success()),
+        "{}",
+        compiled.stderr
+    );
+    let oracle = common::run_with_watchdog(
+        Command::new("java")
+            .arg("-Xmx128m")
+            // A hot integer divide-by-zero may otherwise use HotSpot's
+            // preallocated fast-throw exception with a missing message.
+            // Compare the actual API error, not its JIT warmup-dependent form.
+            .arg("-XX:-OmitStackTraceInFastThrow")
+            .arg("-cp")
+            .arg(&scratch)
+            .arg("BigDecimalDivisionOracle"),
+        Duration::from_secs(30),
+    );
+    assert!(
+        oracle.status.is_some_and(|s| s.success()),
+        "{}",
+        oracle.stderr
+    );
+    assert_eq!(oracle.stdout.lines().count(), 12548);
+    let tests = format!(
+        r#"
+fn view(value: BigDecimal) -> String {{ format!("{{}};{{}};{{:x}};{{:x}}", value, value.scale(), value.double_value().to_bits(), value.float_value().to_bits()) }}
+#[test] fn exact_jdk_division_matrix() {{
+    let modes = [RoundingMode::UP,RoundingMode::DOWN,RoundingMode::CEILING,RoundingMode::FLOOR,RoundingMode::HALF_UP,RoundingMode::HALF_DOWN,RoundingMode::HALF_EVEN,RoundingMode::UNNECESSARY];
+    let mut failures = Vec::new();
+    for line in {:?}.lines() {{
+        let parts = line.split('|').collect::<Vec<_>>();
+        let left = if parts[0] == "I" {{ BigDecimal::new(parts[1].parse::<BigInteger>().unwrap()).unwrap() }}
+            else {{ BigDecimal::new(parts[1]).unwrap() }};
+        let result = if parts[0] == "I" {{ Ok(left) }} else {{
+            let right = BigDecimal::new(parts[2]).unwrap();
+            match parts[0] {{
+                "E" => left.divide(&right),
+                "R" => left.divide_rounding(&right, modes[parts[3].parse::<usize>().unwrap()]),
+                "T" => left.divide_scaled(&right, parts[3].parse().unwrap(), modes[parts[4].parse::<usize>().unwrap()]),
+                other => panic!("unknown request {{other}}"),
+            }}
+        }};
+        let observed = result.map(view).unwrap_or_else(|error| format!("ERR:ArithmeticException:{{error}}"));
+        if observed != *parts.last().unwrap() {{ failures.push(format!("{{line}} => {{observed}}")); }}
+    }}
+    assert!(failures.is_empty(), "{{}} mismatches: {{:?}}", failures.len(), &failures[..failures.len().min(30)]);
+}}
+"#,
+        oracle.stdout
+    );
+    let runtime = root.join("runtime/java-math");
+    common::cargo_verify_generated_modules_with_dependencies(
+        "decimal_division_jdk_matrix",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: "pub use java_math_runtime::*;".into(),
+            tests: Box::leak(tests.into_boxed_str()),
+        }],
+        "test",
+        "2021",
+        &[("java-math-runtime", runtime.as_path())],
+    );
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+
+#[test]
 fn decimal_runtime_matches_independent_jdk_requests() {
     use std::process::Command;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};

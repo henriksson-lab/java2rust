@@ -5316,23 +5316,30 @@ fn propagate_call_site_constraints(
                         else {
                             continue;
                         };
-                        if name != call_site.name() || *boundary != call_site.boundary() {
+                        if name != call_site.name()
+                            || *boundary != call_site.boundary()
+                            || !call_site.argument_bindings().iter().any(|(index, id)| {
+                                index == arg_index && Some(id) == binding.binding()
+                            })
+                        {
                             continue;
                         }
-                        if *arg_index < callee_constraints.params.len() {
-                            for constraint in propagated_callee_param_constraints_for_binding(
-                                &callee_constraints.params[*arg_index],
+                        {
+                            for constraint in propagated_callee_argument_constraints_for_binding(
+                                callee_constraints,
+                                call_site.resolved(),
+                                *arg_index,
                                 binding.java_ty(),
                             ) {
                                 if signature_shape_constraint_propagation_policy()
-                                    .allows(constraint)
+                                    .allows(&constraint)
                                     || matches!(constraint, SignatureConstraint::MutableBinding)
                                 {
                                     pending.push((
                                         caller_key.clone(),
                                         PendingSignatureConstraint::Binding {
                                             binding: binding.clone(),
-                                            constraint: constraint.clone(),
+                                            constraint,
                                         },
                                     ));
                                 }
@@ -5502,22 +5509,23 @@ fn propagate_constructor_call_site_constraints(
                     };
                     if name != call_site.name()
                         || *boundary != call_site.boundary()
-                        || *arg_index >= callee_constraints.params.len()
+                        || !call_site
+                            .argument_bindings()
+                            .iter()
+                            .any(|(index, id)| index == arg_index && Some(id) == binding.binding())
                     {
                         continue;
                     }
-                    for constraint in propagated_callee_param_constraints_for_binding(
-                        &callee_constraints.params[*arg_index],
+                    for constraint in propagated_callee_argument_constraints_for_binding(
+                        callee_constraints,
+                        call_site.resolved(),
+                        *arg_index,
                         binding.java_ty(),
                     ) {
-                        if signature_shape_constraint_propagation_policy().allows(constraint)
+                        if signature_shape_constraint_propagation_policy().allows(&constraint)
                             || matches!(constraint, SignatureConstraint::MutableBinding)
                         {
-                            pending.push((
-                                constructor_key.clone(),
-                                binding.clone(),
-                                constraint.clone(),
-                            ));
+                            pending.push((constructor_key.clone(), binding.clone(), constraint));
                         }
                     }
                 }
@@ -6077,11 +6085,66 @@ fn resolved_call_arg_is_expanded_varargs_element(
     callee: &MethodConstraintSet,
     arg_index: usize,
 ) -> bool {
-    callee.param_is_varargs.get(arg_index) == Some(&true)
-        && resolved
-            .arg_target_types
-            .get(arg_index)
-            .is_some_and(|target| Some(target) == callee.param_java_types.get(arg_index))
+    let Some(last) = callee.params.len().checked_sub(1) else {
+        return false;
+    };
+    callee.param_is_varargs.get(last) == Some(&true)
+        && arg_index >= last
+        && (arg_index > last
+            || crate::call_plan::resolved_call_arg_target_type(resolved, arg_index)
+                .is_some_and(|target| Some(target) != callee.param_java_types.get(last)))
+}
+
+fn propagated_callee_argument_constraints_for_binding(
+    callee: &MethodConstraintSet,
+    resolved: Option<&ResolvedCall>,
+    argument: usize,
+    binding_ty: &JavaType,
+) -> Vec<SignatureConstraint> {
+    let Some(last) = callee.params.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    let expanded = callee.param_is_varargs.get(last) == Some(&true)
+        && argument >= last
+        && (argument > last
+            || resolved.is_some_and(|call| {
+                resolved_call_arg_is_expanded_varargs_element(call, callee, argument)
+            }));
+    let index = if expanded { last } else { argument };
+    let Some(requirements) = callee.params.get(index) else {
+        return Vec::new();
+    };
+    let projected = if expanded {
+        requirements
+            .iter()
+            .filter_map(|requirement| match requirement {
+                SignatureConstraint::RequiredNestedNativeAllocation { path, placement }
+                    if path.first() == Some(&0) =>
+                {
+                    Some(native_allocation_requirement(
+                        path[1..].to_vec(),
+                        *placement,
+                    ))
+                }
+                SignatureConstraint::NullableSequenceElement => {
+                    Some(nullable_storage_requirement(binding_ty, vec![]))
+                }
+                SignatureConstraint::NullableSequenceElementAtDepth(depth) if *depth > 0 => Some(
+                    SignatureConstraint::NullableSequenceElementAtDepth(depth - 1),
+                ),
+                SignatureConstraint::NullableValueAtPath(path) if path.first() == Some(&0) => {
+                    Some(nullable_storage_requirement(binding_ty, path[1..].to_vec()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        requirements.clone()
+    };
+    propagated_callee_param_constraints_for_binding(&projected, binding_ty)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 fn propagate_call_argument_collection_carrier_java_types_to_callees(
@@ -7708,6 +7771,24 @@ fn native_allocation_requirement(
     }
 }
 
+/// Materialized Java array rows are nullable references, not rectangular
+/// numeric views. Express that distinction in the existing child-nullability
+/// vocabulary so rendering, construction and access consume the same shape.
+fn native_array_row_nullability_requirement(
+    root: &JavaType,
+    path: &[usize],
+) -> Option<SignatureConstraint> {
+    let (&index, parent_path) = path.split_last()?;
+    let parent = RustSlotShape::native_child_type_at_path(root, parent_path)?;
+    let parent = optional_element_type(&parent).unwrap_or(parent);
+    let JavaType::Array(row) = parent else {
+        return None;
+    };
+    let row = optional_element_type(&row).unwrap_or(*row);
+    (index == 0 && matches!(row, JavaType::Array(_)))
+        .then(|| nullable_storage_requirement(root, path.to_vec()))
+}
+
 fn propagate_native_collection_child_allocations(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
@@ -7720,6 +7801,11 @@ fn propagate_native_collection_child_allocations(
         let retained = crate::storage_strategy::StoragePlacement::new(true, true, false);
         for (source, target) in [(&left, &right), (&right, &left)] {
             if retain {
+                if let Some(requirement) =
+                    native_array_row_nullability_requirement(&target.3, &target.1)
+                {
+                    pending.push((target.0.clone(), requirement));
+                }
                 pending.push((
                     target.0.clone(),
                     native_allocation_requirement(target.1.clone(), retained),
@@ -7745,14 +7831,26 @@ fn propagate_native_collection_child_allocations(
                     }
                     if !RustSlotShape::native_child_type_at_path(&target.2, suffix).is_some_and(
                         |ty| {
+                            let ty = optional_element_type(&ty).unwrap_or(ty);
                             matches!(ty, JavaType::Array(_))
                                 || crate::stdlib::java_collection_kind_for_type(&ty).is_some()
+                                || java_type_name_for_signature_dispatch(&ty).is_some_and(|name| {
+                                    crate::stdlib::functional_interface_shape(
+                                        &crate::stdlib::canonical_external_receiver_type_key(name),
+                                    )
+                                    .is_some()
+                                })
                         },
                     ) {
                         continue;
                     }
                     let mut path = target.1.clone();
                     path.extend_from_slice(suffix);
+                    if let Some(requirement) =
+                        native_array_row_nullability_requirement(&target.3, &path)
+                    {
+                        pending.push((target.0.clone(), requirement));
+                    }
                     pending.push((
                         target.0.clone(),
                         native_allocation_requirement(path, placement),
@@ -17957,6 +18055,7 @@ fn seed_native_collection_alias_constraints(
     locals: &mut [LocalConstraintSet],
     facts: &FactSet,
 ) {
+    seed_native_array_parameter_alias_constraints(params, param_constraints);
     let Some(usage) = usage else {
         return;
     };
@@ -18053,6 +18152,53 @@ fn seed_native_collection_alias_constraints(
                 &mut local.constraints,
                 std::slice::from_ref(&requirement),
             );
+        }
+    }
+}
+
+/// Distinct formal parameters may denote the same Java array, including a
+/// row of another parameter. Exclusive slice borrows cannot express those
+/// legal calls; retain compatible allocations through the existing solver.
+fn seed_native_array_parameter_alias_constraints(
+    params: &[Param],
+    constraints: &mut [Vec<SignatureConstraint>],
+) {
+    let arrays = params
+        .iter()
+        .map(|param| {
+            let mut slots = Vec::new();
+            let mut ty = &param.ty;
+            let mut path = Vec::new();
+            while let JavaType::Array(child) = ty {
+                slots.push((path.clone(), ty));
+                path.push(0);
+                ty = child;
+            }
+            slots
+        })
+        .collect::<Vec<_>>();
+    let placement = crate::storage_strategy::StoragePlacement::new(true, true, false);
+    for first in 0..arrays.len() {
+        for second in first + 1..arrays.len() {
+            for (first_path, first_ty) in &arrays[first] {
+                for (second_path, second_ty) in &arrays[second] {
+                    if first_ty != second_ty {
+                        continue;
+                    }
+                    for (index, path) in [(first, first_path), (second, second_path)] {
+                        let requirement = native_allocation_requirement(path.clone(), placement);
+                        push_unique_signature_constraints(&mut constraints[index], &[requirement]);
+                        if let Some(requirement) =
+                            native_array_row_nullability_requirement(&params[index].ty, path)
+                        {
+                            push_unique_signature_constraints(
+                                &mut constraints[index],
+                                &[requirement],
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -21986,6 +22132,57 @@ fn next_local_binding_id(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn expanded_array_varargs_do_not_copy_packet_placement_to_primitive_elements() {
+        use super::*;
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/numbers/ReferenceRowsProbe.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let run = plan
+            .methods
+            .iter()
+            .find(|(key, _)| key.rust_name == "run")
+            .unwrap()
+            .1;
+        for name in ["key", "y"] {
+            let local = run
+                .locals()
+                .iter()
+                .find(|local| local.name() == name)
+                .unwrap();
+            assert!(local.shape().native_allocation.shared(), "{local:?}");
+            assert!(
+                local.shape().nested_native_allocations.is_empty(),
+                "primitive contents cannot retain an array allocation: {local:?}"
+            );
+        }
+        let rows = run
+            .locals()
+            .iter()
+            .find(|local| local.name() == "rows")
+            .unwrap();
+        assert!(
+            rows.shape()
+                .nested_native_allocations
+                .iter()
+                .any(|(path, placement)| path == &[0] && placement.shared())
+        );
+    }
+
+    #[test]
     fn scoped_binders_keep_their_carrier_under_erased_use_constraints() {
         use super::*;
         for name in ["T", "Object"] {
@@ -24060,6 +24257,7 @@ class TrackingStream extends InputStream {
         state: NullabilityState,
     ) -> ExternalApiArgumentEffectFact {
         ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "new".to_string(),
             receiver_type: None,
             arg_count: None,
@@ -24369,6 +24567,7 @@ class TrackingStream extends InputStream {
                     Stmt::Block(Block {
                         statements: vec![
                             Stmt::VarDecl {
+                                is_final: false,
                                 ty: JavaType::String,
                                 name: "value".to_string(),
                                 source_name: "value".to_string(),
@@ -25189,6 +25388,7 @@ class SourceEnhancedForNullableLocalOnly {
         let body = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::Unknown("Object".to_string()),
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -25223,6 +25423,7 @@ class SourceEnhancedForNullableLocalOnly {
         let body = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::Unknown("Object".to_string()),
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -25261,6 +25462,7 @@ class SourceEnhancedForNullableLocalOnly {
         let body = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::Unknown("Object".to_string()),
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -25568,6 +25770,7 @@ class PublicMapLookup {
     fn call_result_alias_for_visible_local_still_detected() {
         let method = return_string_method(vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -25584,6 +25787,7 @@ class PublicMapLookup {
     fn call_result_alias_from_inner_shadow_does_not_leak_by_name() {
         let method = return_string_method(vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -25592,6 +25796,7 @@ class PublicMapLookup {
             },
             Stmt::Block(Block {
                 statements: vec![Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::String,
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -25609,6 +25814,7 @@ class PublicMapLookup {
     fn call_result_alias_is_cleared_by_visible_reassignment() {
         let method = return_string_method(vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -25633,6 +25839,7 @@ class PublicMapLookup {
         helper.name = "helper".to_string();
         let caller = return_string_method(vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -25738,6 +25945,7 @@ class PublicMapLookup {
             source_name: "value".to_string(),
             initializer: None,
             binding: Some(binding.clone()),
+            is_final: false,
         };
         let mutated = HashSet::from(["value".to_string()]);
 
@@ -26181,6 +26389,7 @@ class PublicMapLookup {
         let binding = BindingId::new(BindingKind::Local, "value", 0);
         let block = Block {
             statements: vec![Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -26207,6 +26416,7 @@ class PublicMapLookup {
         let block = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::String,
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -26234,6 +26444,7 @@ class PublicMapLookup {
                         modifiers: Vec::new(),
                         body: Some(Block {
                             statements: vec![Stmt::VarDecl {
+                                is_final: false,
                                 ty: JavaType::String,
                                 name: "value".to_string(),
                                 source_name: "value".to_string(),
@@ -26284,6 +26495,7 @@ class PublicMapLookup {
                         condition: Expr::Var("choose".to_string()),
                         then_block: Block {
                             statements: vec![Stmt::VarDecl {
+                                is_final: false,
                                 ty: JavaType::Unknown("Object".to_string()),
                                 name: "value".to_string(),
                                 source_name: "value".to_string(),
@@ -26353,6 +26565,7 @@ class PublicMapLookup {
             body: Some(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "old".to_string(),
                         source_name: "old".to_string(),
@@ -26422,6 +26635,7 @@ class PublicMapLookup {
             body: Some(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::Unknown("Object".to_string()),
                         name: "value".to_string(),
                         source_name: "value".to_string(),
@@ -26810,6 +27024,7 @@ class PublicMapLookup {
             body: Some(Block {
                 statements: vec![Stmt::For {
                     init: vec![Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "value".to_string(),
                         source_name: "value".to_string(),
@@ -26941,6 +27156,7 @@ class PublicMapLookup {
             body: Some(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "self__".to_string(),
                         source_name: "self".to_string(),
@@ -27103,6 +27319,7 @@ class PublicMapLookup {
             body: Some(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: local_ty.clone(),
                         name: "self__".to_string(),
                         source_name: "self".to_string(),
@@ -27255,6 +27472,7 @@ class PublicMapLookup {
         let block = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: buffer_facade_type(),
                     name: "self__".to_string(),
                     source_name: "self".to_string(),
@@ -28036,6 +28254,7 @@ class PublicMapLookup {
         let body = Block {
             statements: vec![
                 Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::Unknown("Object".to_string()),
                     name: "value".to_string(),
                     source_name: "value".to_string(),

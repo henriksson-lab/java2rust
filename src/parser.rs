@@ -1665,6 +1665,7 @@ fn parse_resource_declaration_text(src: &str) -> Option<Stmt> {
         source_name: expression_identifier_name(name.trim()),
         initializer: Some(parse_expr(right.trim())),
         binding: None,
+        is_final: true,
     })
 }
 
@@ -1871,6 +1872,7 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
                 source_name: expression_identifier_name(&name),
                 initializer,
                 binding: None,
+                is_final: parse_modifiers(node, source).contains(&Modifier::Final),
             }
         })
         .collect()
@@ -3175,6 +3177,11 @@ fn java_type_name_suffix(src: &str) -> String {
 }
 
 fn preserve_explicit_runtime_type_name(src: &str) -> bool {
+    // A qualified platform exception must remain distinct from a lexical
+    // source declaration with the same leaf name, through resolution.
+    if crate::stdlib::jdk_exception_binary_name(src).is_some_and(|binary| binary == src) {
+        return true;
+    }
     // Qualification distinguishes a real platform wrapper from a lexical
     // type parameter with the same simple spelling. Keep that evidence until
     // binder normalization and source-name resolution have run.

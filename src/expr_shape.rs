@@ -2608,6 +2608,7 @@ pub(crate) fn learn_stmt_shapes_with_context(
             source_name,
             initializer,
             binding,
+            ..
         } => {
             let access_name = env
                 .binding_access_name(source_name)
@@ -3588,6 +3589,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
             source_name: "value".to_string(),
             initializer: None,
             binding: Some(BindingId::new(BindingKind::Local, "value".to_string(), 1)),
+            is_final: false,
         };
         let mut env = ShapeEnv::new();
 
@@ -3651,6 +3653,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
                 "x".to_string(),
             ))),
             binding: None,
+            is_final: false,
         };
         let mut env = ShapeEnv::new();
 
@@ -3678,6 +3681,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
                 "x".to_string(),
             ))),
             binding: Some(binding.clone()),
+            is_final: false,
         };
         let mut env = ShapeEnv::new();
 
@@ -3816,6 +3820,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
                     resolved: None,
                 }),
                 binding: None,
+                is_final: false,
             }
         }
 
@@ -3877,6 +3882,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
                 "map.entrySet().iterator().next()",
             )),
             binding: Some(entry_binding),
+            is_final: false,
         };
 
         learn_stmt_shapes(&entry_decl, &mut env, &[], &SignaturePlan::default());
@@ -3899,6 +3905,7 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
                 "new java.util.AbstractMap.SimpleEntry(\"a\", \"1\")",
             )),
             binding: Some(simple_binding),
+            is_final: false,
         };
 
         learn_stmt_shapes(&simple_decl, &mut env, &[], &SignaturePlan::default());

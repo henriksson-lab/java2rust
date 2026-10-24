@@ -835,6 +835,7 @@ mod tests {
             ty: crate::java_ir::JavaType::String,
             initializer: Some(init),
             binding: None,
+            is_final: false,
         }
     }
 
@@ -887,6 +888,7 @@ mod tests {
             ty: crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
             initializer: Some(int(init)),
             binding: None,
+            is_final: false,
         }
     }
 

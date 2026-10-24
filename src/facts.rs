@@ -30,6 +30,9 @@ pub struct FactSet {
     /// Step 3 of
     /// [0002b](../claude_audits/0002b-shared-representation-design.md).
     pub storage_strategies: crate::storage_strategy::StoragePlan,
+    /// Final carrier name -> concrete Java payload owners, projected by the
+    /// representation planner for consumers that deliberately take only facts.
+    pub source_hierarchy_carrier_variants: std::collections::BTreeMap<String, Vec<String>>,
     pub notes: Vec<String>,
     pub captures: CaptureFacts,
     pub hierarchy_overrides: Vec<HierarchyOverride>,
@@ -78,6 +81,7 @@ impl Default for FactSet {
         Self {
             java_string_identity_representation: false,
             storage_strategies: crate::storage_strategy::StoragePlan::default(),
+            source_hierarchy_carrier_variants: Default::default(),
             notes: Vec::new(),
             captures: CaptureFacts::default(),
             hierarchy_overrides: Vec::new(),
@@ -1589,6 +1593,9 @@ pub enum ExternalArgumentAliasPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiArgumentEffectFact {
+    /// Optional runtime function returning the message for a null required ABI
+    /// argument. Kept on the selected contract so overrides replace it too.
+    pub null_message_function: Option<String>,
     pub method_name: String,
     pub receiver_type: Option<String>,
     pub arg_count: Option<usize>,
@@ -1673,6 +1680,8 @@ pub struct ExternalCrateApiMappingFact {
 pub struct ExternalCrateTypeMappingFact {
     pub type_name: String,
     pub rust_type_name: String,
+    /// Inherent method comparing clone-stable Java allocation identities.
+    pub reference_identity_method: Option<String>,
     pub provenance: FactProvenance,
 }
 
@@ -2122,6 +2131,8 @@ pub enum ExceptionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExceptionFact {
     pub type_name: String,
+    /// Original Java binary name, before source flattening or Rust renaming.
+    pub binary_name: Option<String>,
     pub kind: ExceptionKind,
     pub provenance: FactProvenance,
 }
@@ -2432,6 +2443,14 @@ pub enum CaptureSource {
 }
 
 impl FactSet {
+    pub(crate) fn exception_binary_name_for<'a>(&'a self, name: &'a str) -> &'a str {
+        self.exception_facts
+            .iter()
+            .find(|fact| fact.type_name == name && fact.binary_name.is_some())
+            .and_then(|fact| fact.binary_name.as_deref())
+            .unwrap_or(name)
+    }
+
     pub fn external_lookup_index(&self) -> ExternalFactLookupIndex<'_> {
         ExternalFactLookupIndex::new(self)
     }
@@ -2475,6 +2494,8 @@ impl FactSet {
         self.java_string_identity_representation |= other.java_string_identity_representation;
         self.storage_strategies
             .extend_from(other.storage_strategies);
+        self.source_hierarchy_carrier_variants
+            .extend(other.source_hierarchy_carrier_variants);
         self.notes.extend(other.notes);
         self.captures.owners.extend(other.captures.owners);
         self.captures
@@ -3162,7 +3183,10 @@ impl FactSet {
         })
     }
 
-    pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
+    pub(crate) fn external_crate_type_mapping_for(
+        &self,
+        type_name: &str,
+    ) -> Option<&ExternalCrateTypeMappingFact> {
         find_external_crate_type_mapping_for(
             &self.external_crate_type_mapping_facts,
             type_name,
@@ -3175,22 +3199,31 @@ impl FactSet {
                 None,
             )
         })
-        .map(|fact| fact.rust_type_name.as_str())
-        .or_else(|| {
-            find_external_crate_constructor_type_mapping_for(
-                &self.external_crate_constructor_mapping_facts,
-                type_name,
-                Some(FactProvenance::UserOverride),
-            )
+    }
+
+    pub fn external_crate_reference_identity_method_for(&self, type_name: &str) -> Option<&str> {
+        self.external_crate_type_mapping_for(type_name)
+            .and_then(|fact| fact.reference_identity_method.as_deref())
+    }
+
+    pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
+        self.external_crate_type_mapping_for(type_name)
+            .map(|fact| fact.rust_type_name.as_str())
             .or_else(|| {
                 find_external_crate_constructor_type_mapping_for(
                     &self.external_crate_constructor_mapping_facts,
                     type_name,
-                    None,
+                    Some(FactProvenance::UserOverride),
                 )
+                .or_else(|| {
+                    find_external_crate_constructor_type_mapping_for(
+                        &self.external_crate_constructor_mapping_facts,
+                        type_name,
+                        None,
+                    )
+                })
+                .and_then(|fact| fact.rust_type_name.as_deref())
             })
-            .and_then(|fact| fact.rust_type_name.as_deref())
-        })
     }
 
     pub fn external_rust_result_for_receiver(
@@ -4330,6 +4363,7 @@ fn external_api_argument_effects_agree(
     second: &ExternalApiArgumentEffectFact,
 ) -> bool {
     first.parameter_type == second.parameter_type
+        && first.null_message_function == second.null_message_function
         && first.parameter_nullability == second.parameter_nullability
         && first.argument_mutability == second.argument_mutability
         && first.alias_policy == second.alias_policy

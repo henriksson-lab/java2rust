@@ -125,11 +125,12 @@ impl SourceCallbackPlan {
             .collect::<HashSet<_>>();
         let mut value_carrier = slots
             .iter()
-            .map(|(owner, method, _)| {
+            .map(|(owner, method, index)| {
                 method.body.is_none()
                     || (owner.kind == crate::java_ir::TypeKind::Interface
                         && !method.modifiers.contains(&crate::java_ir::Modifier::Static))
                     || virtual_methods.contains(&MethodKey::source_method(owner, method))
+                    || method_passes_ordering_comparator_value(owner, method, *index, facts)
             })
             .collect::<Vec<_>>();
         let mut predecessors = vec![Vec::new(); slots.len()];
@@ -311,6 +312,40 @@ fn propagate_callback_evidence(values: &mut [bool], predecessors: &[Vec<usize>],
             }
         }
     }
+}
+
+fn method_passes_ordering_comparator_value(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    index: usize,
+    facts: &FactSet,
+) -> bool {
+    let Some(body) = &method.body else {
+        return false;
+    };
+    let Some(parameter) = method.params.get(index) else {
+        return false;
+    };
+    let mut types = crate::types::TypeEnv::new();
+    for member in &owner.members {
+        if let Member::Field(field) = member {
+            types.insert_field(&field.name, field.ty.clone());
+        }
+    }
+    for param in &method.params {
+        types.insert_param(&param.name, param.ty.clone());
+    }
+    let mut required = false;
+    crate::semantic_analysis::walk_block_exprs_with_types(body, &types, &mut |expr, types| {
+        // Null is an ordering policy, not a callback invocation failure.
+        // Keep its value identity through the existing forwarding graph.
+        if let Some((_, _, Expr::Var(name))) =
+            crate::call_plan::native_ordering_consumer(expr, facts, types)
+        {
+            required |= name == &parameter.name;
+        }
+    });
+    required
 }
 
 fn collect_types<'a>(types: &'a [TypeDecl], out: &mut Vec<&'a TypeDecl>) {
@@ -1389,6 +1424,38 @@ pub(crate) fn expr_stores_priority_queue_comparator_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordering_policy_keeps_nullable_comparator_values_without_retention() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Orders {
+                static void sort(List<Integer> items, Comparator<Integer> order) { Collections.sort(items, order); }
+                static void forward(List<Integer> items, Comparator<Integer> order) { sort(items, order); }
+                static int invoke(Comparator<Integer> order) { return order.compare(1,2); }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let plan = SourceCallbackPlan::build(&resolved.program, &resolved.facts);
+        let owner = &resolved.program.types[0];
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            let index = method.params.len() - 1;
+            let key = plan
+                .callable_key_for_method(&owner.name, &source_method_rust_name(method), index)
+                .unwrap();
+            assert_eq!(plan.uses_value_carrier(&key), method.name != "invoke");
+            assert_eq!(
+                plan.is_inline(owner, method, index),
+                method.name == "invoke"
+            );
+            assert!(!plan.retains_callback(&key));
+        }
+    }
 
     #[test]
     fn concrete_stored_callback_forwarders_use_the_emitted_value_abi() {

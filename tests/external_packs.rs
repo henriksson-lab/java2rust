@@ -1,5 +1,99 @@
 mod common;
 
+#[test]
+fn mapped_reference_identity_is_explicit_and_respects_type_mapping_precedence() {
+    use new_java2rust::facts::{ExternalCrateTypeMappingFact, FactProvenance};
+    let parsed = new_java2rust::external_packs::parse_external_pack_manifest(
+        "external-pack dep.values dep.Value rust-crate-mapping mapped target=values_runtime rust-type=Value reference-identity=same_reference\n",
+    );
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
+    let mut facts = parsed.facts().clone();
+    assert_eq!(
+        facts.external_crate_reference_identity_method_for("dep.Value"),
+        Some("same_reference")
+    );
+    facts
+        .external_crate_type_mapping_facts
+        .push(ExternalCrateTypeMappingFact {
+            type_name: "dep.Value".into(),
+            rust_type_name: "Replacement".into(),
+            reference_identity_method: None,
+            provenance: FactProvenance::UserOverride,
+        });
+    assert_eq!(
+        facts.external_crate_reference_identity_method_for("dep.Value"),
+        None
+    );
+    for metadata in [
+        "reference-identity=same_reference",
+        "rust-type=Value reference-identity=",
+    ] {
+        let invalid = new_java2rust::external_packs::parse_external_pack_manifest(&format!(
+            "external-pack dep.values dep.Value rust-crate-mapping mapped target=values_runtime {metadata}\n"
+        ));
+        assert!(invalid.diagnostics().has_errors(), "{metadata}");
+    }
+}
+
+#[test]
+fn manifest_argument_arity_keeps_overload_types_and_legacy_fallbacks_distinct() {
+    let parsed = new_java2rust::external_packs::parse_external_pack_manifest(
+        r#"
+external-pack dep.choice dep.Value rust-crate-mapping mapped target=choice_runtime
+external-pack-api dep.choice dep.Value choose mapped getter read-only definitely-non-null args=2 return=int
+external-pack-api dep.choice dep.Value choose mapped getter read-only definitely-non-null args=3 return=int
+external-pack-argument dep.choice dep.Value choose 0 definitely-non-null read-only borrowed type=String
+external-pack-argument dep.choice dep.Value choose 1 definitely-non-null read-only no-alias type=String args=2
+external-pack-argument dep.choice dep.Value choose 1 definitely-non-null read-only no-alias type=int args=3
+"#,
+    );
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
+    let facts = parsed.facts();
+    let argument = |arity, index| {
+        facts.external_api_argument_effect_for_receiver_with_arity(
+            Some("dep.Value"),
+            "choose",
+            Some(arity),
+            index,
+        )
+    };
+    assert_eq!(
+        argument(2, 1).unwrap().parameter_type,
+        Some(new_java2rust::java_ir::JavaType::String)
+    );
+    assert_eq!(
+        argument(3, 1).unwrap().parameter_type,
+        Some(new_java2rust::java_ir::JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Int
+        ))
+    );
+    assert_eq!(
+        argument(2, 0).unwrap().parameter_type,
+        argument(3, 0).unwrap().parameter_type
+    );
+    assert!(argument(4, 1).is_none());
+    for metadata in ["args=bad", "args=1", "args=2 args=3"] {
+        let invalid = new_java2rust::external_packs::parse_external_pack_manifest(&format!(
+            "external-pack dep.choice dep.Value rust-crate-mapping mapped target=choice_runtime\nexternal-pack-argument dep.choice dep.Value choose 1 definitely-non-null read-only no-alias type=int {metadata}\n"
+        ));
+        assert!(invalid.diagnostics().has_errors(), "{metadata}");
+        assert!(
+            invalid
+                .facts()
+                .external_api_argument_effect_facts
+                .is_empty()
+        );
+    }
+}
+
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 use new_java2rust::conversion_plan::{
     DispatchCoercionPolicy, OptionalShapeCoercionPolicy, optional_shape_coercion_policy_with_facts,
@@ -2345,6 +2439,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "missing".to_string(),
             receiver_type: Some("dep.audit.Record".to_string()),
             arg_count: None,
@@ -2358,6 +2453,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "unsupported".to_string(),
             receiver_type: Some("dep.audit.Record".to_string()),
             arg_count: None,
@@ -2488,11 +2584,13 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         provenance: FieldNullabilityProvenance::ExternalLibraryPack,
     });
     facts.exception_facts.push(ExceptionFact {
+        binary_name: None,
         type_name: "dep.audit.MissingException".to_string(),
         kind: ExceptionKind::Checked,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.exception_facts.push(ExceptionFact {
+        binary_name: None,
         type_name: "dep.audit.KnownException".to_string(),
         kind: ExceptionKind::Unchecked,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -2700,6 +2798,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "read".to_string(),
             receiver_type: Some("other.Reader".to_string()),
             arg_count: None,
@@ -2759,6 +2858,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
         provenance: FieldNullabilityProvenance::ExternalLibraryPack,
     });
     facts.exception_facts.push(ExceptionFact {
+        binary_name: None,
         type_name: "other.ReaderException".to_string(),
         kind: ExceptionKind::Checked,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -2777,6 +2877,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
         .push(ExternalCrateTypeMappingFact {
             type_name: "other.TypeOnly".to_string(),
             rust_type_name: "Reader".to_string(),
+            reference_identity_method: None,
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts

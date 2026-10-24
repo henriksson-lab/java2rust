@@ -6,6 +6,7 @@ public class IntegralFormatProbe {
     static String boxed(Integer value) { return Integer.toHexString(value); }
     static String boxedLong(Long value) { return Long.toHexString(value); }
     static IntegralHexReader reader() { return Integer::toHexString; }
+    static String decimal(Integer value) { return Integer.toString(value); }
     static int run() {
         if (!toHexString('A').equals("41") || !Long.toHexString('A').equals("41")) return 1;
         if (!Integer.toOctalString('A').equals("101") || !Long.toBinaryString('A').equals("1000001")) return 2;
@@ -21,6 +22,14 @@ public class IntegralFormatProbe {
         try { boxed(null); return 12; } catch (NullPointerException expected) { }
         try { boxedLong(null); return 13; } catch (NullPointerException expected) { }
         if (!reader().read('A').equals("41")) return 14;
+        if (!Integer.toString(Integer.MIN_VALUE).equals("-2147483648")) return 15;
+        if (!Long.toString(Long.MIN_VALUE).equals("-9223372036854775808")) return 16;
+        if (!Integer.toString(-1, 16).equals("-1") || !Long.toString(Long.MIN_VALUE, 16).equals("-8000000000000000")) return 17;
+        if (!Integer.toString('A').equals("65") || !Long.toString((short)-1, 2).equals("-1")) return 18;
+        if (!Integer.toString(35, 36).equals("z") || !Long.toString(10, 1).equals("10") || !Integer.toString(10, 37).equals("10")) return 19;
+        if (!decimal(65).equals("65")) return 20;
+        try { decimal(null); return 21; } catch (NullPointerException expected) { }
+        if (Integer.toString(7) == Integer.toString(7)) return 22;
         return 0;
     }
     public static void main(String[] args) { System.out.println(run()); }

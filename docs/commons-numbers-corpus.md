@@ -1,6 +1,6 @@
 # Apache Commons Numbers translator campaign
 
-The active goal covers six complete production modules from release 1.3,
+The completed first campaign covers six complete production modules from release 1.3,
 untouched commit `ae8abefb51c2c4d1a05882d61cefc8015e493a8f`. Modules are
 accepted sequentially; Primes is accepted at V180, Root Finder at V191,
 Core at V309, Complex at V335, Quaternion at V373, and Angle at V378
@@ -13,10 +13,19 @@ current acceptance status. The six-module campaign is complete.
 General translator improvements,
 not manually repaired generated output, are the deliverable.
 
+The separate Fraction/Arrays follow-up is also accepted at V423, in that order.
+Its complete closures, 8,643 exact independent observations, general translator
+fixes and fresh preservation of these six modules and Commons RNG are recorded
+in [the follow-up audit](commons-numbers-fraction-arrays.md). The original
+six-module scope and its numerical policies remain unchanged.
+
 ## Source scope and dependencies
 
-`scripts/focus-sets/commons-numbers-1.3-all.txt` records all26 production Java
-files:20 implementation files and6 package-info files. Metadata files remain
+The six-module subset of `scripts/focus-sets/commons-numbers-1.3-all.txt`
+records all26 production Java files:20 implementation files and6 package-info
+files. The shared manifest additionally lists Fraction and Arrays for the
+separate subsequent campaign in `commons-numbers-fraction-arrays.md`; those
+entries do not expand this completed six-module scope. Metadata files remain
 in translation/Java compilation scope. Every declaration, constructor, method,
 nested type and overload in these files is included.
 
@@ -30,8 +39,9 @@ nested type and overload in these files is included.
 | 6 | Angle | 4 | Core;15 files together |
 
 Dependencies were checked against pinned module POMs and source imports.
-The existing order satisfies production dependencies. Fraction, Gamma, Arrays,
-Field and other modules are not additional targets. No GUI/examples/benchmarks
+The existing order satisfies production dependencies. Fraction and Arrays have
+a separate follow-up campaign in `commons-numbers-fraction-arrays.md`; Gamma,
+Field and other modules are not additional targets here. No GUI/examples/benchmarks
 or upstream test framework is a production translation target. Independent
 callers and relevant upstream tests supply behavior evidence.
 

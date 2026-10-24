@@ -1107,6 +1107,7 @@ fn build_batch_translation_context(
     );
     let representation_start = Instant::now();
     let representations = representation::plan_representations(&support_program, &semantic.facts);
+    representations.project_source_hierarchy_carriers_into_facts(&mut semantic.facts);
     timings.global_representation_ms = representation_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -1572,6 +1573,7 @@ fn translate_parsed_source_with_context(
         &semantic_resolved_facts,
     );
     let representations = representation::plan_representations(&semantic_program, &semantic.facts);
+    representations.project_source_hierarchy_carriers_into_facts(&mut semantic.facts);
     let resolved_support_program =
         support_program_context
             .as_ref()

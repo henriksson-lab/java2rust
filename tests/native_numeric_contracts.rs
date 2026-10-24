@@ -2,6 +2,44 @@
 mod common;
 
 #[test]
+fn integral_parser_shared_digit_leaf_survives_production_crate_assembly() {
+    let source = include_str!("corpus/numbers/IntegralParseProbe.java");
+    common::verify_java_sources_zero_contract(
+        "IntegralParseProbe",
+        &[("tests/corpus/numbers/IntegralParseProbe.java", source)],
+    );
+    common::cargo_run_translated_batch_sources(
+        "integral_parse_assembled",
+        &[new_java2rust::BatchSource::new(
+            "IntegralParseProbe.java",
+            source,
+        )],
+        r#"
+trait OracleExitCode { fn value(self) -> i32; }
+impl OracleExitCode for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> OracleExitCode for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+fn main() { assert_eq!(translated::IntegralParseProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
+fn integral_parsing_keeps_utf16_digits_widths_radices_and_exception_text() {
+    common::verify_java_fixture_zero_contract(
+        "integral_parse_contract",
+        "IntegralParseProbe",
+        "tests/corpus/numbers/IntegralParseProbe.java",
+        include_str!("corpus/numbers/IntegralParseProbe.java"),
+        r#"
+trait OracleExitCode { fn value(self) -> i32; }
+impl OracleExitCode for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> OracleExitCode for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn parsing() { assert_eq!(IntegralParseProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
 fn integral_radix_formatting_uses_native_widths_widening_and_checked_unboxing() {
     common::verify_java_fixture_zero_contract(
         "integral_format_contract",

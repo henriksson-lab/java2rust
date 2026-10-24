@@ -1,8 +1,19 @@
-// Shared immutable Java String identity. Scalar and UTF-16 payloads use this
-// same allocation/interner mechanism; text encoding is not an identity policy.
+// Shared immutable Java reference identity. String carriers add interning;
+// other immutable mapped objects share the same allocation/clone mechanism.
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct JavaStringIdentity<P: ?Sized>(std::sync::Arc<P>);
+
+// Preserve the emitted String runtime's public name while exposing the
+// payload-independent contract to linked runtime providers.
+pub type JavaImmutableReference<P> = JavaStringIdentity<P>;
+
+impl<P: ?Sized> std::ops::Deref for JavaStringIdentity<P> {
+    type Target = P;
+    fn deref(&self) -> &P {
+        self.payload()
+    }
+}
 
 impl<P: ?Sized> Clone for JavaStringIdentity<P> {
     fn clone(&self) -> Self {

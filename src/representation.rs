@@ -44,6 +44,7 @@ pub struct RepresentationPlan {
     /// Stateful abstract owners retaining only statically bound construction
     /// support on the raw root; full instance bodies live on descendants.
     construction_only_abstract_owners: HashSet<String>,
+    abstract_source_types: BTreeSet<String>,
     types: HashMap<String, TypeRepresentation>,
     /// Finite carriers for source-interface existentials such as
     /// `Factory<?>`. Rust trait objects cannot leave a generic argument
@@ -245,6 +246,11 @@ impl SourceSummarySuperclassBoundaryPolicy {
 
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
     let mut plan = RepresentationPlan::default();
+    plan.abstract_source_types = all_types(program)
+        .into_iter()
+        .filter(|ty| ty.kind == TypeKind::Class && ty.modifiers.contains(&Modifier::Abstract))
+        .map(|ty| ty.name.clone())
+        .collect();
     collect_declared_supertype_names(program, &mut plan.declared_supertype_by_subtype);
     collect_raw_generic_arguments(program, &mut plan.raw_generic_arguments);
     collect_erased_wildcard_bound_carriers(program, &mut plan.erased_wildcard_bound_carriers);
@@ -330,9 +336,9 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     record_simple_super_copyback_hierarchy_edges(program, &mut plan);
     plan_existential_interface_carriers(program, &mut plan);
     plan.declaration_only_abstract_owners =
-        crate::abstract_declaration::declaration_only_abstract_owners(program);
+        crate::abstract_declaration::declaration_only_abstract_owners(program, &facts.captures);
     plan.construction_only_abstract_owners =
-        crate::abstract_declaration::construction_only_abstract_owners(program);
+        crate::abstract_declaration::construction_only_abstract_owners(program, &facts.captures);
     plan
 }
 
@@ -1974,7 +1980,9 @@ fn collect_source_hierarchy_carrier_variants(
     if !seen.insert(type_name.to_string()) {
         return;
     }
-    names.push(type_name.to_string());
+    if !plan.abstract_source_types.contains(type_name) {
+        names.push(type_name.to_string());
+    }
     let direct_subtypes = plan
         .type_representation(type_name)
         .map(|entry| entry.direct_subtypes.clone())
@@ -2034,6 +2042,17 @@ impl RepresentationPlan {
     pub(crate) fn abstract_owner_has_no_runtime_instances(&self, owner: &str) -> bool {
         self.abstract_owner_is_declaration_only(owner)
             || self.abstract_owner_is_construction_only(owner)
+            || self.abstract_owner_uses_runtime_carrier(owner)
+    }
+
+    pub(crate) fn abstract_owner_uses_runtime_carrier(&self, owner: &str) -> bool {
+        self.type_representation(owner).is_some_and(|entry| {
+            self.abstract_source_types.contains(entry.java_name())
+                && matches!(
+                    entry.representation(),
+                    ObjectRepresentation::SourceHierarchyCarrier { .. }
+                )
+        })
     }
 
     pub(crate) fn abstract_owner_is_declaration_only(&self, owner: &str) -> bool {
@@ -2141,6 +2160,41 @@ impl RepresentationPlan {
 
     pub fn type_representations(&self) -> impl Iterator<Item = &TypeRepresentation> {
         self.types.values()
+    }
+
+    /// Publish the finalized inventory rather than asking portable cast and
+    /// instanceof planners to reconstruct a different hierarchy from edges.
+    pub(crate) fn project_source_hierarchy_carriers_into_facts(&self, facts: &mut FactSet) {
+        let java_by_variant = self
+            .types
+            .values()
+            .map(|entry| {
+                (
+                    crate::java_naming::rust_name_for_java_named_type(entry.java_name()),
+                    entry.java_name(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        facts.source_hierarchy_carrier_variants.clear();
+        for entry in self.types.values() {
+            if self.abstract_owner_is_declaration_only(entry.java_name()) {
+                continue;
+            }
+            let (carrier, variants) = match entry.representation() {
+                ObjectRepresentation::SourceHierarchyCarrier {
+                    carrier_name,
+                    variants,
+                } => (carrier_name, variants),
+                _ => continue,
+            };
+            let owners = variants
+                .iter()
+                .filter_map(|variant| java_by_variant.get(variant).map(|name| (*name).to_owned()))
+                .collect();
+            facts
+                .source_hierarchy_carrier_variants
+                .insert(carrier.clone(), owners);
+        }
     }
 
     pub fn type_representation(&self, type_name: &str) -> Option<&TypeRepresentation> {
@@ -3322,7 +3376,7 @@ fn anonymous_source_class_super_object_is_supported(
         Member::Method(_) => false,
         Member::Field(field) => {
             field.modifiers.contains(&Modifier::Static)
-                || field.initializer.is_none()
+                || !field.has_initializer_or_primitive_default()
                 || !matches!(
                     field.ty,
                     JavaType::Primitive(_) | JavaType::String | JavaType::Named { .. }
@@ -4213,7 +4267,9 @@ fn anonymous_fieldless_interface_object_is_supported(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if fields.iter().any(|field| field.initializer.is_none())
+    if fields
+        .iter()
+        .any(|field| !field.has_initializer_or_primitive_default())
         || (expected.len() == 1
             && interface
                 .members
@@ -5956,6 +6012,7 @@ class PlainFieldMap {
             source_name: "alias".to_string(),
             initializer: Some(Expr::FieldAccess(Box::new(Expr::This), "node".to_string())),
             binding: None,
+            is_final: false,
         };
         let write = Stmt::Assign {
             target: Expr::FieldAccess(
@@ -6005,6 +6062,7 @@ class PlainFieldMap {
             source_name: "alias".to_string(),
             initializer: Some(Expr::FieldAccess(Box::new(Expr::This), "node".to_string())),
             binding: None,
+            is_final: false,
         };
         let write = Stmt::Assign {
             target: Expr::FieldAccess(

@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 num-bigint = "=0.4.6"
+num-integer = "=0.1.47"

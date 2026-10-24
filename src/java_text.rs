@@ -201,6 +201,12 @@ impl<T: JavaTextView + ?Sized> JavaTextView for &mut T {
     }
 }
 
+impl JavaTextView for JavaCodeUnit {
+    fn java_text_view(&self) -> std::borrow::Cow<'_, JavaUtf16> {
+        std::borrow::Cow::Owned(JavaUtf16::from_units(vec![self.as_u16()]))
+    }
+}
+
 impl JavaTextView for [JavaCodeUnit] {
     fn java_text_view(&self) -> std::borrow::Cow<'_, JavaUtf16> {
         std::borrow::Cow::Owned(JavaUtf16::from_units(
@@ -379,6 +385,35 @@ impl JavaUtf16 {
     }
     pub fn concat(&self, other: &Self) -> Self {
         Self::from_units([self.units(), other.units()].concat())
+    }
+    /// Literal, non-overlapping replacement over Java code units. None means
+    /// no occurrence, allowing the object layer to retain the input identity.
+    pub fn replace_literal(&self, target: &Self, replacement: &Self) -> Option<Self> {
+        if target.is_empty() {
+            let mut units = Vec::new();
+            units.extend_from_slice(replacement.units());
+            for &unit in self.units() {
+                units.push(unit);
+                units.extend_from_slice(replacement.units());
+            }
+            return Some(Self::from_units(units));
+        }
+        let first = self.index_of(target, 0);
+        if first < 0 {
+            return None;
+        }
+        let mut units = Vec::new();
+        let mut start = 0;
+        let mut occurrence = first;
+        while occurrence >= 0 {
+            let at = occurrence as usize;
+            units.extend_from_slice(&self.units()[start..at]);
+            units.extend_from_slice(replacement.units());
+            start = at + target.units().len();
+            occurrence = self.index_of(target, start as i32);
+        }
+        units.extend_from_slice(&self.units()[start..]);
+        Some(Self::from_units(units))
     }
     pub fn java_hash(&self) -> i32 {
         self.units.iter().fold(0i32, |hash, unit| {

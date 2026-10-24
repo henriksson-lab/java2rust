@@ -80,6 +80,20 @@ impl JavaUtf16String {
         }
         Self::from_payload(self.payload().concat(other.payload()))
     }
+    pub fn replace<T: JavaTextView, R: JavaTextView>(&self, target: T, replacement: R) -> Self {
+        let target = target.java_text_view();
+        let replacement = replacement.java_text_view();
+        // The JDK's one-unit CharSequence path shares the char/char operation,
+        // which returns this when both units are equal. Multi-unit successful
+        // replacements allocate even when their contents compare equal.
+        if target.units().len() == 1 && target.units() == replacement.units() {
+            return self.clone();
+        }
+        match self.payload().replace_literal(&target, &replacement) {
+            Some(value) => Self::from_payload(value),
+            None => self.clone(),
+        }
+    }
     /// Java's runtime + / append must allocate a fresh result even when a
     /// segment is empty. It is not the same identity contract as String.concat.
     pub fn append(&self, other: &Self) -> Self {

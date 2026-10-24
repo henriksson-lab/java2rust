@@ -1882,6 +1882,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         facts.exception_facts.push(ExceptionFact {
+            binary_name: None,
             type_name: owner.replace("Item", "Problem"),
             kind: if owner == "a.Item" {
                 ExceptionKind::Checked
@@ -2026,6 +2027,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
         facts
             .external_api_argument_effect_facts
             .push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: "fill".to_string(),
                 receiver_type: Some(owner.to_string()),
                 arg_count: Some(1),
@@ -2041,6 +2043,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
             .push(ExternalCrateTypeMappingFact {
                 type_name: owner.to_string(),
                 rust_type_name: format!("{value}Type"),
+                reference_identity_method: None,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         facts
@@ -9300,6 +9303,7 @@ class ExternalArgumentShapeUse {
     external_facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "borrowString".to_string(),
             receiver_type: None,
             arg_count: None,
@@ -9313,6 +9317,7 @@ class ExternalArgumentShapeUse {
     external_facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "store".to_string(),
             receiver_type: None,
             arg_count: None,
@@ -9329,6 +9334,7 @@ class ExternalArgumentShapeUse {
     external_facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "fill".to_string(),
             receiver_type: None,
             arg_count: None,
@@ -9393,6 +9399,7 @@ fn external_constructor_arguments_default_to_non_null_unless_fact_widens_them() 
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "new".to_string(),
             receiver_type: Some("ImportConfig".to_string()),
             arg_count: None,
@@ -9406,6 +9413,7 @@ fn external_constructor_arguments_default_to_non_null_unless_fact_widens_them() 
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "new".to_string(),
             receiver_type: Some("ImportConfig".to_string()),
             arg_count: None,

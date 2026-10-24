@@ -3044,11 +3044,11 @@ def main() -> int:
     )
     selected_macro_names = set()
     for name, definitions in macro_definitions_by_name.items():
-        definition_paths = {item["path"] for item in definitions}
         if not macro_invocations_by_name.get(name):
             continue
-        if len(definition_paths) <= 1 and name not in existing_shared_text:
-            continue
+        # A coherence family follows its shared trait/type even when only
+        # one input provided it. Coarse prelude stripping may already have
+        # removed that sole definition and invocation from the source module.
         if any(
             referenced_nominal_names([item["text"]], shared_dependency_names)
             for item in definitions

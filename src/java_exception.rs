@@ -3,9 +3,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     class_name: &'static str,
+    binary_name: &'static str,
     message: Option<JavaExceptionText>,
     cause: Option<std::boxed::Box<JavaException>>,
     suppressed: Vec<JavaException>,
+    null_callback_receiver: bool,
 }
 
 impl JavaException {
@@ -20,26 +22,78 @@ impl JavaException {
     ) -> JavaException {
         JavaException {
             class_name,
+            binary_name: java_exception_runtime_name(class_name),
             message,
             cause: cause.map(std::boxed::Box::new),
             suppressed: Vec::new(),
+            null_callback_receiver: false,
         }
     }
 
     pub fn with_runtime_class(mut self, class_name: &'static str) -> JavaException {
         self.class_name = class_name;
+        self.binary_name = java_exception_runtime_name(class_name);
+        self
+    }
+
+    // An invoking-only callback ABI erases the Java receiver pointer. A null
+    // facade therefore fails lazily; its first source invocation owns the
+    // diagnostic. Never recognize this provenance by exception message text.
+    pub(crate) fn __java_null_callback_receiver() -> JavaException {
+        let mut error = JavaException::new("NullPointerException", "Java null receiver");
+        error.null_callback_receiver = true;
+        error
+    }
+
+    pub(crate) fn __java_contextualize_null_callback(
+        mut self,
+        message: Option<&str>,
+    ) -> JavaException {
+        if self.null_callback_receiver {
+            if let Some(message) = message {
+                self.message = Some(message.into());
+            }
+            // An enclosing callback must not steal a nested failure's frame.
+            self.null_callback_receiver = false;
+        }
+        self
+    }
+
+    pub fn with_runtime_class_info(
+        mut self,
+        class_name: &'static str,
+        binary_name: &'static str,
+    ) -> JavaException {
+        self.class_name = class_name;
+        self.binary_name = binary_name;
         self
     }
 
     pub fn with_source_class(
-        mut self,
+        self,
         platform_base: &'static str,
         source_class: &'static str,
     ) -> JavaException {
-        if self.class_name == platform_base {
-            self.class_name = source_class;
+        self.with_source_class_info(
+            platform_base,
+            source_class,
+            java_exception_runtime_name(source_class),
+        )
+    }
+
+    pub fn with_source_class_info(
+        self,
+        platform_base: &'static str,
+        source_class: &'static str,
+        binary_name: &'static str,
+    ) -> JavaException {
+        if self.class_name == platform_base
+            && self.binary_name == java_exception_runtime_name(platform_base)
+        {
+            self.with_runtime_class_info(source_class, binary_name)
+        } else {
+            self
         }
-        self
     }
 
     pub fn from_cause_constructor(
@@ -57,9 +111,11 @@ impl JavaException {
     ) -> JavaException {
         JavaException {
             class_name,
+            binary_name: java_exception_runtime_name(class_name),
             message: Some(message.into()),
             cause: Some(std::boxed::Box::new(cause)),
             suppressed: Vec::new(),
+            null_callback_receiver: false,
         }
     }
 
@@ -79,13 +135,13 @@ impl JavaException {
     }
 
     pub fn to_string(&self) -> JavaExceptionText {
-        java_exception_text_value(self.class_name, self.get_localized_message())
+        java_exception_text_value(self.binary_name, self.get_localized_message())
     }
 
     pub fn is_instance(&self, class_names: &[&str]) -> bool {
-        class_names.iter().any(|name| {
-            self.class_name == *name || java_exception_is_subtype(self.class_name, name)
-        })
+        class_names
+            .iter()
+            .any(|name| java_exception_is_subtype(self.binary_name, name))
     }
 
     pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
@@ -125,6 +181,6 @@ impl JavaException {
     }
 
     pub fn get_class(&self) -> JavaClass<()> {
-        JavaClass::<()>::for_name(self.class_name)
+        JavaClass::<()>::for_name(self.binary_name)
     }
 }

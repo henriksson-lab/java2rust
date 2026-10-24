@@ -57,6 +57,73 @@ impl SourceSymbols {
         self.symbols.source_type_name(type_name)
     }
 
+    /// Prove the receiver of an unqualified instance call in an anonymous
+    /// body. A scoped implementation/helper or inherited member binds before
+    /// an enclosing instance. Share this proof between captures and emission.
+    pub(crate) fn anonymous_enclosing_call_receiver(
+        &self,
+        expr: &Expr,
+        base: &JavaType,
+        methods: &[&MethodDecl],
+        enclosing: &[JavaType],
+        env: &TypeEnv,
+        facts: &FactSet,
+    ) -> Option<JavaType> {
+        let Expr::Call {
+            receiver: None,
+            name,
+            args,
+            resolved: Some(call),
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if call.kind != CallKind::Instance
+            || crate::stdlib::is_known_object_inherited_method(name, args.len())
+        {
+            return None;
+        }
+        let arg_types = args
+            .iter()
+            .map(|arg| infer_expr_type(arg, env))
+            .collect::<Vec<_>>();
+        let base_name = java_type_simple_name(base);
+        if select_scoped_instance_method(methods, name, &arg_types, &base_name, self, env, facts)
+            .is_some()
+        {
+            return None;
+        }
+        if resolve_same_class_call(
+            name,
+            &arg_types,
+            &self.symbols.methods_for_hierarchy(&base_name),
+            &self.symbols,
+            facts,
+            Some(base),
+            env,
+        )
+        .ok()
+        .flatten()
+        .is_some()
+        {
+            return None;
+        }
+        enclosing
+            .iter()
+            .rev()
+            .find(|outer| {
+                self.symbols
+                    .source_subtype_distance(
+                        &java_type_simple_name(outer),
+                        &call.declaring_type,
+                        facts,
+                    )
+                    .is_some()
+            })
+            .cloned()
+    }
+
     pub(crate) fn source_field_identity(
         &self,
         owner: &str,
@@ -395,7 +462,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
             &external_facts,
         );
     }
-    let mut facts = collect_resolved_facts(&program);
+    let mut facts = collect_resolved_facts(&program, source_symbols, external_facts.facts);
     facts.extend_from(resolver_facts);
     ResolvedProgram {
         program,
@@ -1037,14 +1104,15 @@ fn rewrite_type_decl_references(
 ) {
     let class_aliases = aliases_outside_type_parameter_scope(direct_nested, &ty.type_params);
     let direct_nested = class_aliases.as_ref();
-    if let Some(extends) = &mut ty.extends
-        && let Some(qualified) = direct_nested.get(extends)
-    {
-        *extends = qualified.clone();
-    }
-    for implements in &mut ty.implements {
-        if let Some(qualified) = direct_nested.get(implements) {
-            *implements = qualified.clone();
+    for edge in ty.extends.iter_mut().chain(ty.implements.iter_mut()) {
+        // Hierarchy edges are parameterized types too. Qualifying only an
+        // exact string key misses both the owner and arguments in I<Nested>,
+        // disconnecting override identity/effects from method declarations.
+        let original = crate::parser::parse_hierarchy_type(edge);
+        let mut qualified = original.clone();
+        qualify_nested_java_type(&mut qualified, direct_nested, captured_type_params);
+        if qualified != original {
+            *edge = crate::java_type_substitution::java_type_text(&qualified);
         }
     }
     for bound in &mut ty.type_param_bounds {
@@ -1770,7 +1838,11 @@ fn resolve_method(
         method.rust_name = Some("read_3".to_string());
         return;
     }
-    if counts.get(&method.name).copied().unwrap_or(0) <= 1 {
+    // Object.toString() is also an inherited overload when only an
+    // argument-taking source declaration is present. Preserve the zero-arg
+    // protocol name for both Java dispatch and the emitted Object fallback.
+    let overloads_object_to_string = method.name == "toString" && !method.params.is_empty();
+    if counts.get(&method.name).copied().unwrap_or(0) <= 1 && !overloads_object_to_string {
         method.rust_name = Some(base);
         return;
     }
@@ -1784,13 +1856,9 @@ fn resolve_method(
         return;
     }
 
-    let suffix = method
-        .params
-        .iter()
-        .map(|p| crate::parser::type_suffix(&p.ty, p.is_varargs))
-        .collect::<Vec<_>>()
-        .join("_");
-    method.rust_name = Some(format!("{base}_{suffix}"));
+    method.rust_name = Some(crate::java_signature::source_method_overload_rust_name(
+        method,
+    ));
 }
 
 fn allocate_unique_declared_method_rust_names(ty: &mut TypeDecl) {
@@ -8466,6 +8534,9 @@ fn java_type_applicability(
     if actual == target {
         return Ok((OverloadArgumentConversion::Exact, 0));
     }
+    if array_reference_widens_to(actual, target, symbols) {
+        return Ok((OverloadArgumentConversion::ReferenceWidening, 60));
+    }
     match (actual, target) {
         (
             JavaType::Named {
@@ -8551,6 +8622,9 @@ fn java_type_applicability(
                 .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
         }
         (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
+            if !array_component_conversion_allowed(actual_inner, target_inner) {
+                return Err(argument_type_mismatch(&actual_java, &target_java));
+            }
             java_type_applicability(actual_inner, target_inner, symbols, external_facts)
                 .map(|(conversion, score)| (conversion, score + 1))
                 .map_err(|_| argument_type_mismatch(&actual_java, &target_java))
@@ -8738,6 +8812,24 @@ impl OverloadRejectionReason {
     }
 }
 
+// Array covariance is a reference conversion. It neither boxes nor widens
+// primitive elements: int[] is an Object, but is not Object[] or long[].
+fn array_component_conversion_allowed(actual: &JavaType, target: &JavaType) -> bool {
+    actual == target
+        || (!matches!(actual, JavaType::Primitive(_)) && !matches!(target, JavaType::Primitive(_)))
+}
+
+fn array_reference_widens_to(
+    actual: &JavaType,
+    target: &JavaType,
+    symbols: &ProgramSymbols,
+) -> bool {
+    matches!(actual, JavaType::Array(_))
+        && matches!(target, JavaType::Named { name, args } if args.is_empty()
+            && matches!(name.as_str(), "Object" | "java.lang.Object" | "Cloneable" | "java.lang.Cloneable" | "Serializable" | "java.io.Serializable")
+            && symbols.source_type_kind(name).is_none())
+}
+
 fn java_type_match_score(
     actual: &JavaType,
     target: &JavaType,
@@ -8746,6 +8838,34 @@ fn java_type_match_score(
 ) -> Option<u32> {
     if actual == target {
         return Some(0);
+    }
+    if array_reference_widens_to(actual, target, symbols) {
+        return Some(60);
+    }
+    // Fixed JDK Comparable<Self> supertypes have no type arguments on the
+    // concrete class itself. Project the self argument before checking the
+    // interface's invariant/wildcard arguments; nominal acceptance alone
+    // would incorrectly accept String as Comparable<Integer>.
+    if let JavaType::Named { name, args } = target
+        && matches!(name.as_str(), "Comparable" | "java.lang.Comparable")
+        && symbols.source_type_kind(name).is_none()
+        && match actual {
+            JavaType::String => true,
+            JavaType::Named { name, args } => {
+                args.is_empty()
+                    && symbols.source_type_kind(name).is_none()
+                    && crate::stdlib::is_known_self_comparable_type(name)
+            }
+            _ => false,
+        }
+    {
+        return generic_arguments_match_score(
+            std::slice::from_ref(actual),
+            args,
+            symbols,
+            external_facts,
+        )
+        .map(|score| 10 + score);
     }
     match (actual, target) {
         (
@@ -8796,6 +8916,9 @@ fn java_type_match_score(
             crate::stdlib::is_known_java_subtype("String", name).then_some(10)
         }
         (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
+            if !array_component_conversion_allowed(actual_inner, target_inner) {
+                return None;
+            }
             java_type_match_score(actual_inner, target_inner, symbols, external_facts)
                 .map(|score| score + 1)
         }
@@ -8970,6 +9093,9 @@ fn generic_argument_match_score(
             })
         }
         (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
+            if !array_component_conversion_allowed(actual_inner, target_inner) {
+                return None;
+            }
             generic_argument_match_score(actual_inner, target_inner, symbols, external_facts)
                 .map(|score| score + 1)
         }
@@ -9050,8 +9176,12 @@ fn primitive_can_box_to_number(primitive: crate::java_ir::PrimitiveType) -> bool
     matches!(primitive, Byte | Short | Int | Long | Float | Double)
 }
 
-fn collect_resolved_facts(program: &Program) -> FactSet {
-    let mut facts = collect_capture_facts(program);
+fn collect_resolved_facts(
+    program: &Program,
+    symbols: &SourceSymbols,
+    external_facts: &FactSet,
+) -> FactSet {
+    let mut facts = collect_capture_facts(program, symbols, external_facts);
     collect_type_capability_facts(program, &mut facts);
     collect_generic_parameter_variance_facts(program, &mut facts);
     facts
@@ -9131,8 +9261,16 @@ fn collect_generic_parameter_variance_facts(program: &Program, facts: &mut FactS
     }
 }
 
-fn collect_capture_facts(program: &Program) -> FactSet {
-    let mut analyzer = CaptureAnalyzer::default();
+fn collect_capture_facts(
+    program: &Program,
+    symbols: &SourceSymbols,
+    external_facts: &FactSet,
+) -> FactSet {
+    let mut analyzer = CaptureAnalyzer {
+        symbols: Some(symbols),
+        external_facts: Some(external_facts),
+        ..CaptureAnalyzer::default()
+    };
     for ty in &program.types {
         analyzer.analyze_top_level_type(ty);
     }
@@ -9644,9 +9782,12 @@ pub(crate) fn captures_for_lambda<'a>(
 }
 
 #[derive(Debug, Default)]
-struct CaptureAnalyzer {
+struct CaptureAnalyzer<'a> {
     next_id: usize,
     owners: Vec<CaptureOwner>,
+    symbols: Option<&'a SourceSymbols>,
+    external_facts: Option<&'a FactSet>,
+    anonymous_receivers: Vec<Option<(JavaType, Vec<MethodDecl>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -9677,7 +9818,7 @@ struct CaptureContext {
     mutated_names: HashSet<String>,
 }
 
-impl CaptureAnalyzer {
+impl CaptureAnalyzer<'_> {
     fn analyze_top_level_type(&mut self, ty: &TypeDecl) {
         self.analyze_type_members(ty, &[]);
     }
@@ -10039,7 +10180,9 @@ impl CaptureAnalyzer {
 
     fn analyze_local_type(&mut self, local: &TypeDecl, ctx: &CaptureContext) {
         let mut captures = Vec::new();
+        self.anonymous_receivers.push(None);
         self.analyze_type_with_outer_scopes(local, ctx, &mut captures);
+        self.anonymous_receivers.pop();
         let id = self.next_node_id();
         self.push_owner(CaptureOwner {
             id,
@@ -10377,7 +10520,22 @@ impl CaptureAnalyzer {
             span: Default::default(),
         };
         let mut captures = Vec::new();
+        // Selection needs only declarations, not another copy of all method
+        // bodies. Nested anonymous classes push their own receiver scope.
+        let methods = members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Method(method) => {
+                    let mut method = method.clone();
+                    method.body = None;
+                    Some(method)
+                }
+                _ => None,
+            })
+            .collect();
+        self.anonymous_receivers.push(Some((ty.clone(), methods)));
         self.analyze_type_with_outer_scopes(&synthetic, ctx, &mut captures);
+        self.anonymous_receivers.pop();
         let id = self.next_node_id();
         self.push_owner(CaptureOwner {
             id,
@@ -10472,7 +10630,41 @@ impl CaptureAnalyzer {
                         .as_ref()
                         .is_some_and(|call| call.kind == CallKind::Instance)
                 {
-                    capture_this(ctx, captures);
+                    let enclosing =
+                        self.symbols
+                            .zip(self.external_facts)
+                            .and_then(|(symbols, facts)| {
+                                let (base, methods) = self.anonymous_receivers.last()?.as_ref()?;
+                                let mut env = TypeEnv::new();
+                                for (name, ty) in &ctx.fields {
+                                    env.insert_field(name.clone(), ty.clone());
+                                }
+                                for scope in &ctx.scopes {
+                                    for (name, symbol) in &scope.symbols {
+                                        env.insert_local(name.clone(), symbol.ty.clone());
+                                    }
+                                }
+                                symbols.anonymous_enclosing_call_receiver(
+                                    expr,
+                                    base,
+                                    &methods.iter().collect::<Vec<_>>(),
+                                    &ctx.enclosing_receivers,
+                                    &env,
+                                    facts,
+                                )
+                            });
+                    if let Some(ty) = enclosing {
+                        captures.push(Capture {
+                            binding: None,
+                            name: java_type_simple_name(&ty),
+                            source: CaptureSource::OuterThis,
+                            ty,
+                            effectively_final: true,
+                            mutable_after_capture: false,
+                        });
+                    } else {
+                        capture_this(ctx, captures);
+                    }
                 }
                 if let Some(receiver) = receiver {
                     self.collect_expr_captures(receiver, ctx, captures);
@@ -10849,6 +11041,55 @@ fn collect_assignment_target_name(expr: &Expr, out: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn primitive_arrays_are_objects_without_element_boxing_or_widening() {
+        use super::*;
+        let parsed = crate::parser::parse_java_source("class Empty {}");
+        let source = source_symbols_from_program(&parsed.program);
+        let facts = FactSet::default();
+        let int_array = crate::parser::parse_type("int[]");
+        for target in ["Object[]", "Integer[]", "Number[]", "long[]", "double[]"] {
+            let target = crate::parser::parse_type(target);
+            assert!(java_type_applicability(&int_array, &target, &source.symbols, &facts).is_err());
+            assert!(java_type_match_score(&int_array, &target, &source.symbols, &facts).is_none());
+            assert!(
+                generic_argument_match_score(&int_array, &target, &source.symbols, &facts)
+                    .is_none()
+            );
+        }
+        for target in ["Object", "Cloneable", "java.io.Serializable", "int[]"] {
+            let target = crate::parser::parse_type(target);
+            assert!(java_type_applicability(&int_array, &target, &source.symbols, &facts).is_ok());
+            assert!(java_type_match_score(&int_array, &target, &source.symbols, &facts).is_some());
+        }
+        let object_array = crate::parser::parse_type("Object[]");
+        let param = Param {
+            name: "values".into(),
+            source_name: "values".into(),
+            ty: object_array.clone(),
+            is_varargs: true,
+            binding: None,
+        };
+        assert_eq!(
+            overload_applicability_report(&[param.clone()], &[int_array], &source).mode(),
+            Some(OverloadApplicabilityMode::VariableArity)
+        );
+        assert_eq!(
+            overload_applicability_report(&[param], &[object_array], &source).mode(),
+            Some(OverloadApplicabilityMode::FixedArity)
+        );
+        // Nested primitive arrays are reference-valued components.
+        assert!(
+            java_type_applicability(
+                &crate::parser::parse_type("int[][]"),
+                &crate::parser::parse_type("Object[]"),
+                &source.symbols,
+                &facts
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn source_symbol_import_aliases_retain_original_canonical_and_binary_owners() {
         let parsed = crate::parser::parse_java_source(
             "package origin.names; class Owner { static int pick(int x) { return x; } static int pick(int x, int y) { return x+y; } static class Nested {} }",
@@ -10996,6 +11237,85 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(methods.len(), 2);
         assert!(methods.iter().all(|method| method.body.is_some()));
+    }
+
+    #[test]
+    fn anonymous_implicit_enclosing_captures_respect_scoped_and_inherited_bindings() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Parent { int read(int value) { return value; } }
+class Holder<T> extends Parent {
+    interface Action { int get(); }
+    public int hashCode() { return 7; }
+    Action outer() { return new Action() { public int get() { return read(2); } }; }
+    Action helper() { return new Action() {
+        int read(double value) { return (int) value; }
+        public int get() { return read(2); }
+    }; }
+    Parent inherited() { return new Parent() { int other() { return read(2); } }; }
+    Action object() { return new Action() { public int get() { return hashCode(); } }; }
+}
+interface NestedAction { int get(); }
+class ZOuter extends Parent {
+    class AInner extends Parent {
+        NestedAction nearest() { return new NestedAction() {
+            public int get() { return ZOuter.this.read(1) + read(2); }
+        }; }
+    }
+}
+"#,
+        );
+        let resolved = super::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let mut observed = std::collections::BTreeSet::new();
+        for owner in resolved
+            .facts
+            .captures
+            .owners
+            .iter()
+            .filter(|owner| owner.kind == crate::facts::CaptureOwnerKind::AnonymousClass)
+        {
+            let crate::facts::CaptureOrigin::Method { method_name, .. } = &owner.origin else {
+                panic!("{owner:?}");
+            };
+            observed.insert(method_name.as_str());
+            let captures = owner
+                .captures
+                .iter()
+                .filter(|capture| capture.source == crate::facts::CaptureSource::OuterThis)
+                .collect::<Vec<_>>();
+            if method_name == "outer" {
+                assert_eq!(captures.len(), 1, "{owner:?}");
+                assert_eq!(
+                    captures[0].ty,
+                    crate::parser::parse_hierarchy_type("Holder<T>")
+                );
+            } else if method_name == "nearest" {
+                assert_eq!(captures.len(), 2, "{owner:?}");
+                let types = captures
+                    .iter()
+                    .map(|capture| capture.ty.clone())
+                    .collect::<Vec<_>>();
+                assert!(
+                    types.contains(&crate::parser::parse_hierarchy_type("ZOuter")),
+                    "{owner:?}"
+                );
+                assert!(
+                    types.contains(&crate::parser::parse_hierarchy_type("ZOuter.AInner")),
+                    "{owner:?}"
+                );
+            } else {
+                assert!(captures.is_empty(), "{owner:?}");
+            }
+        }
+        assert_eq!(
+            observed,
+            std::collections::BTreeSet::from(["outer", "helper", "inherited", "object", "nearest"])
+        );
     }
 
     #[test]
@@ -11236,6 +11556,23 @@ class Probe {
     }
 
     #[test]
+    fn jdk_self_comparable_bounds_keep_invariant_arguments() {
+        for (bound, succeeds) in [("String", true), ("Integer", false)] {
+            let source = format!(
+                "class Calls {{ static <T extends Comparable<{bound}>> int compare(T value) {{ return 0; }} static int run() {{ return compare(\"a\"); }} }}"
+            );
+            let parsed = crate::parser::parse_java_source(&source);
+            let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+            assert_eq!(
+                !resolved.diagnostics.has_errors(),
+                succeeds,
+                "{bound}: {:?}",
+                resolved.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn selected_signature_substitution_keeps_native_subtype_inference() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -11246,6 +11583,7 @@ class Calls {
     static void run(ArrayList<String> list, HashMap<Integer, String> map) {
         first(list); value(map);
     }
+
 }
 "#,
         );

@@ -1072,6 +1072,7 @@ mod tests {
                     Stmt::Block(Block {
                         statements: vec![
                             Stmt::VarDecl {
+                                is_final: false,
                                 ty: JavaType::String,
                                 name: "value".to_string(),
                                 source_name: "value".to_string(),
@@ -1715,6 +1716,7 @@ mod tests {
             Stmt::Block(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "value".to_string(),
                         source_name: "value".to_string(),
@@ -1750,6 +1752,7 @@ mod tests {
     fn idless_borrowed_return_policy_rejects_shadowed_local_return() {
         let method = private_static_idless_method_with_body(vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -1856,6 +1859,7 @@ mod tests {
         let method = private_static_idless_method_with_body(vec![
             Stmt::Try {
                 resources: vec![Stmt::VarDecl {
+                    is_final: false,
                     ty: JavaType::String,
                     name: "value".to_string(),
                     source_name: "value".to_string(),
@@ -1894,6 +1898,7 @@ mod tests {
     fn idless_borrowed_return_policy_rejects_shadowed_resource_return() {
         let method = private_static_idless_method_with_body(vec![Stmt::Try {
             resources: vec![Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::String,
                 name: "value".to_string(),
                 source_name: "value".to_string(),
@@ -2356,6 +2361,7 @@ mod tests {
                             Literal::Int(0),
                         ))],
                         statements: vec![Stmt::VarDecl {
+                            is_final: false,
                             ty: JavaType::String,
                             name: "value".to_string(),
                             source_name: "value".to_string(),
@@ -2401,6 +2407,7 @@ mod tests {
                         Literal::Int(0),
                     ))],
                     statements: vec![Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "value".to_string(),
                         source_name: "value".to_string(),

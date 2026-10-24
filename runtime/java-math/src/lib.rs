@@ -6,11 +6,36 @@ use num_bigint::{BigInt, ParseBigIntError, Sign};
 use std::{borrow::Borrow, cmp::Ordering, fmt, str::FromStr};
 
 mod decimal;
+#[path = "../../../src/java_string_identity.rs"]
+mod immutable_reference;
+mod integer;
+mod numeric_text;
+/// OpenJDK's RoundingMode overloads dereference this internal enum field before
+/// delegating to their integer-mode implementation, including unchanged scale.
+pub fn rounding_mode_null_message() -> &'static str {
+    "Cannot read field \"oldMode\" because \"roundingMode\" is null"
+}
+use immutable_reference::JavaImmutableReference;
+pub use integer::{
+    abs, add, bit_length, divide, flip_bit, gcd, get_lowest_set_bit, hash_code, negate, signum,
+    subtract,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct BigDecimal {
+pub struct BigDecimal(JavaImmutableReference<BigDecimalValue>);
+
+#[doc(hidden)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct BigDecimalValue {
     coefficient: BigInt,
     scale: i32,
+}
+
+impl std::ops::Deref for BigDecimal {
+    type Target = BigDecimalValue;
+    fn deref(&self) -> &BigDecimalValue {
+        self.0.payload()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,22 +115,35 @@ impl BigDecimalInput for f32 {
 }
 impl BigDecimalInput for i32 {
     fn into_big_decimal(self) -> Result<BigDecimal, NumberFormatException> {
-        Ok(BigDecimal {
-            coefficient: BigInt::from(self),
-            scale: 0,
-        })
+        Ok(BigDecimal::from_parts(BigInt::from(self), 0))
     }
 }
 impl BigDecimalInput for i64 {
     fn into_big_decimal(self) -> Result<BigDecimal, NumberFormatException> {
-        Ok(BigDecimal {
-            coefficient: BigInt::from(self),
-            scale: 0,
-        })
+        Ok(BigDecimal::from_parts(BigInt::from(self), 0))
+    }
+}
+impl BigDecimalInput for BigInteger {
+    fn into_big_decimal(self) -> Result<BigDecimal, NumberFormatException> {
+        Ok(BigDecimal::from_parts(self.0.payload().clone(), 0))
+    }
+}
+impl BigDecimalInput for &BigInteger {
+    fn into_big_decimal(self) -> Result<BigDecimal, NumberFormatException> {
+        self.clone().into_big_decimal()
     }
 }
 
 impl BigDecimal {
+    fn from_parts(coefficient: BigInt, scale: i32) -> Self {
+        Self(JavaImmutableReference::from_payload(std::sync::Arc::new(
+            BigDecimalValue { coefficient, scale },
+        )))
+    }
+    pub fn java_identity_eq(&self, other: &Self) -> bool {
+        self.0.java_identity_eq(&other.0)
+    }
+
     pub fn new<T: BigDecimalInput>(value: T) -> Result<Self, NumberFormatException> {
         value.into_big_decimal()
     }
@@ -114,16 +152,28 @@ impl BigDecimal {
     }
     pub fn subtract(&self, other: impl Borrow<Self>) -> Result<Self, ArithmeticException> {
         let other = other.borrow();
-        decimal::add(
-            self,
-            &Self {
-                coefficient: -&other.coefficient,
-                scale: other.scale,
-            },
-        )
+        decimal::add(self, &Self::from_parts(-&other.coefficient, other.scale))
     }
     pub fn set_scale(&self, scale: i32, mode: RoundingMode) -> Result<Self, ArithmeticException> {
         decimal::set_scale(self, scale, mode)
+    }
+    pub fn divide(&self, other: impl Borrow<Self>) -> Result<Self, ArithmeticException> {
+        decimal::divide_exact(self, other.borrow())
+    }
+    pub fn divide_rounding(
+        &self,
+        other: impl Borrow<Self>,
+        mode: RoundingMode,
+    ) -> Result<Self, ArithmeticException> {
+        decimal::divide_scaled(self, other.borrow(), self.scale, mode)
+    }
+    pub fn divide_scaled(
+        &self,
+        other: impl Borrow<Self>,
+        scale: i32,
+        mode: RoundingMode,
+    ) -> Result<Self, ArithmeticException> {
+        decimal::divide_scaled(self, other.borrow(), scale, mode)
     }
     pub fn double_value(&self) -> f64 {
         decimal::double_value(self)
@@ -159,6 +209,27 @@ pub fn decimal_subtract(
     other: &BigDecimal,
 ) -> Result<BigDecimal, ArithmeticException> {
     value.borrow().subtract(other)
+}
+pub fn decimal_divide(
+    value: impl Borrow<BigDecimal>,
+    other: &BigDecimal,
+) -> Result<BigDecimal, ArithmeticException> {
+    value.borrow().divide(other)
+}
+pub fn decimal_divide_rounding(
+    value: impl Borrow<BigDecimal>,
+    other: &BigDecimal,
+    mode: RoundingMode,
+) -> Result<BigDecimal, ArithmeticException> {
+    value.borrow().divide_rounding(other, mode)
+}
+pub fn decimal_divide_scaled(
+    value: impl Borrow<BigDecimal>,
+    other: &BigDecimal,
+    scale: i32,
+    mode: RoundingMode,
+) -> Result<BigDecimal, ArithmeticException> {
+    value.borrow().divide_scaled(other, scale, mode)
 }
 pub fn decimal_double_value(value: impl Borrow<BigDecimal>) -> f64 {
     value.borrow().double_value()
@@ -199,7 +270,7 @@ pub fn number_format_message_utf16(value: impl Borrow<NumberFormatException>) ->
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct BigInteger(BigInt);
+pub struct BigInteger(JavaImmutableReference<BigInt>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArithmeticException(&'static str);
@@ -213,20 +284,41 @@ impl std::error::Error for ArithmeticException {}
 
 impl fmt::Display for BigInteger {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(output)
+        fmt::Display::fmt(self.0.payload(), output)
     }
 }
 
 impl FromStr for BigInteger {
     type Err = ParseBigIntError;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse().map(Self)
+        value.parse().map(Self::from_value)
     }
 }
 
 impl BigInteger {
+    fn from_value(value: BigInt) -> Self {
+        Self(JavaImmutableReference::from_payload(std::sync::Arc::new(
+            value,
+        )))
+    }
+
+    pub fn java_identity_eq(&self, other: &Self) -> bool {
+        self.0.java_identity_eq(&other.0)
+    }
+
     pub fn value_of(value: i64) -> Self {
-        Self(BigInt::from(value))
+        // JDK constants/valueOf retain a canonical small reference; String
+        // constructors still allocate their own independent objects.
+        static SMALL: std::sync::OnceLock<Vec<BigInteger>> = std::sync::OnceLock::new();
+        if (-16..=16).contains(&value) {
+            return SMALL.get_or_init(|| {
+                (-16..=16)
+                    .map(|value| Self::from_value(BigInt::from(value)))
+                    .collect()
+            })[(value + 16) as usize]
+                .clone();
+        }
+        Self::from_value(BigInt::from(value))
     }
 
     // Match the reference JDK's supported magnitude rather than allowing an
@@ -239,7 +331,7 @@ impl BigInteger {
                 "BigInteger would overflow supported range",
             ))
         } else {
-            Ok(Self(value))
+            Ok(Self::from_value(value))
         }
     }
 
@@ -253,7 +345,7 @@ impl BigInteger {
                 "BigInteger would overflow supported range",
             ));
         }
-        Self::checked(&self.0 * &other.0)
+        Self::checked(self.0.payload() * other.0.payload())
     }
 
     pub fn pow(&self, exponent: i32) -> Result<Self, ArithmeticException> {
@@ -287,7 +379,7 @@ impl BigInteger {
 
     pub fn shift_right(&self, distance: i32) -> Result<Self, ArithmeticException> {
         if distance >= 0 {
-            Ok(Self(&self.0 >> distance as u32))
+            Ok(Self::from_value(self.0.payload() >> distance as u32))
         } else {
             // unsigned_abs handles MIN_VALUE without an overflowing negation.
             let distance = distance.unsigned_abs();
@@ -299,7 +391,7 @@ impl BigInteger {
                     "BigInteger would overflow supported range",
                 ));
             }
-            Self::checked(&self.0 << distance)
+            Self::checked(self.0.payload() << distance)
         }
     }
 
@@ -315,7 +407,7 @@ impl BigInteger {
         }
         // Java permits modulus one, including a negative exponent with a zero
         // base. Its sole residue is zero; do not attempt an inverse first.
-        if modulus.0 == BigInt::from(1u8) {
+        if modulus.0.payload() == &BigInt::from(1u8) {
             return Ok(Self::value_of(0));
         }
         if exponent.0.sign() == Sign::Minus {
@@ -323,9 +415,11 @@ impl BigInteger {
                 .0
                 .modinv(&modulus.0)
                 .ok_or(ArithmeticException("BigInteger not invertible."))?;
-            Ok(Self(inverse.modpow(&(-&exponent.0), &modulus.0)))
+            Ok(Self::from_value(
+                inverse.modpow(&(-exponent.0.payload()), &modulus.0),
+            ))
         } else {
-            Ok(Self(self.0.modpow(&exponent.0, &modulus.0)))
+            Ok(Self::from_value(self.0.modpow(&exponent.0, &modulus.0)))
         }
     }
 
@@ -404,6 +498,9 @@ pub fn shift_right(
 pub fn to_string(value: impl Borrow<BigInteger>) -> String {
     value.borrow().to_string()
 }
+pub fn integer_to_string_utf16(value: impl Borrow<BigInteger>) -> Vec<u16> {
+    to_string(value).encode_utf16().collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -447,11 +544,9 @@ mod tests {
         }
         assert!(!integer("-2").test_bit(0).unwrap());
         assert!(integer("-2").test_bit(1).unwrap());
-        assert!(
-            !integer("123456789012345678901234567890")
-                .test_bit(i32::MAX)
-                .unwrap()
-        );
+        assert!(!integer("123456789012345678901234567890")
+            .test_bit(i32::MAX)
+            .unwrap());
         assert_eq!(
             integer("123456789012345678901234567890")
                 .shift_right(i32::MAX)

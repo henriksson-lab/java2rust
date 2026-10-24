@@ -1460,6 +1460,7 @@ fn stmt_has_unhandled_expression_effect<E: Clone>(
                                 source_name: catch.source_name.clone(),
                                 initializer: None,
                                 binding: catch.binding.clone(),
+                                is_final: false,
                             },
                             catch_frame.to_mut(),
                         );
@@ -1538,6 +1539,7 @@ fn stmt_has_unhandled_expression_effect<E: Clone>(
                         source_name: source_var_name.clone(),
                         initializer: None,
                         binding: binding.clone(),
+                        is_final: false,
                     },
                     frame.to_mut(),
                 );
@@ -4122,6 +4124,9 @@ pub(crate) fn catch_match_class_names(
             }
         }
     }
+    for name in &mut names {
+        *name = facts.exception_binary_name_for(name).to_owned();
+    }
     names.sort();
     names.dedup();
     names
@@ -4142,10 +4147,11 @@ fn catch_assignable_class_names(catch_types: &[JavaType], facts: &FactSet) -> Ve
                 || facts
                     .hierarchy_subtype_policy(&exception_ty, catch_ty)
                     .reaches()
-                || crate::stdlib::is_known_java_subtype(
-                    &exception.type_name,
-                    &exception_class_name(catch_ty),
-                )
+                || (exception.binary_name.is_none()
+                    && crate::stdlib::is_known_java_subtype(
+                        &exception.type_name,
+                        &exception_class_name(catch_ty),
+                    ))
         }) && !out.contains(&exception.type_name)
         {
             out.push(exception.type_name.clone());
@@ -6153,6 +6159,7 @@ class SpecificProblem extends BaseProblem {}
     fn try_resource_helpers_stay_inside_exception_plan() {
         let resources = vec![
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::Unknown("AutoCloseable".to_string()),
                 name: "input".to_string(),
                 source_name: "input".to_string(),
@@ -6160,6 +6167,7 @@ class SpecificProblem extends BaseProblem {}
                 binding: None,
             },
             Stmt::VarDecl {
+                is_final: false,
                 ty: JavaType::Unknown("AutoCloseable".to_string()),
                 name: "output".to_string(),
                 source_name: "output".to_string(),

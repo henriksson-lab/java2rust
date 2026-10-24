@@ -1383,6 +1383,7 @@ enum FacadeFnReceiver {
 #[derive(Debug, Clone)]
 struct FacadeAbi {
     fns: HashMap<(String, String), FacadeFnAbi>,
+    free_fns: HashMap<String, FacadeFnAbi>,
     aliases: HashMap<String, String>,
     from_conversions: Vec<(String, String)>,
 }
@@ -1412,12 +1413,12 @@ fn enrich_external_pack_facade_abi(
             continue;
         };
         let arg_count = effect.arg_count.unwrap_or(0);
-        let rust_name = facts
-            .external_crate_api_mapping_for_receiver(
-                receiver_type,
-                &effect.method_name,
-                effect.arg_count,
-            )
+        let mapping = facts.external_crate_api_mapping_for_receiver(
+            receiver_type,
+            &effect.method_name,
+            effect.arg_count,
+        );
+        let rust_name = mapping
             .map(|mapping| mapping.rust_name.clone())
             .unwrap_or_else(|| {
                 new_java2rust::call_plan::external_facade_method_rust_name_for_abi(
@@ -1427,6 +1428,19 @@ fn enrich_external_pack_facade_abi(
                     facts,
                 )
             });
+        if mapping.is_some()
+            && abi_map.free_fns.get(&rust_name).is_some_and(|abi| {
+                effect
+                    .arg_count
+                    .is_some_and(|arity| abi.params.len() == arity + 1)
+            })
+        {
+            // The declared crate::function(receiver, args...) exists. Do not
+            // replace its explicit pack contract with a same-named inherent
+            // method discovered on the payload type (which may have a wider
+            // generic parameter ABI). Constructors are enriched separately.
+            continue;
+        }
         let owner = facade_owner_name(
             abi_map,
             receiver_type.rsplit('.').next().unwrap_or(receiver_type),
@@ -1910,6 +1924,7 @@ fn manifest_crate_roots(manifest_path: &Path, manifest_source: &str) -> HashMap<
 
 fn parse_facade_abi(source: &str) -> FacadeAbi {
     let mut out = HashMap::new();
+    let mut free_fns = HashMap::new();
     let mut aliases = HashMap::new();
     let mut from_conversions = Vec::new();
     let mut owner: Option<String> = None;
@@ -1944,19 +1959,21 @@ fn parse_facade_abi(source: &str) -> FacadeAbi {
         if owner.is_some() && owner_depth.is_none() && code_line.contains('{') {
             owner_depth = Some(depth + 1);
         }
-        if owner.is_some()
-            && ((code_line.starts_with("pub fn ") && owner_depth == Some(depth))
-                || !pending.is_empty())
+        if (code_line.starts_with("pub fn ")
+            && ((owner.is_some() && owner_depth == Some(depth)) || (owner.is_none() && depth == 0)))
+            || !pending.is_empty()
         {
             if !pending.is_empty() {
                 pending.push(' ');
             }
             pending.push_str(line);
             if code_line.contains('{') || code_line.ends_with(';') {
-                if let (Some(owner), Some((name, abi))) =
-                    (owner.clone(), parse_facade_fn_signature(&pending))
-                {
-                    out.insert((owner, name), abi);
+                if let Some((name, abi)) = parse_facade_fn_signature(&pending) {
+                    if let Some(owner) = owner.clone() {
+                        out.insert((owner, name), abi);
+                    } else {
+                        free_fns.insert(name, abi);
+                    }
                 }
                 pending.clear();
             }
@@ -1976,6 +1993,7 @@ fn parse_facade_abi(source: &str) -> FacadeAbi {
     }
     FacadeAbi {
         fns: out,
+        free_fns,
         aliases,
         from_conversions,
     }
@@ -2395,6 +2413,12 @@ impl Other {
         assert_eq!(combine.receiver, super::FacadeFnReceiver::BorrowedSelf);
         assert_eq!(combine.params, ["&Value"]);
         assert_eq!(abi.fns.len(), 3, "{:?}", abi.fns);
+        assert_eq!(abi.free_fns.len(), 2);
+        assert_eq!(abi.free_fns["combine"].params, ["&Value", "&Value"]);
+        assert_eq!(
+            abi.free_fns["combine"].receiver,
+            super::FacadeFnReceiver::None
+        );
         assert_eq!(
             abi.fns[&("Value".into(), "identity".into())].receiver,
             super::FacadeFnReceiver::BorrowedSelf
@@ -3036,6 +3060,61 @@ impl Other {
 
         std::fs::remove_file(manifest_path).unwrap();
         std::fs::remove_dir(temp_dir).unwrap();
+    }
+
+    #[test]
+    fn external_pack_ingestion_keeps_declared_free_function_over_same_named_method() {
+        use new_java2rust::facts::{ExternalArgumentAliasPolicy, FactProvenance};
+        let temp_dir = std::env::temp_dir().join(format!(
+            "new_java2rust_cli_free_function_{}",
+            std::process::id()
+        ));
+        let facade_dir = temp_dir.join("facade/src");
+        std::fs::create_dir_all(&facade_dir).unwrap();
+        std::fs::write(
+            facade_dir.join("lib.rs"),
+            r#"
+pub struct Value(pub i32);
+impl Value {
+    pub fn multiply(&self, other: impl std::borrow::Borrow<Value>) -> Result<Value, ()> {
+        Ok(Value(self.0 * other.borrow().0))
+    }
+}
+pub fn multiply(
+    value: impl std::borrow::Borrow<Value>,
+    other: &Value,
+) -> Result<Value, ()> { value.borrow().multiply(other) }
+"#,
+        )
+        .unwrap();
+        let manifest_path = temp_dir.join("dep.pack");
+        std::fs::write(&manifest_path, "external-pack dep Value rust-crate-mapping mapped target=dep_facade path=facade\nexternal-pack-api dep Value multiply mapped getter read-only definitely-non-null params=Value return=Value rust=multiply rust-result=true\nexternal-pack-argument dep Value multiply 0 definitely-non-null read-only borrowed type=Value\n").unwrap();
+        let inputs = ExternalInputPaths {
+            facts_paths: vec![],
+            pack_manifest_paths: vec![manifest_path.to_string_lossy().into_owned()],
+            builtin_pack_names: vec![],
+            enable_builtin_external_packs: false,
+        };
+        let (facts, diagnostics) = load_external_inputs(&inputs).unwrap();
+        assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+        assert!(
+            facts
+                .facade_abi_for_external_method("Value", "multiply", 1)
+                .is_none()
+        );
+        let arg = facts
+            .external_api_argument_effect_for_receiver(Some("Value"), "multiply", 0)
+            .unwrap();
+        assert_eq!(arg.alias_policy, ExternalArgumentAliasPolicy::Borrowed);
+        assert_eq!(arg.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            facts
+                .external_crate_api_mapping_for_receiver("Value", "multiply", Some(1))
+                .unwrap()
+                .rust_name,
+            "multiply"
+        );
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 
     #[test]

@@ -1,4 +1,6 @@
 import static java.lang.Integer.toUnsignedLong;
+import static java.lang.Long.compareUnsigned;
+import static java.lang.Long.signum;
 import static java.lang.Math.copySign;
 
 public class NativeNumericProbe {
@@ -32,6 +34,35 @@ public class NativeNumericProbe {
         catch (ArithmeticException error) { if (!error.getMessage().equals("/ by zero")) return 22; }
         try { Long.remainderUnsigned(1L, 0L); return 23; }
         catch (ArithmeticException error) { if (!error.getMessage().equals("/ by zero")) return 24; }
+        if (Integer.compare(Integer.MIN_VALUE, Integer.MAX_VALUE) != -1 ||
+                Integer.compare(Integer.MAX_VALUE, Integer.MIN_VALUE) != 1 || Integer.compare(-3, -3) != 0) return 25;
+        if (Long.compare(Long.MIN_VALUE, Long.MAX_VALUE) != -1 ||
+                Long.compare(Long.MAX_VALUE, Long.MIN_VALUE) != 1 || Long.compare(-3L, -3L) != 0) return 26;
+        if (Integer.compareUnsigned(-1, 0) != 1 || Integer.compareUnsigned(0, -1) != -1 ||
+                Integer.compareUnsigned(Integer.MIN_VALUE, -1) != -1 || Integer.compareUnsigned(-1, -1) != 0) return 27;
+        if (compareUnsigned(-1L, 0L) != 1 || Long.compareUnsigned(0L, -1L) != -1 ||
+                Long.compareUnsigned(Long.MIN_VALUE, -1L) != -1 || Long.compareUnsigned(-1L, -1L) != 0) return 28;
+        // Widen to the declared signed parameter type before reinterpreting as unsigned.
+        if (Long.compareUnsigned(-1, 4294967295L) != 1 || Long.compare('a', 97L) != 0) return 29;
+        order = 0;
+        if (Integer.compareUnsigned(operand(2), operand(3)) != -1 || order != 23) return 30;
+        Integer boxed = 7;
+        if (Long.compare(boxed, 6L) != 1 || Integer.compareUnsigned(boxed, 8) != -1) return 31;
+        boxed = null;
+        try { Long.compareUnsigned(boxed, 0L); return 32; }
+        catch (NullPointerException error) { }
+        if (Integer.signum(Integer.MIN_VALUE) != -1 || Integer.signum(0) != 0 ||
+                Integer.signum(Integer.MAX_VALUE) != 1) return 33;
+        if (signum(Long.MIN_VALUE) != -1 || signum(0L) != 0 || signum(Long.MAX_VALUE) != 1) return 34;
+        if (Long.signum(-2) != -1 || Integer.signum('a') != 1) return 35;
+        boxed = -7;
+        order = 0;
+        if (Integer.signum(operand(2)) != 1 || order != 2 || Long.signum(boxed) != -1) return 36;
+        boxed = null;
+        try { Integer.signum(boxed); return 37; }
+        catch (NullPointerException error) { }
+        try { Long.signum(boxed); return 38; }
+        catch (NullPointerException error) { }
         return 0;
     }
     public static void main(String[] args) { System.out.println(run()); }

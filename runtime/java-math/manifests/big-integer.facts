@@ -1,5 +1,5 @@
 # Explicit, reusable JDK API subset. Unlisted methods are not modeled here.
-external-pack jdk.big_decimal java.math.BigDecimal rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=BigDecimal string-abi=utf16
+external-pack jdk.big_decimal java.math.BigDecimal rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=BigDecimal string-abi=utf16 reference-identity=java_identity_eq
 external-pack jdk.big_decimal java.math.RoundingMode rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=RoundingMode string-abi=utf16
 external-pack jdk.big_decimal java.lang.NumberFormatException rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. string-abi=utf16
 external-pack-exception jdk.big_decimal java.lang.NumberFormatException unchecked
@@ -10,9 +10,16 @@ external-pack-api jdk.big_decimal java.math.BigDecimal add mapped getter read-on
 external-pack-argument jdk.big_decimal java.math.BigDecimal add 0 definitely-non-null read-only borrowed type=java.math.BigDecimal
 external-pack-api jdk.big_decimal java.math.BigDecimal subtract mapped getter read-only definitely-non-null params=java.math.BigDecimal return=java.math.BigDecimal throws=java.lang.ArithmeticException rust=decimal_subtract rust-result=true
 external-pack-argument jdk.big_decimal java.math.BigDecimal subtract 0 definitely-non-null read-only borrowed type=java.math.BigDecimal
+external-pack-api jdk.big_decimal java.math.BigDecimal divide mapped getter read-only definitely-non-null params=java.math.BigDecimal return=java.math.BigDecimal throws=java.lang.ArithmeticException rust=decimal_divide rust-result=true
+external-pack-api jdk.big_decimal java.math.BigDecimal divide mapped getter read-only definitely-non-null params=java.math.BigDecimal,java.math.RoundingMode return=java.math.BigDecimal throws=java.lang.ArithmeticException rust=decimal_divide_rounding rust-result=true
+external-pack-api jdk.big_decimal java.math.BigDecimal divide mapped getter read-only definitely-non-null params=java.math.BigDecimal,int,java.math.RoundingMode return=java.math.BigDecimal throws=java.lang.ArithmeticException rust=decimal_divide_scaled rust-result=true
+external-pack-argument jdk.big_decimal java.math.BigDecimal divide 0 definitely-non-null read-only borrowed type=java.math.BigDecimal
+external-pack-argument jdk.big_decimal java.math.BigDecimal divide 1 definitely-non-null read-only no-alias type=java.math.RoundingMode args=2 null-message=java_math_runtime::rounding_mode_null_message
+external-pack-argument jdk.big_decimal java.math.BigDecimal divide 1 definitely-non-null read-only no-alias type=int args=3
+external-pack-argument jdk.big_decimal java.math.BigDecimal divide 2 definitely-non-null read-only no-alias type=java.math.RoundingMode args=3 null-message=java_math_runtime::rounding_mode_null_message
 external-pack-api jdk.big_decimal java.math.BigDecimal setScale mapped getter read-only definitely-non-null params=int,java.math.RoundingMode return=java.math.BigDecimal throws=java.lang.ArithmeticException rust=decimal_set_scale rust-result=true
 external-pack-argument jdk.big_decimal java.math.BigDecimal setScale 0 definitely-non-null read-only no-alias type=int
-external-pack-argument jdk.big_decimal java.math.BigDecimal setScale 1 definitely-non-null read-only no-alias type=java.math.RoundingMode
+external-pack-argument jdk.big_decimal java.math.BigDecimal setScale 1 definitely-non-null read-only no-alias type=java.math.RoundingMode null-message=java_math_runtime::rounding_mode_null_message
 external-pack-api jdk.big_decimal java.math.BigDecimal doubleValue mapped getter read-only definitely-non-null args=0 return=double rust=decimal_double_value
 external-pack-api jdk.big_decimal java.math.BigDecimal floatValue mapped getter read-only definitely-non-null args=0 return=float rust=decimal_float_value
 external-pack-api jdk.big_decimal java.math.BigDecimal scale mapped getter read-only definitely-non-null args=0 return=int rust=decimal_scale
@@ -29,7 +36,9 @@ external-pack-field jdk.big_decimal java.math.RoundingMode HALF_UP mapped type=j
 external-pack-field jdk.big_decimal java.math.RoundingMode HALF_DOWN mapped type=java.math.RoundingMode value=java_math_runtime::RoundingMode::HALF_DOWN
 external-pack-field jdk.big_decimal java.math.RoundingMode HALF_EVEN mapped type=java.math.RoundingMode value=java_math_runtime::RoundingMode::HALF_EVEN
 external-pack-field jdk.big_decimal java.math.RoundingMode UNNECESSARY mapped type=java.math.RoundingMode value=java_math_runtime::RoundingMode::UNNECESSARY
-external-pack jdk.big_integer java.math.BigInteger rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=BigInteger
+external-pack jdk.big_integer java.math.BigInteger rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=BigInteger string-abi=utf16 reference-identity=java_identity_eq
+external-pack-constructor jdk.big_integer java.math.BigInteger 1 mapped rust-type=BigInteger rust=new rust-result=true
+external-pack-constructor-argument jdk.big_integer java.math.BigInteger 1 0 definitely-non-null read-only borrowed type=String
 external-pack jdk.big_integer java.lang.ArithmeticException rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=..
 external-pack-exception jdk.big_integer java.lang.ArithmeticException unchecked
 external-pack-capability jdk.big_integer java.math.BigInteger clone=true final=true
@@ -54,4 +63,20 @@ external-pack-api jdk.big_integer java.math.BigInteger testBit mapped getter rea
 external-pack-argument jdk.big_integer java.math.BigInteger testBit 0 definitely-non-null read-only no-alias type=int
 external-pack-api jdk.big_integer java.math.BigInteger shiftRight mapped getter read-only definitely-non-null params=int return=java.math.BigInteger throws=java.lang.ArithmeticException rust=shift_right rust-result=true
 external-pack-argument jdk.big_integer java.math.BigInteger shiftRight 0 definitely-non-null read-only no-alias type=int
-external-pack-api jdk.big_integer java.math.BigInteger toString mapped getter read-only definitely-non-null args=0 return=String rust=to_string
+external-pack-api jdk.big_integer java.math.BigInteger toString mapped getter read-only definitely-non-null args=0 return=String rust=integer_to_string_utf16
+external-pack-api jdk.big_integer java.math.BigInteger signum mapped getter read-only definitely-non-null args=0 return=int rust=signum
+external-pack-api jdk.big_integer java.math.BigInteger abs mapped getter read-only definitely-non-null args=0 return=java.math.BigInteger rust=abs
+external-pack-api jdk.big_integer java.math.BigInteger negate mapped getter read-only definitely-non-null args=0 return=java.math.BigInteger rust=negate
+external-pack-api jdk.big_integer java.math.BigInteger bitLength mapped getter read-only definitely-non-null args=0 return=int rust=bit_length
+external-pack-api jdk.big_integer java.math.BigInteger getLowestSetBit mapped getter read-only definitely-non-null args=0 return=int rust=get_lowest_set_bit
+external-pack-api jdk.big_integer java.math.BigInteger hashCode mapped getter read-only definitely-non-null args=0 return=int rust=hash_code
+external-pack-api jdk.big_integer java.math.BigInteger add mapped getter read-only definitely-non-null params=java.math.BigInteger return=java.math.BigInteger throws=java.lang.ArithmeticException rust=add rust-result=true
+external-pack-argument jdk.big_integer java.math.BigInteger add 0 definitely-non-null read-only borrowed type=java.math.BigInteger
+external-pack-api jdk.big_integer java.math.BigInteger subtract mapped getter read-only definitely-non-null params=java.math.BigInteger return=java.math.BigInteger throws=java.lang.ArithmeticException rust=subtract rust-result=true
+external-pack-argument jdk.big_integer java.math.BigInteger subtract 0 definitely-non-null read-only borrowed type=java.math.BigInteger
+external-pack-api jdk.big_integer java.math.BigInteger divide mapped getter read-only definitely-non-null params=java.math.BigInteger return=java.math.BigInteger throws=java.lang.ArithmeticException rust=divide rust-result=true
+external-pack-argument jdk.big_integer java.math.BigInteger divide 0 definitely-non-null read-only borrowed type=java.math.BigInteger
+external-pack-api jdk.big_integer java.math.BigInteger gcd mapped getter read-only definitely-non-null params=java.math.BigInteger return=java.math.BigInteger rust=gcd
+external-pack-argument jdk.big_integer java.math.BigInteger gcd 0 definitely-non-null read-only borrowed type=java.math.BigInteger
+external-pack-api jdk.big_integer java.math.BigInteger flipBit mapped getter read-only definitely-non-null params=int return=java.math.BigInteger throws=java.lang.ArithmeticException rust=flip_bit rust-result=true
+external-pack-argument jdk.big_integer java.math.BigInteger flipBit 0 definitely-non-null read-only no-alias type=int

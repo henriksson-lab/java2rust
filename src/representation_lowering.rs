@@ -820,6 +820,13 @@ fn source_hierarchy_carrier_item(
             source_hierarchy_carrier_use_name(enum_name, ty), arms.join("\n")));
     }
     let mut impl_members = Vec::new();
+    let erased_reference = source_hierarchy_erased_reference_expression(
+        variants,
+        virtual_dispatch_trait.is_some(),
+        "self",
+        true,
+    );
+    impl_members.push(format!("    pub fn __java_clone_to_any(&self) -> Box<dyn std::any::Any> where Self: 'static {{\n        {erased_reference}\n    }}"));
     impl_members.extend(source_hierarchy_carrier_field_accessors(
         variants,
         representations,
@@ -1104,6 +1111,28 @@ fn source_hierarchy_carrier_class_bound_trait_impls(
 /// hierarchies can use the carrier's pointer comparison directly; a hierarchy
 /// whose root overrides `equals(Object)` dispatches that generated method and
 /// presents the other carrier's concrete payload as the erased Java object.
+fn source_hierarchy_erased_reference_expression(
+    variants: &[String],
+    has_anonymous_variant: bool,
+    receiver: &str,
+    retain_anonymous_carrier: bool,
+) -> String {
+    let mut arms = variants.iter().map(|variant| format!(
+        "            Self::{variant}(value) => Box::new(std::clone::Clone::clone(value)) as Box<dyn std::any::Any>,"
+    )).collect::<Vec<_>>();
+    if has_anonymous_variant {
+        let value = if retain_anonymous_carrier {
+            "Self::Anonymous(std::clone::Clone::clone(value))"
+        } else {
+            "std::clone::Clone::clone(value)"
+        };
+        arms.push(format!(
+            "            Self::Anonymous(value) => Box::new({value}) as Box<dyn std::any::Any>,"
+        ));
+    }
+    format!("match {receiver} {{\n{}\n        }}", arms.join("\n"))
+}
+
 fn source_hierarchy_carrier_java_map_key_impl(
     enum_name: &str,
     variants: &[String],
@@ -1119,24 +1148,15 @@ fn source_hierarchy_carrier_java_map_key_impl(
     let use_name = source_hierarchy_carrier_use_name(enum_name, owner);
     let custom_equals = source_hierarchy_equals_method(owner, support_program, facts);
     let (body, checked_body) = if let Some((declaring_ty, equals_method)) = custom_equals {
-        let mut arms = variants
-            .iter()
-            .map(|variant| {
-                format!(
-                    "            Self::{variant}(value) => Box::new(std::clone::Clone::clone(value)) as Box<dyn std::any::Any>,"
-                )
-            })
-            .collect::<Vec<_>>();
-        if has_anonymous_variant {
-            arms.push(
-                "            Self::Anonymous(value) => Box::new(std::clone::Clone::clone(value)) as Box<dyn std::any::Any>,"
-                    .to_string(),
-            );
-        }
         let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(
             equals_method,
         ));
-        let erased_other = format!("match other {{\n{}\n        }}", arms.join("\n"));
+        let erased_other = source_hierarchy_erased_reference_expression(
+            variants,
+            has_anonymous_variant,
+            "other",
+            false,
+        );
         let accepts_nullable_object = signatures
             .method_signature(declaring_ty, equals_method)
             .and_then(|signature| signature.params().first())
@@ -1455,21 +1475,12 @@ fn source_hierarchy_carrier_java_tree_key_impl(
             .map(|inherited| (inherited.declaring_ty(), inherited.method()))
     })?;
 
-    let mut arms = variants
-        .iter()
-        .map(|variant| {
-            format!(
-                "            Self::{variant}(value) => Box::new(std::clone::Clone::clone(value)) as Box<dyn std::any::Any>,"
-            )
-        })
-        .collect::<Vec<_>>();
-    if has_anonymous_variant {
-        arms.push(
-            "            Self::Anonymous(value) => Box::new(std::clone::Clone::clone(value)) as Box<dyn std::any::Any>,"
-                .to_string(),
-        );
-    }
-    let erased_other = format!("match other {{\n{}\n        }}", arms.join("\n"));
+    let erased_other = source_hierarchy_erased_reference_expression(
+        variants,
+        has_anonymous_variant,
+        "other",
+        false,
+    );
     let parameter_shape = signatures
         .method_signature(declaring_ty, compare_method)
         .and_then(|signature| signature.params().first())
@@ -4269,6 +4280,26 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
 ) -> Vec<String> {
+    trait_impl_emissions_with_emitted_methods(
+        representations,
+        program,
+        ty,
+        signatures,
+        facts,
+        exceptions,
+        None,
+    )
+}
+
+pub(crate) fn trait_impl_emissions_with_emitted_methods(
+    representations: &RepresentationPlan,
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    emitted_methods: Option<&HashSet<String>>,
+) -> Vec<String> {
     if representations.abstract_owner_has_no_runtime_instances(&ty.name) {
         return Vec::new();
     }
@@ -4320,6 +4351,7 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                 facts,
                 exceptions,
                 representations,
+                emitted_methods,
             )
         })
         .collect()
@@ -6955,6 +6987,23 @@ pub(crate) fn zero_arg_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     Some(method)
 }
 
+#[derive(Clone, Copy)]
+struct SharedTraitAdapter {
+    sync: bool,
+    interior_mutable: bool,
+}
+
+fn specialized_interface_contract_method(
+    contract: &SpecializedInterfaceContract<'_>,
+) -> MethodDecl {
+    let mut method = contract.method.clone();
+    method.return_type = contract.return_type.clone();
+    for (param, ty) in method.params.iter_mut().zip(&contract.param_types) {
+        param.ty = ty.clone();
+    }
+    method
+}
+
 fn trait_impl_for_type(
     ty: &TypeDecl,
     interface: &TypeDecl,
@@ -6965,6 +7014,7 @@ fn trait_impl_for_type(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
     representations: &RepresentationPlan,
+    emitted_methods: Option<&HashSet<String>>,
 ) -> Option<String> {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
@@ -6973,8 +7023,37 @@ fn trait_impl_for_type(
         facts.storage_placement_for(&ty.name),
         representations.storage_placement_for(&ty.name),
     );
-    let shared_adapter =
-        (placement.shared() && placement.interior_mutable()).then_some(placement.sync());
+    let contracts = specialized_interface_instance_contracts(program, interface, substitutions);
+    let companion_only = emitted_methods.is_some_and(|emitted| {
+        contracts.iter().any(|contract| {
+            let method = specialized_interface_contract_method(contract);
+            let candidates = implementing_method_candidates_in_hierarchy(ty, &method, program);
+            let Some((owner, implementation)) =
+                select_compatible_interface_implementation(ty, &method, program, &candidates)
+            else {
+                return false;
+            };
+            if trait_impl_forwarding_owner_for_inherited_source_method(ty, owner, implementation)
+                .name
+                != ty.name
+            {
+                return false;
+            }
+            let name = implementation
+                .rust_name
+                .clone()
+                .unwrap_or_else(|| crate::parser::to_snake_case(&implementation.name));
+            !emitted.contains(&name)
+                && emitted.contains(&crate::java_naming::outer_handle_companion_name(&name))
+        })
+    });
+    // A borrowed payload cannot recover the Java owning reference. Use the
+    // already emitted ABI inventory, not a second analysis of method bodies.
+    let shared_adapter = (placement.shared() && (placement.interior_mutable() || companion_only))
+        .then_some(SharedTraitAdapter {
+            sync: placement.sync(),
+            interior_mutable: placement.interior_mutable(),
+        });
     let concrete_is_clone = crate::item_assembly::source_type_supports_struct_derive_clone(
         ty,
         signatures,
@@ -7063,15 +7142,11 @@ fn trait_impl_for_type(
     // leaves inherited edges such as Parent<T> with an unbound T; it also
     // loses the declaration identity used by the signature solver.
     let method_items = |immutable_shared_receiver| {
-        specialized_interface_instance_contracts(program, interface, substitutions)
-            .into_iter()
+        contracts
+            .iter()
             .filter_map(|contract| {
                 let method_owner = contract.owner;
-                let mut effective_method = contract.method.clone();
-                effective_method.return_type = contract.return_type;
-                for (param, ty) in effective_method.params.iter_mut().zip(contract.param_types) {
-                    param.ty = ty;
-                }
+                let effective_method = specialized_interface_contract_method(contract);
                 trait_impl_method(
                     ty,
                     method_owner,
@@ -7100,7 +7175,7 @@ fn trait_impl_for_type(
             .collect::<Vec<_>>()
     };
     let mut methods = method_items(false);
-    if let Some(sync) = shared_adapter {
+    if let Some(adapter) = shared_adapter {
         methods.extend(shared_trait_object_support_impl_methods(&trait_name));
         let trait_base = trait_name.split('<').next().unwrap_or(&trait_name);
         let adapter_name = format!("__JavaShared{impl_type_name}As{trait_base}");
@@ -7109,7 +7184,16 @@ fn trait_impl_for_type(
             .unwrap_or_default();
         let adapter_type = format!("{adapter_name}{type_args}");
         let clone_impl = shared_reference_carrier_clone_impl(&carrier_generics, &adapter_type);
-        let handle = if sync {
+        let handle = if !adapter.interior_mutable {
+            format!(
+                "{}<{impl_type}>",
+                if adapter.sync {
+                    "std::sync::Arc"
+                } else {
+                    "std::rc::Rc"
+                }
+            )
+        } else if adapter.sync {
             format!("std::sync::Arc<std::sync::Mutex<{impl_type}>>")
         } else {
             format!("std::rc::Rc<std::cell::RefCell<{impl_type}>>")
@@ -7732,7 +7816,7 @@ fn trait_impl_method(
     facts: &FactSet,
     interface_exceptions: MethodExceptionPlan,
     representations: &RepresentationPlan,
-    shared_adapter: Option<bool>,
+    shared_adapter: Option<SharedTraitAdapter>,
     owner_substitutions: &HashMap<String, JavaType>,
     immutable_shared_receiver: bool,
 ) -> Option<String> {
@@ -7935,16 +8019,19 @@ fn trait_impl_method(
         )
     };
     let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
-    let call = if let Some(sync) = shared_adapter {
+    let call = if let Some(adapter) = shared_adapter {
         if forwarding_owner.name == ty.name {
             let comma_args = (!args.is_empty())
                 .then(|| format!(", {args}"))
                 .unwrap_or_default();
+            let companion = crate::java_naming::outer_handle_companion_name(&rust_name);
             format!(
-                "{implementing_owner_name}::{rust_name}_with_outer(std::clone::Clone::clone(&self.0){comma_args})"
+                "{implementing_owner_name}::{companion}(std::clone::Clone::clone(&self.0){comma_args})"
             )
         } else {
-            let borrowed = if sync {
+            let borrowed = if !adapter.interior_mutable {
+                "self.0"
+            } else if adapter.sync {
                 "self.0.lock().unwrap()"
             } else if matches!(trait_receiver, Some(ReceiverPlan::Mutable)) {
                 "self.0.borrow_mut()"
@@ -11816,6 +11903,38 @@ class NullName implements Named {
         assert_eq!(
             super::interface_type_arguments_in_target(&parsed.program, child, source),
             Some(vec![JavaType::String])
+        );
+    }
+
+    #[test]
+    fn interface_arguments_resolve_in_the_edge_owner_without_capturing_type_parameters() {
+        let parsed = parse_java_source(
+            "class Outer { static class Data {} interface Source<T> {} static class Base implements Source<Data> {} } class T {} interface RootSource<X> {} class Root<T> implements RootSource<T> {}",
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let program = &resolved.program;
+        let base = super::find_type_decl_for_owner_context(program, "Outer", "Base").unwrap();
+        let source = super::find_type_decl_for_owner_context(program, "Outer", "Source").unwrap();
+        let data = super::find_type_decl_for_owner_context(program, "Outer", "Data").unwrap();
+        assert_eq!(
+            super::interface_type_arguments_in_target(program, base, source),
+            Some(vec![JavaType::Named {
+                name: data.name.clone(),
+                args: vec![]
+            }])
+        );
+        let root = program.types.iter().find(|ty| ty.name == "Root").unwrap();
+        let source = program
+            .types
+            .iter()
+            .find(|ty| ty.name == "RootSource")
+            .unwrap();
+        assert_eq!(
+            super::interface_type_arguments_in_target(program, root, source),
+            Some(vec![JavaType::Named {
+                name: "T".into(),
+                args: vec![]
+            }])
         );
     }
 

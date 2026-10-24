@@ -1,28 +1,13 @@
 //! Exact coefficient/scale operations. Binary floating point enters only at
 //! explicit constructors/conversions, never in decimal rounding or addition.
+use super::numeric_text::java_numeric_decimal_digit as digit;
 use super::{ArithmeticException, BigDecimal, BigInteger, NumberFormatException, RoundingMode};
 use num_bigint::{BigInt, Sign};
+use num_integer::Integer;
 use std::cmp::Ordering;
 
 fn invalid(message: impl Into<String>) -> NumberFormatException {
     NumberFormatException(Some(message.into().encode_utf16().collect()))
-}
-
-// Character.digit(char, 10): BigDecimal's String parser consumes UTF-16 chars,
-// so supplementary decimal digits are not accepted as a surrogate pair.
-fn digit(character: u16) -> Option<u8> {
-    const ZEROS: &[u32] = &[
-        0x0030, 0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66,
-        0x0ce6, 0x0d66, 0x0de6, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946,
-        0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900, 0xa9d0,
-        0xa9f0, 0xaa50, 0xabf0, 0xff10,
-    ];
-    let code = character as u32;
-    ZEROS.iter().find_map(|zero| {
-        code.checked_sub(*zero)
-            .filter(|value| *value < 10)
-            .map(|value| value as u8)
-    })
 }
 
 pub(super) fn parse(value: &str) -> Result<BigDecimal, NumberFormatException> {
@@ -99,7 +84,7 @@ pub(super) fn parse_units(
     if negative {
         coefficient = -coefficient;
     }
-    Ok(BigDecimal { coefficient, scale })
+    Ok(BigDecimal::from_parts(coefficient, scale))
 }
 
 pub(super) fn from_double(value: f64) -> Result<BigDecimal, NumberFormatException> {
@@ -113,10 +98,7 @@ pub(super) fn from_double(value: f64) -> Result<BigDecimal, NumberFormatExceptio
         significand |= 1u64 << 52;
     }
     if significand == 0 {
-        return Ok(BigDecimal {
-            coefficient: BigInt::from(0),
-            scale: 0,
-        });
+        return Ok(BigDecimal::from_parts(BigInt::from(0), 0));
     }
     let mut exponent = if encoded_exponent == 0 {
         -1074
@@ -139,7 +121,7 @@ pub(super) fn from_double(value: f64) -> Result<BigDecimal, NumberFormatExceptio
     if bits >> 63 != 0 {
         coefficient = -coefficient;
     }
-    Ok(BigDecimal { coefficient, scale })
+    Ok(BigDecimal::from_parts(coefficient, scale))
 }
 
 fn ten_power(exponent: i64, coefficient_bits: u64) -> Result<BigInt, ArithmeticException> {
@@ -188,7 +170,7 @@ pub(super) fn add(
             "BigInteger would overflow supported range",
         ));
     }
-    Ok(BigDecimal { coefficient, scale })
+    Ok(BigDecimal::from_parts(coefficient, scale))
 }
 
 pub(super) fn set_scale(
@@ -196,31 +178,43 @@ pub(super) fn set_scale(
     scale: i32,
     mode: RoundingMode,
 ) -> Result<BigDecimal, ArithmeticException> {
-    if scale >= value.scale {
-        return Ok(BigDecimal {
-            coefficient: scale_up(
+    if scale == value.scale {
+        return Ok(value.clone());
+    }
+    if scale > value.scale {
+        return Ok(BigDecimal::from_parts(
+            scale_up(
                 &value.coefficient,
                 i64::from(scale) - i64::from(value.scale),
             )?,
             scale,
-        });
+        ));
     }
     if value.coefficient.sign() == Sign::NoSign {
-        return Ok(BigDecimal {
-            coefficient: value.coefficient.clone(),
-            scale,
-        });
+        return Ok(BigDecimal::from_parts(value.coefficient.clone(), scale));
     }
     let divisor = ten_power(i64::from(value.scale) - i64::from(scale), 1)?;
-    let mut quotient = &value.coefficient / &divisor;
-    let remainder = &value.coefficient % &divisor;
+    let coefficient = rounded_quotient(&value.coefficient, &divisor, mode)?;
+    Ok(BigDecimal::from_parts(coefficient, scale))
+}
+
+/// One rounding authority for scale changes and decimal division. Quotients
+/// truncate toward zero first; rounding then uses the exact signed remainder.
+fn rounded_quotient(
+    dividend: &BigInt,
+    divisor: &BigInt,
+    mode: RoundingMode,
+) -> Result<BigInt, ArithmeticException> {
+    check_divisor(dividend, divisor)?;
+    let (mut quotient, remainder) = dividend.div_rem(divisor);
     if remainder.sign() != Sign::NoSign {
         let half = (remainder.magnitude() << 1usize).cmp(divisor.magnitude());
+        let negative = dividend.sign() != divisor.sign();
         let increment = match mode {
             RoundingMode::UP => true,
             RoundingMode::DOWN => false,
-            RoundingMode::CEILING => value.coefficient.sign() != Sign::Minus,
-            RoundingMode::FLOOR => value.coefficient.sign() == Sign::Minus,
+            RoundingMode::CEILING => !negative,
+            RoundingMode::FLOOR => negative,
             RoundingMode::HALF_UP => half != Ordering::Less,
             RoundingMode::HALF_DOWN => half == Ordering::Greater,
             RoundingMode::HALF_EVEN => {
@@ -229,17 +223,117 @@ pub(super) fn set_scale(
             RoundingMode::UNNECESSARY => return Err(ArithmeticException("Rounding necessary")),
         };
         if increment {
-            quotient += if value.coefficient.sign() == Sign::Minus {
-                -1
-            } else {
-                1
-            };
+            quotient += if negative { -1 } else { 1 };
         }
     }
-    Ok(BigDecimal {
-        coefficient: quotient,
-        scale,
-    })
+    Ok(quotient)
+}
+
+fn check_divisor(dividend: &BigInt, divisor: &BigInt) -> Result<(), ArithmeticException> {
+    if divisor.sign() == Sign::NoSign {
+        return Err(ArithmeticException(if dividend.sign() == Sign::NoSign {
+            "Division undefined"
+        } else {
+            "Division by zero"
+        }));
+    }
+    Ok(())
+}
+
+pub(super) fn divide_scaled(
+    left: &BigDecimal,
+    right: &BigDecimal,
+    scale: i32,
+    mode: RoundingMode,
+) -> Result<BigDecimal, ArithmeticException> {
+    let raise = i64::from(right.scale) - i64::from(left.scale) + i64::from(scale);
+    if right.coefficient.sign() == Sign::NoSign {
+        // Rounded overloads reach integer division, unlike exact divide's
+        // explicit zero check. Preserve the JDK's observable compact/inflated
+        // error messages without using bounded arithmetic for the result.
+        let compact = left.coefficient.bits() <= 63
+            && if raise > 0 {
+                raise < 19 && (&left.coefficient * BigInt::from(10).pow(raise as u32)).bits() <= 63
+            } else {
+                -raise < 19
+            };
+        return Err(ArithmeticException(if compact {
+            "/ by zero"
+        } else {
+            "BigInteger divide by zero"
+        }));
+    }
+    if left.coefficient.sign() == Sign::NoSign {
+        return Ok(BigDecimal::from_parts(BigInt::from(0), scale));
+    }
+    // q * 10^-scale = (a * 10^-sa) / (b * 10^-sb).
+    let coefficient = if raise >= 0 {
+        rounded_quotient(
+            &scale_up(&left.coefficient, raise)?,
+            &right.coefficient,
+            mode,
+        )?
+    } else {
+        rounded_quotient(
+            &left.coefficient,
+            &scale_up(&right.coefficient, -raise)?,
+            mode,
+        )?
+    };
+    Ok(BigDecimal::from_parts(coefficient, scale))
+}
+
+pub(super) fn divide_exact(
+    left: &BigDecimal,
+    right: &BigDecimal,
+) -> Result<BigDecimal, ArithmeticException> {
+    check_divisor(&left.coefficient, &right.coefficient)?;
+    let preferred = i64::from(left.scale) - i64::from(right.scale);
+    if left.coefficient.sign() == Sign::NoSign {
+        return Ok(BigDecimal::from_parts(
+            BigInt::from(0),
+            preferred.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        ));
+    }
+    let common = left.coefficient.gcd(&right.coefficient);
+    let numerator = &left.coefficient / &common;
+    let mut denominator = (&right.coefficient / &common).magnitude().clone();
+    let twos = denominator.trailing_zeros().expect("nonzero divisor");
+    denominator >>= twos;
+    let five = num_bigint::BigUint::from(5u8);
+    let mut fives = 0u64;
+    loop {
+        let (quotient, remainder) = denominator.div_rem(&five);
+        if remainder != num_bigint::BigUint::from(0u8) {
+            break;
+        }
+        denominator = quotient;
+        fives += 1;
+    }
+    if denominator != num_bigint::BigUint::from(1u8) {
+        return Err(ArithmeticException(
+            "Non-terminating decimal expansion; no exact representable decimal result.",
+        ));
+    }
+    // A reduced rational has a finite decimal expansion iff its denominator
+    // has only factors 2 and 5. Use the minimum extra scale and multiply only
+    // the missing factors, not a larger 10^k intermediate.
+    let extra = twos.max(fives);
+    let scale = preferred + extra as i64;
+    let scale = i32::try_from(scale).map_err(|_| {
+        ArithmeticException(if scale > i64::from(i32::MAX) {
+            "Underflow"
+        } else {
+            "Overflow"
+        })
+    })?;
+    let mut coefficient = numerator << (extra - twos);
+    coefficient *= BigInt::from(5).pow((extra - fives) as u32);
+    if right.coefficient.sign() == Sign::Minus {
+        coefficient = -coefficient;
+    }
+    let coefficient = BigInteger::checked(coefficient)?.0.payload().clone();
+    Ok(BigDecimal::from_parts(coefficient, scale))
 }
 
 pub(super) fn format(value: &BigDecimal) -> String {
@@ -288,6 +382,45 @@ pub(super) fn float_value(value: &BigDecimal) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn division_reuses_exact_rounding_and_preferred_scale() {
+        let p = |s| parse(s).unwrap();
+        for (a, b, expected) in [
+            ("1.00", "2", "0.50"),
+            ("2.00", "2.0", "1.0"),
+            ("-1", "8", "-0.125"),
+            ("3", "-32", "-0.09375"),
+            ("0.00", "2.0", "0.0"),
+        ] {
+            assert_eq!(format(&divide_exact(&p(a), &p(b)).unwrap()), expected);
+        }
+        assert_eq!(
+            format(&divide_scaled(&p("-5"), &p("-2"), 0, RoundingMode::HALF_EVEN).unwrap()),
+            "2"
+        );
+        assert_eq!(
+            format(&divide_scaled(&p("5"), &p("-2"), 0, RoundingMode::FLOOR).unwrap()),
+            "-3"
+        );
+        assert_eq!(
+            divide_exact(&p("1"), &p("3")).unwrap_err().to_string(),
+            "Non-terminating decimal expansion; no exact representable decimal result."
+        );
+        assert_eq!(
+            divide_exact(&p("1"), &p("0")).unwrap_err().to_string(),
+            "Division by zero"
+        );
+        assert_eq!(
+            divide_exact(&p("0"), &p("0")).unwrap_err().to_string(),
+            "Division undefined"
+        );
+        assert_eq!(
+            divide_scaled(&p("1"), &p("3"), 4, RoundingMode::UNNECESSARY)
+                .unwrap_err()
+                .to_string(),
+            "Rounding necessary"
+        );
+    }
     #[test]
     fn exact_binary_constructor_is_not_shortest_decimal_parsing() {
         let exact = from_double(0.1).unwrap();

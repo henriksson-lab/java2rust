@@ -987,10 +987,20 @@ pub enum NativeJavaStaticMethod {
         primitive: PrimitiveType,
         remainder: bool,
     },
+    IntegralCompare {
+        primitive: PrimitiveType,
+        unsigned: bool,
+    },
+    IntegralSignum {
+        primitive: PrimitiveType,
+    },
     IntegerToUnsignedLong,
     IntegralFormat {
         primitive: PrimitiveType,
         radix: u32,
+    },
+    IntegralToString {
+        primitive: PrimitiveType,
     },
     MathFloorDiv {
         primitive: PrimitiveType,
@@ -1305,6 +1315,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method:
                 NativeJavaStaticMethod::IntegerParseInt
                 | NativeJavaStaticMethod::FloatingCompare { .. }
+                | NativeJavaStaticMethod::IntegralCompare { .. }
+                | NativeJavaStaticMethod::IntegralSignum { .. }
                 | NativeJavaStaticMethod::IntegralBitCount { .. }
                 | NativeJavaStaticMethod::IntegralZeroCount { .. }
                 | NativeJavaStaticMethod::MathRound {
@@ -1472,6 +1484,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaStaticMethod::StringValueOf
                 | NativeJavaStaticMethod::ObjectsToString
                 | NativeJavaStaticMethod::IntegralFormat { .. }
+                | NativeJavaStaticMethod::IntegralToString { .. }
                 | NativeJavaStaticMethod::FloatingToString { .. },
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
@@ -5357,6 +5370,16 @@ fn plan_native_java_receiver_call<'a>(
     facts: &FactSet,
 ) -> Option<CallTargetPlan<'a>> {
     let receiver_ty = infer_expr_type(receiver, types);
+    // A declared JDK Optional owns its get/isPresent/orElse operations even
+    // when its payload is a parsed source class. Payload emission ownership
+    // must not turn Optional<T>.get into a method call on T.
+    if receiver_source_type_name(receiver, types)
+        .is_some_and(|owner| !java_type_owner_is_parsed_source(owner, types, facts))
+        && let Some(method) =
+            native_optional_receiver_method(receiver, &receiver_ty, name, arg_count, types)
+    {
+        return Some(CallTargetPlan::NativeJavaInstance { receiver, method });
+    }
     let element = crate::types::optional_element_type(&receiver_ty);
     if [&receiver_ty, element.as_ref().unwrap_or(&receiver_ty)]
         .into_iter()
@@ -6181,6 +6204,14 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
                 primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
                 remainder: matches!(name, "remainderUnsigned" | "remainder_unsigned"),
             },
+        ("Integer" | "Long", "compare" | "compareUnsigned" | "compare_unsigned") =>
+            NativeJavaStaticMethod::IntegralCompare {
+                primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+                unsigned: name != "compare",
+            },
+        ("Integer" | "Long", "signum") => NativeJavaStaticMethod::IntegralSignum {
+            primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
+        },
         ("Integer", "toUnsignedLong" | "to_unsigned_long") => NativeJavaStaticMethod::IntegerToUnsignedLong,
         ("Math", "floorDiv" | "floor_div") => NativeJavaStaticMethod::MathFloorDiv {
             primitive: math_binary_overload_primitive(args, types),
@@ -6196,6 +6227,9 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
             | "toBinaryString" | "to_binary_string") => NativeJavaStaticMethod::IntegralFormat {
             primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
             radix: match name { "toHexString" | "to_hex_string" => 16, "toOctalString" | "to_octal_string" => 8, _ => 2 },
+        },
+        ("Integer" | "Long", "toString" | "to_string") => NativeJavaStaticMethod::IntegralToString {
+            primitive: if receiver_simple == "Long" { PrimitiveType::Long } else { PrimitiveType::Int },
         },
         ("Integer", "decode") => NativeJavaStaticMethod::IntegerDecode,
         ("Integer" | "Long", "bitCount" | "bit_count") => NativeJavaStaticMethod::IntegralBitCount {
@@ -7638,16 +7672,8 @@ pub(crate) fn specialize_resolved_source_call_argument_plan(
 }
 
 fn resolved_call_boundary_arg_shape(call: &ResolvedCall, index: usize) -> RustSlotShape {
-    let java_ty = call
-        .arg_target_types
-        .get(index)
+    let java_ty = resolved_call_arg_target_type(call, index)
         .cloned()
-        .or_else(|| {
-            call.arg_coercions
-                .iter()
-                .find(|coercion| coercion.arg_index == index)
-                .map(|coercion| coercion.target.clone())
-        })
         .unwrap_or_else(|| JavaType::Unknown(format!("{}:arg{index}", call.rust_name)));
     RustSlotShape::for_storage(java_ty)
 }
@@ -7656,12 +7682,13 @@ pub(crate) fn resolved_call_arg_target_type(
     call: &ResolvedCall,
     index: usize,
 ) -> Option<&JavaType> {
-    call.arg_target_types.get(index).or_else(|| {
-        call.arg_coercions
-            .iter()
-            .find(|coercion| coercion.arg_index == index)
-            .map(|coercion| &coercion.target)
-    })
+    // Coercion evidence describes each actual argument after overload and
+    // variable-arity selection; arg_target_types retains formal array slots.
+    call.arg_coercions
+        .iter()
+        .find(|coercion| coercion.arg_index == index)
+        .map(|coercion| &coercion.target)
+        .or_else(|| call.arg_target_types.get(index))
 }
 
 pub fn plan_call_arguments(
@@ -7741,6 +7768,26 @@ pub fn plan_call_arguments_with_facts(
         .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
 }
 
+pub(crate) fn native_integral_text_argument_plan(
+    method: NativeJavaStaticMethod,
+    arg_count: usize,
+) -> Option<ArgumentLoweringPlan> {
+    let primitive = match method {
+        NativeJavaStaticMethod::IntegralFormat { primitive, .. } if arg_count == 1 => primitive,
+        NativeJavaStaticMethod::IntegralToString { primitive } if matches!(arg_count, 1 | 2) => {
+            primitive
+        }
+        _ => return None,
+    };
+    let mut shapes = vec![RustSlotShape::for_storage(JavaType::Primitive(primitive))];
+    if arg_count == 2 {
+        shapes.push(RustSlotShape::for_storage(JavaType::Primitive(
+            PrimitiveType::Int,
+        )));
+    }
+    Some(ArgumentLoweringPlan::Shaped(shapes))
+}
+
 pub fn plan_call_arguments_with_facts_and_args(
     receiver: Option<&Expr>,
     name: &str,
@@ -7751,26 +7798,13 @@ pub fn plan_call_arguments_with_facts_and_args(
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
-    if arg_count == 1
-        && matches!(
-            name,
-            "toHexString"
-                | "to_hex_string"
-                | "toOctalString"
-                | "to_octal_string"
-                | "toBinaryString"
-                | "to_binary_string"
-        )
-        && let CallTargetPlan::NativeJavaStatic {
-            method: NativeJavaStaticMethod::IntegralFormat { primitive, .. },
-        } =
-            plan_call_target_with_facts_and_arity(receiver, name, arg_count, resolved, facts, types)
+    if let CallTargetPlan::NativeJavaStatic { method } =
+        plan_call_target_with_facts_and_arity(receiver, name, arg_count, resolved, facts, types)
+        && let Some(plan) = native_integral_text_argument_plan(method, arg_count)
     {
         // The native formal, not the actual char/byte/boxed carrier, owns
         // widening and checked unboxing. Share the plan with effect analysis.
-        return ArgumentLoweringPlan::Shaped(vec![RustSlotShape::for_storage(
-            JavaType::Primitive(primitive),
-        )]);
+        return plan;
     }
     if name == "scalb"
         && arg_count == 2
@@ -9695,6 +9729,37 @@ pub fn plan_constructor_arguments(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn selected_argument_targets_precede_formal_varargs_arrays() {
+        use crate::java_ir::*;
+        let row = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)));
+        let matrix = JavaType::Array(Box::new(row.clone()));
+        let mut call = ResolvedCall {
+            declaring_type: "Rows".into(),
+            rust_name: "accept".into(),
+            kind: CallKind::Static,
+            type_args: vec![],
+            return_type: JavaType::Void,
+            arg_target_types: vec![matrix.clone()],
+            arg_coercions: vec![JavaCoercionEvidence {
+                arg_index: 0,
+                actual: row.clone(),
+                target: row.clone(),
+                kind: JavaCoercionKind::Identity,
+            }],
+        };
+        assert_eq!(super::resolved_call_arg_target_type(&call, 0), Some(&row));
+        assert_eq!(
+            super::resolved_call_boundary_arg_shape(&call, 0).java_ty,
+            row
+        );
+        call.arg_coercions.clear();
+        assert_eq!(
+            super::resolved_call_arg_target_type(&call, 0),
+            Some(&matrix)
+        );
+    }
+
+    #[test]
     fn arity_only_external_constructor_preserves_actual_argument_carrier() {
         let parsed = crate::external_packs::parse_external_pack_manifest(
             "external-pack dep.value dep.Value rust-crate-mapping mapped target=value_runtime\nexternal-pack-constructor dep.value dep.Value 1 mapped rust-type=Value rust=new rust-result=true\n",
@@ -10070,6 +10135,7 @@ mod tests {
         facts
             .external_api_argument_effect_facts
             .push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: "accept".to_string(),
                 receiver_type: Some("FacadeOwner".to_string()),
                 arg_count: Some(1),

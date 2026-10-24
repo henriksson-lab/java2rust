@@ -887,6 +887,51 @@ impl_java_display_element!(i32, String);
 }
 
 #[test]
+fn shared_merger_preserves_single_source_macro_impls_after_prelude_stripping() {
+    let dir = temp_dir("single_source_macro_family");
+    let generated = dir.join("generated");
+    let raw = dir.join("raw");
+    fs::create_dir_all(&generated).unwrap();
+    fs::create_dir_all(&raw).unwrap();
+    let declaration = "pub trait TextElement { fn text(&self) -> String; }\n";
+    let family = r#"
+macro_rules! text_elements {
+    ($($ty:ty),* $(,)?) => {
+        $(impl TextElement for $ty { fn text(&self) -> String { self.to_string() } })*
+    };
+}
+text_elements!(i32, bool);
+"#;
+    let source = "pub struct Primary;\nimpl Primary { pub fn text() -> String { 7i32.text() } }\n";
+    fs::write(
+        raw.join("00001_Primary.rs"),
+        format!("{declaration}{family}{source}"),
+    )
+    .unwrap();
+    fs::write(generated.join("00001_Primary.rs"), source).unwrap();
+    fs::write(dir.join("shared.rs"), declaration).unwrap();
+    fs::write(dir.join("shared-types.tsv"), "TextElement\n").unwrap();
+    let (shared, _) = run_merger(&dir);
+    let probe = dir.join("probe.rs");
+    fs::write(&probe, format!("{}\n{}\nfn main() {{ assert_eq!(Primary::text(), \"7\"); assert_eq!(true.text(), \"true\"); }}\n",
+        fs::read_to_string(shared).unwrap(), fs::read_to_string(generated.join("00001_Primary.rs")).unwrap())).unwrap();
+    let executable = dir.join("probe");
+    let compiled = Command::new("rustc")
+        .arg("--edition=2024")
+        .arg(&probe)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(Command::new(executable).status().unwrap().success());
+}
+
+#[test]
 fn shared_merger_does_not_duplicate_impls_supplied_by_an_existing_macro_family() {
     let dir = temp_dir("existing_macro_impl_family");
     let generated = dir.join("generated");

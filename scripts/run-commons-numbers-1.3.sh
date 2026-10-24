@@ -4,9 +4,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 checkout="${NUMBERS_SOURCE_ROOT:-$repo_root/.tmp/commons-numbers-1.3-src}"
 module="${NUMBERS_MODULE:-primes}"
 case "$module" in
-  primes|rootfinder|core|complex) modules=("$module") ;;
-  quaternion|angle) modules=(core "$module") ;;
-  *) echo 'NUMBERS_MODULE must be primes, rootfinder, core, complex, quaternion or angle' >&2; exit 1 ;;
+  primes|rootfinder|core|complex|arrays) modules=("$module") ;;
+  quaternion|angle|fraction) modules=(core "$module") ;;
+  *) echo 'NUMBERS_MODULE must be primes, rootfinder, core, complex, quaternion, angle, fraction or arrays' >&2; exit 1 ;;
 esac
 bash "$repo_root/scripts/prepare-commons-numbers-1.3.sh"
 manifest="$repo_root/scripts/focus-sets/commons-numbers-1.3-all.txt"
@@ -25,6 +25,18 @@ for selected in "${modules[@]}"; do
     expected_count=$((expected_count + 1))
   done < "$manifest"
 done
+if [[ -n "${NUMBERS_EXTRA_SOURCE:-}" ]]; then
+  # An explicitly selected caller-side source extension, separate from the
+  # pinned production manifest. Never modify a production Java source.
+  [[ -f "$NUMBERS_EXTRA_SOURCE" && "$NUMBERS_EXTRA_SOURCE" == *.java ]] || {
+    echo 'NUMBERS_EXTRA_SOURCE must name a Java source file' >&2; exit 1;
+  }
+  mkdir -p "$staging/acceptance"
+  extra_target="$staging/acceptance/$(basename "$NUMBERS_EXTRA_SOURCE")"
+  cp "$NUMBERS_EXTRA_SOURCE" "$extra_target"
+  cmp "$NUMBERS_EXTRA_SOURCE" "$extra_target"
+  expected_count=$((expected_count + 1))
+fi
 source_count="$(find "$staging" -type f -name '*.java' | wc -l | tr -d ' ')"
 if [[ "$source_count" != "$expected_count" ]]; then
   echo "Expected $expected_count source files for $module including dependencies; found $source_count" >&2

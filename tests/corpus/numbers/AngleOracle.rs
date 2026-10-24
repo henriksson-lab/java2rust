@@ -20,12 +20,7 @@ fn angle(unit: usize, value: f64) -> AngleValue {
     }
 }
 fn boxed(value: &AngleValue) -> Box<dyn Any> {
-    match value {
-        AngleValue::Angle(value) => Box::new(value.clone()),
-        AngleValue::Angle_Turn(value) => Box::new(value.clone()),
-        AngleValue::Angle_Rad(value) => Box::new(value.clone()),
-        AngleValue::Angle_Deg(value) => Box::new(value.clone()),
-    }
+    value.__java_clone_to_any()
 }
 fn units(text: Option<&JavaString>) -> String {
     text.map(|text| {

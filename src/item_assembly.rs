@@ -7626,7 +7626,7 @@ mod tests {
     }
 
     #[test]
-    fn method_params_render_collections_sort_comparator_param_as_callback() {
+    fn method_params_keep_collections_sort_comparator_value_abi() {
         let parsed = crate::parser::parse_java_source(
             r#"
 import java.util.ArrayList;
@@ -7668,11 +7668,7 @@ class SortUse {
                 .iter()
                 .find(|param| param.name.contains("comparator"))
                 .map(|param| &param.ty),
-            Some(&RustType::ImplFnTrait {
-                trait_name: "FnMut".to_string(),
-                params: vec![RustType::String, RustType::String],
-                return_type: Some(Box::new(RustType::I32)),
-            })
+            Some(&RustType::Named("Comparator".into()))
         );
     }
 
@@ -13743,15 +13739,15 @@ fn method_return_type_from_shape(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> Option<RustType> {
-    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
-        return Some(ty);
-    }
     if let Some(shape) = return_shape.as_ref() {
         return Some(rust_type_for_slot_with_optional_representations(
             shape,
             facts,
             representations,
         ));
+    }
+    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
+        return Some(ty);
     }
     if rust_crate_mapped_external_java_type(&method.return_type, facts) {
         return Some(rust_type_for_java_type_with_facts(

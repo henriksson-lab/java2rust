@@ -338,6 +338,7 @@ pub enum Coercion {
         trait_name: String,
     },
     EraseObject,
+    CloneHierarchyToErasedObject,
     CloneDynTraitToErasedObject {
         trait_name: String,
     },
@@ -489,6 +490,7 @@ impl ShapeCoercionPlan {
         if matches!(
             self.dispatch(),
             DispatchCoercionPolicy::CloneDynTraitToErasedObject { .. }
+                | DispatchCoercionPolicy::CloneHierarchyToErasedObject
         ) {
             // The virtual operation already returns an owned erased handle.
             // Neither cloning a borrowed Box nor another ownership recovery
@@ -847,6 +849,9 @@ impl DispatchCoercionPolicy {
                 coercions
             }
             DispatchCoercionPolicy::EraseObject => vec![Coercion::EraseObject],
+            DispatchCoercionPolicy::CloneHierarchyToErasedObject => {
+                vec![Coercion::CloneHierarchyToErasedObject]
+            }
             DispatchCoercionPolicy::CloneDynTraitToErasedObject { trait_name } => {
                 vec![Coercion::CloneDynTraitToErasedObject {
                     trait_name: trait_name.clone(),
@@ -3096,6 +3101,55 @@ pub(crate) fn unwrap_optional_shared_value(expr: RustExpr) -> RustExpr {
 
 pub(crate) fn unwrap_java_null_receiver_projection(expr: RustExpr) -> RustExpr {
     method_expect_projection(expr, "Java null receiver")
+}
+
+pub(crate) fn java_null_check_with_exception_projection(
+    value: RustExpr,
+    exception: RustExpr,
+) -> RustExpr {
+    receiver_method_call_projection_exact(
+        value,
+        "unwrap_or_else",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: vec![],
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(RustExpr::shaped(
+                RustExprShape::ExplicitJavaNullFailure,
+                function_call_projection(
+                    RustExpr::path(["std", "panic", "panic_any"]),
+                    vec![exception],
+                ),
+            ))),
+        }],
+    )
+}
+
+pub(crate) fn explicit_java_null_failure(args: &[RustExpr]) -> Option<&RustExpr> {
+    let [
+        RustExpr::Closure {
+            params,
+            body: RustClosureBody::Expr(body),
+            ..
+        },
+    ] = args
+    else {
+        return None;
+    };
+    if !params.is_empty() || body.recorded_shape() != Some(RustExprShape::ExplicitJavaNullFailure) {
+        return None;
+    }
+    let RustExpr::Call { function, args } = body.unshaped() else {
+        return None;
+    };
+    if !matches!(function.unshaped(), RustExpr::Path(path) if path.iter().map(String::as_str).eq(["std", "panic", "panic_any"]))
+    {
+        return None;
+    }
+    match args.as_slice() {
+        [exception] => Some(exception),
+        _ => None,
+    }
 }
 
 /// The catchable counterpart of receiver projection, shared by ordinary and
@@ -6316,6 +6370,27 @@ pub(crate) fn primitive_compare_to_projection(receiver: RustExpr, other: RustExp
     )
 }
 
+pub(crate) fn integral_compare_projection(
+    left: RustExpr,
+    right: RustExpr,
+    primitive: PrimitiveType,
+    unsigned: bool,
+) -> RustExpr {
+    let ty = match (primitive, unsigned) {
+        (PrimitiveType::Long, false) => "i64",
+        (PrimitiveType::Long, true) => "u64",
+        (_, false) => "i32",
+        (_, true) => "u32",
+    };
+    let cast = |expr| RustExpr::Cast {
+        expr: Box::new(parenthesize_raw_primitive_number_cast_operand(expr)),
+        ty: ty.into(),
+    };
+    // The shared comparison kernel evaluates each operand once and returns
+    // exactly -1, 0 or 1. Unsigned casts reinterpret the selected Java width.
+    primitive_compare_to_projection(cast(left), cast(right))
+}
+
 pub(crate) fn typed_primitive_compare_projection(
     left: RustExpr,
     right: RustExpr,
@@ -7058,6 +7133,7 @@ pub(crate) fn java_optionality_already_discharged(expr: &RustExpr) -> bool {
         RustExpr::MethodCall { method, args, .. } => {
             (method == "unwrap" && args.is_empty())
                 || (method == "expect" && is_java_null_receiver_expect_args(args))
+                || (method == "unwrap_or_else" && explicit_java_null_failure(args).is_some())
         }
         // `opt.ok_or_else(|| ..)?` -- the `?` discharges it.
         RustExpr::Try(inner) => matches!(
@@ -7068,7 +7144,7 @@ pub(crate) fn java_optionality_already_discharged(expr: &RustExpr) -> bool {
     }
 }
 
-fn is_java_null_receiver_expect_args(args: &[RustExpr]) -> bool {
+pub(crate) fn is_java_null_receiver_expect_args(args: &[RustExpr]) -> bool {
     matches!(args, [RustExpr::Literal(message)]
         if message.trim_matches('"') == JAVA_NULL_RECEIVER_EXPECT)
 }
@@ -14202,6 +14278,17 @@ fn rendered_deref_string_view_projection(rendered: &str) -> Option<RustExpr> {
 
 pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
     match check {
+        InstanceOfCheck::OptionalPayload { check } => method_call_projection(
+            zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
+            "is_some_and",
+            vec![single_param_closure_expr(
+                "__java_instanceof_payload",
+                instanceof_check_projection(
+                    RustExpr::Var("__java_instanceof_payload".into()),
+                    check,
+                ),
+            )],
+        ),
         InstanceOfCheck::ThrowableType {
             class_name,
             optional,
@@ -14392,6 +14479,17 @@ pub(crate) fn instanceof_pattern_downcast_ref_projection(
     check: &InstanceOfCheck,
 ) -> Option<RustExpr> {
     match check {
+        InstanceOfCheck::OptionalPayload { check } => Some(method_call_projection(
+            zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
+            "and_then",
+            vec![single_param_closure_expr(
+                "__java_instanceof_payload",
+                instanceof_pattern_downcast_ref_projection(
+                    RustExpr::Var("__java_instanceof_payload".into()),
+                    check,
+                )?,
+            )],
+        )),
         InstanceOfCheck::ClosedEnumVariant {
             enum_name,
             variant_name,
@@ -17018,6 +17116,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             vec![expr],
         ),
         Coercion::EraseObject => erased_object_box_projection(expr),
+        Coercion::CloneHierarchyToErasedObject => zero_arg_method_projection(
+            parenthesize_raw_method_receiver(expr),
+            "__java_clone_to_any",
+        ),
         Coercion::CloneDynTraitToErasedObject { .. } => {
             zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "clone_any")
         }

@@ -462,7 +462,7 @@ fn expr(value: &mut Expr, substitutions: &Substitutions) {
     }
 }
 
-fn java_type_text(ty: &JavaType) -> String {
+pub(crate) fn java_type_text(ty: &JavaType) -> String {
     match ty {
         JavaType::Void => "void".to_string(),
         JavaType::String => "java.lang.String".to_string(),

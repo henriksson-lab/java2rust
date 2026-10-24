@@ -1749,6 +1749,7 @@ impl ExternalPackTypeCapability {
 impl ExternalPackArgumentEffect {
     fn as_external_api_argument_effect_fact(&self) -> ExternalApiArgumentEffectFact {
         ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: self.method_name.to_string(),
             receiver_type: Some(self.receiver_type.to_string()),
             arg_count: self.arg_count,
@@ -1775,6 +1776,7 @@ impl ExternalPackFieldNullability {
 impl ExternalPackException {
     fn as_exception_fact(&self) -> ExceptionFact {
         ExceptionFact {
+            binary_name: None,
             type_name: self.type_name.to_string(),
             kind: self.kind,
             provenance: FactProvenance::ExternalLibraryPack,
@@ -2281,6 +2283,7 @@ fn push_external_pack_fact(
             .push(ExternalCrateTypeMappingFact {
                 type_name: package_prefix.to_string(),
                 rust_type_name,
+                reference_identity_method: parsed_metadata.reference_identity_method,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
     }
@@ -3572,16 +3575,65 @@ fn push_external_pack_argument_effect_fact(
         push_external_pack_parse_error(diagnostics, line_index, "invalid argument alias policy");
         return;
     };
-    let Some(parameter_type) = parse_external_argument_metadata(diagnostics, line_index, metadata)
+    // The facts/index already distinguish arities. Preserve that distinction
+    // in manifests too: different overloads may use the same parameter index
+    // for unrelated Java types (e.g. an enum versus an integer).
+    let mut arg_count = None;
+    let mut parameter_metadata = Vec::new();
+    let mut null_message = None;
+    for token in metadata {
+        if let Some(value) = token.strip_prefix("null-message=") {
+            if value.split("::").any(str::is_empty)
+                || null_message.replace(value.to_string()).is_some()
+            {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "invalid or duplicate null-message function",
+                );
+                return;
+            }
+        } else if let Some(value) = token.strip_prefix("args=") {
+            let Ok(count) = value.parse::<usize>() else {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "invalid argument method arity",
+                );
+                return;
+            };
+            if arg_count.replace(count).is_some() || parameter_index >= count {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "duplicate arity or argument index outside method arity",
+                );
+                return;
+            }
+        } else {
+            parameter_metadata.push(*token);
+        }
+    }
+    let Some(parameter_type) =
+        parse_external_argument_metadata(diagnostics, line_index, &parameter_metadata)
     else {
         return;
     };
+    if null_message.is_some() && parameter_nullability != NullabilityState::DefinitelyNonNull {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "null-message requires a definitely-non-null ABI argument",
+        );
+        return;
+    }
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: null_message,
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
-            arg_count: None,
+            arg_count,
             parameter_index,
             parameter_type,
             parameter_nullability,
@@ -3589,6 +3641,105 @@ fn push_external_pack_argument_effect_fact(
             alias_policy,
             provenance: FactProvenance::ExternalLibraryPack,
         });
+}
+
+#[cfg(test)]
+mod argument_null_message_tests {
+    use super::*;
+
+    #[test]
+    fn null_message_follows_the_selected_argument_fact() {
+        let parsed = parse_external_pack_manifest(
+            "external-pack probe dep.Owner rust-crate-mapping mapped target=probe_runtime\nexternal-pack-argument probe dep.Owner f 1 definitely-non-null read-only no-alias type=String args=2 null-message=probe_runtime::message\nexternal-pack-argument probe dep.Owner f 2 definitely-non-null read-only no-alias type=String args=3 null-message=probe_runtime::other\n",
+        );
+        assert!(
+            !parsed.diagnostics().has_errors(),
+            "{:?}",
+            parsed.diagnostics()
+        );
+        let mut facts = parsed.facts().clone();
+        assert_eq!(facts.external_api_argument_effect_facts.len(), 2);
+        for (owner, count, index, function) in [
+            ("dep.Owner", 2, 1, "probe_runtime::message"),
+            ("Owner", 3, 2, "probe_runtime::other"),
+        ] {
+            let effect = facts
+                .external_api_argument_effect_for_receiver_with_arity(
+                    Some(owner),
+                    "f",
+                    Some(count),
+                    index,
+                )
+                .unwrap();
+            assert_eq!(effect.null_message_function.as_deref(), Some(function));
+        }
+        let mut overridden = facts.external_api_argument_effect_facts[0].clone();
+        overridden.null_message_function = None;
+        // Even an otherwise identical contract from a later pack replaces
+        // the diagnostic. Equality with an older fact must not revive it.
+        facts
+            .external_api_argument_effect_facts
+            .push(overridden.clone());
+        let selected = facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some("dep.Owner"),
+                "f",
+                Some(2),
+                1,
+            )
+            .unwrap();
+        assert_eq!(selected.null_message_function, None);
+        overridden.provenance = FactProvenance::UserOverride;
+        facts
+            .external_api_argument_effect_facts
+            .push(overridden.clone());
+        let selected = facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some("dep.Owner"),
+                "f",
+                Some(2),
+                1,
+            )
+            .unwrap();
+        assert_eq!(selected, &overridden);
+        assert_eq!(selected.null_message_function, None);
+    }
+
+    #[test]
+    fn arity_erasure_rejects_conflicting_null_message_contracts() {
+        let parsed = parse_external_pack_manifest(
+            "external-pack probe dep.Owner rust-crate-mapping mapped target=probe_runtime\nexternal-pack-argument probe dep.Owner f 0 definitely-non-null read-only no-alias type=String args=1 null-message=probe_runtime::first\nexternal-pack-argument probe dep.Owner f 0 definitely-non-null read-only no-alias type=String args=2 null-message=probe_runtime::second\n",
+        );
+        assert!(!parsed.diagnostics().has_errors());
+        let mut facts = parsed.facts().clone();
+        assert!(
+            facts
+                .external_api_argument_effect_for_receiver(Some("dep.Owner"), "f", 0)
+                .is_none()
+        );
+        facts.external_api_argument_effect_facts[1].null_message_function =
+            Some("probe_runtime::first".into());
+        assert!(
+            facts
+                .external_api_argument_effect_for_receiver(Some("dep.Owner"), "f", 0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn invalid_null_message_metadata_does_not_publish_partial_argument_contracts() {
+        for metadata in [
+            "null-message=",
+            "null-message=probe::",
+            "null-message=a null-message=b",
+        ] {
+            let parsed = parse_external_pack_manifest(&format!(
+                "external-pack probe dep.Owner rust-crate-mapping mapped target=probe_runtime\nexternal-pack-argument probe dep.Owner f 0 definitely-non-null read-only no-alias type=String {metadata}\n"
+            ));
+            assert!(parsed.diagnostics().has_errors());
+            assert!(parsed.facts().external_api_argument_effect_facts.is_empty());
+        }
+    }
 }
 
 fn push_external_pack_ffi_handover_fact(
@@ -3719,6 +3870,7 @@ fn push_external_pack_exception_fact(
         return;
     };
     facts.exception_facts.push(ExceptionFact {
+        binary_name: None,
         type_name: type_name.to_string(),
         kind,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -4172,6 +4324,7 @@ fn parse_nullability_state(value: &str) -> Option<NullabilityState> {
 struct ExternalPackMetadata {
     rust_target: Option<String>,
     rust_type_name: Option<String>,
+    reference_identity_method: Option<String>,
     string_abi: crate::facts::ExternalStringAbi,
 }
 
@@ -4202,6 +4355,16 @@ fn parse_pack_metadata(
                 return None;
             }
             parsed.rust_type_name = Some(rust_type_name.to_string());
+        } else if let Some(method) = token.strip_prefix("reference-identity=") {
+            if method.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "reference-identity metadata must name an inherent Rust method",
+                );
+                return None;
+            }
+            parsed.reference_identity_method = Some(method.to_string());
         } else if let Some(abi) = token.strip_prefix("string-abi=") {
             parsed.string_abi = match abi {
                 "utf8" => crate::facts::ExternalStringAbi::Utf8,
@@ -4237,10 +4400,18 @@ fn parse_pack_metadata(
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack metadata; expected target=RustPath, rust-type=RustType, package=CargoPackage or path=DependencyPath",
+                "unrecognized external-pack metadata; expected target=RustPath, rust-type=RustType, reference-identity=RustMethod, package=CargoPackage or path=DependencyPath",
             );
             return None;
         }
+    }
+    if parsed.reference_identity_method.is_some() && parsed.rust_type_name.is_none() {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "reference-identity requires an explicit rust-type mapping",
+        );
+        return None;
     }
     Some(parsed)
 }
@@ -30526,6 +30697,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     let mut facts = ["Class", "java.lang.Class"]
         .into_iter()
         .map(|receiver_type| ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "forName".to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
@@ -30545,6 +30717,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             "then_comparing_int",
         ] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: Some(1),
@@ -30559,6 +30732,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     }
     for receiver_type in ["Pattern", "JavaUtilRegexPattern", "java.util.regex.Pattern"] {
         facts.push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "matcher".to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
@@ -30573,6 +30747,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     for receiver_type in ["ObjectOutputStream", "java.io.ObjectOutputStream"] {
         for method_name in ["writeObject", "write_object"] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: Some(1),
@@ -30596,6 +30771,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     ] {
         for method_name in ["append"] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: Some(1),
@@ -30611,6 +30787,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     for receiver_type in ["Collections", "java.util.Collections"] {
         for (method_name, arg_count) in [("sort", 1), ("sort", 2), ("reverse", 1)] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: Some(arg_count),
@@ -30630,6 +30807,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         "java.awt.Component",
     ] {
         facts.push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "print".to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
@@ -30663,6 +30841,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         "java.io.FilterInputStream",
     ] {
         facts.push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "read".to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
@@ -30677,6 +30856,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         });
         for parameter_index in [1, 2] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: "read".to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: Some(3),
@@ -30696,6 +30876,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         "java.io.BufferedReader",
     ] {
         facts.push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "read".to_string(),
             receiver_type: Some(receiver_type.to_string()),
             arg_count: Some(1),
@@ -30729,6 +30910,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
     ] {
         for method_name in ["write", "write_3"] {
             facts.push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
                 arg_count: if method_name == "write_3" {
@@ -30747,6 +30929,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             });
             for parameter_index in [1, 2] {
                 facts.push(ExternalApiArgumentEffectFact {
+                    null_message_function: None,
                     method_name: method_name.to_string(),
                     receiver_type: Some(receiver_type.to_string()),
                     arg_count: Some(3),
@@ -30799,6 +30982,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             ] {
                 for parameter_index in 0..arg_count {
                     facts.push(ExternalApiArgumentEffectFact {
+                        null_message_function: None,
                         method_name: method_name.to_string(),
                         receiver_type: Some((*receiver_type).to_string()),
                         arg_count: Some(arg_count),
@@ -30814,6 +30998,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             if supports_addition {
                 for method_name in ["addAndGet", "add_and_get"] {
                     facts.push(ExternalApiArgumentEffectFact {
+                        null_message_function: None,
                         method_name: method_name.to_string(),
                         receiver_type: Some((*receiver_type).to_string()),
                         arg_count: Some(1),
@@ -30840,6 +31025,7 @@ pub fn java_platform_exception_facts() -> Vec<ExceptionFact> {
     ]
     .into_iter()
     .map(|(type_name, kind)| ExceptionFact {
+        binary_name: None,
         type_name: type_name.to_string(),
         kind,
         provenance: FactProvenance::BuiltinExternalModel,

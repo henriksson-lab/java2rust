@@ -283,7 +283,7 @@ external-pack-unsupported dep.variant dep.variant.Reader rawDecode requires runt
 ```
 
 `external-pack PACK TYPE_PREFIX MODE COVERAGE [target=RUST_PATH]
-[rust-type=RUST_TYPE] [package=CARGO_PACKAGE] [path=DEPENDENCY_PATH]
+[rust-type=RUST_TYPE] [reference-identity=RUST_METHOD] [package=CARGO_PACKAGE] [path=DEPENDENCY_PATH]
 [string-abi=utf8|utf16]` records
 library ownership and the default coverage state for types under that prefix.
 Supported modes are `external-fact-model`, `rust-crate-mapping`,
@@ -299,6 +299,19 @@ not the canonical place to name a type. `package=` and `path=` are
 dependency-assembly metadata consumed by generated-crate tooling; semantic
 analysis accepts them but does not use them for type, ownership, nullability,
 or lowering decisions.
+
+For an immutable mapped reference, `reference-identity=RUST_METHOD` requires
+an explicit `rust-type=` and an inherent `fn(&self, &Self) -> bool` method.
+The provider must implement Clone by retaining the same Java allocation;
+fresh constructor results retain distinct identities even when their values
+are equal. The comparison method is pure and infallible. This is separate
+from Rust PartialEq and Java equals, which still compare numeric/value
+semantics. Binary Java reference comparisons retain both carrier snapshots
+in Java evaluation order, including nullable borrowed getter results, before
+calling this method. A user override of the type mapping replaces its identity
+contract too; an omitted method does not inherit stale pack metadata. The
+java-math provider reuses the shared immutable-reference allocation kernel
+also used by Java String carriers.
 
 For Rust-crate mappings, `string-abi=utf16` opts Java String values into a
 unit-preserving native text ABI: constructor/receiver arguments use owned
@@ -434,13 +447,30 @@ back to erased objects without inspecting external Java source or lowering
 package names.
 
 `external-pack-argument PACK RECEIVER METHOD INDEX NULLABILITY MUTABILITY
-ALIAS_POLICY [type=TYPE]` records pack-owned parameter boundary facts for a
+ALIAS_POLICY [type=TYPE] [args=COUNT] [null-message=RUST_FUNCTION]` records pack-owned parameter boundary facts for a
 modeled method argument. Nullability uses the same values as API return
 nullability. Mutability uses `read-only`, `mutates-receiver`, or `unknown` for
 the argument value. Alias policy is one of `unknown`, `no-alias`, `borrowed`,
 or `escapes`. These facts are intentionally separate from receiver mutation:
 signature, ownership, lifetime, and coercion planning can ask one fact query
 about a parameter without rediscovering method-specific library rules.
+Optional `args=COUNT` restricts a fact to that method arity. It uses the existing
+arity-aware parameter index: e.g. index 1 may be an enum for a two-argument
+overload and an integer for a three-argument overload. Without `args=`, the
+fact remains a fallback across arities. An exact-arity fact takes precedence;
+invalid arities, duplicate `args=` and indices outside the stated arity are
+rejected. Same-arity overloads still need compatible parameter boundary facts;
+this option is not a new type-based overload dispatch mechanism.
+
+Optional `null-message=crate::function` supplies a zero-argument runtime function
+returning the exception message when a required ABI argument is null. It requires
+`definitely-non-null`; duplicate or empty function paths are rejected before
+publishing the argument contract. The function is called only on null failure.
+The diagnostic belongs to the selected argument-effect fact, including its owner,
+arity, parameter index and override precedence; replacing a contract without this
+option removes its diagnostic. Lowering replaces the required value's null check,
+preserving exceptions raised while evaluating the argument itself. For example,
+the java-math pack uses this for BigDecimal's dereference of a null rounding mode.
 
 `external-pack-exception PACK TYPE KIND` records pack-owned exception or error
 classification. `KIND` is `checked`, `unchecked`, or `unknown`. These facts are

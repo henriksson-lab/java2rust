@@ -8369,6 +8369,7 @@ fn fallback_static_call_uses_translated_signature_arg_shapes() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "fill".to_string(),
             receiver_type: None,
             arg_count: None,
@@ -39868,7 +39869,7 @@ class ExceptionContext {
 }
 
 #[test]
-fn source_object_varargs_forward_and_append_erased_arguments() {
+fn source_object_varargs_forward_and_pack_array_valued_elements() {
     let translation = translate_source(
         r#"
 class ObjectVarargsCaller {
@@ -39894,25 +39895,21 @@ class ExceptionContext {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("pub fn run(&mut self")
+        translation.rust.contains("pub fn run(&mut self")
             && translation
                 .rust
-                .contains(
-                    ".add_message(java_clone_erased_object_ref(&(pattern)), java_clone_optional_erased_object_vec_ref(&(args))",
-                )
+                .contains("ExceptionContext::add_message_with_outer")
+            && translation.rust.contains("std::rc::Rc::clone(&args)")
             && translation
                 .rust
-                .contains(
-                    ".add_message(java_clone_erased_object_ref(&(pattern)), { let mut __java_varargs",
-                )
-            && translation
+                .contains("vec![Some(Box::new(max) as Box<dyn std::any::Any>), Some(Box::new(args) as Box<dyn std::any::Any>)]")
+            && !translation
                 .rust
-                .contains("let mut __java_varargs = vec![Some(Box::new(max")
-            && translation
+                .contains("java_clone_erased_object_ref(&(args))")
+            && !translation.rust.contains("__java_varargs.extend")
+            && !translation
                 .rust
-                .contains("__java_varargs.extend(java_clone_optional_erased_object_vec_ref(&(args)))")
+                .contains("java_clone_optional_erased_object_vec_ref(&(args))")
             && !translation.rust.contains("args.as_slice()")
             && !translation.rust.contains("vec![max, args]")
             && !translation.rust.contains("compile_error!"),
@@ -39921,7 +39918,7 @@ class ExceptionContext {
     );
 
     cargo_check_generated_modules(
-        "source_object_varargs_forward_and_append_erased_arguments",
+        "source_object_varargs_forward_and_pack_array_valued_elements",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -39974,14 +39971,13 @@ class ExceptionContext {
     );
 
     assert!(
-        translation.rust.contains("__java_self.context.add_message")
-            && translation.rust.contains("max: Some(max.clone()")
+        translation.rust.contains("__java_self.context")
+            && translation.rust.contains(".borrow_mut().add_message(")
+            && translation.rust.contains("__java_self.max = Some(")
             && translation
                 .rust
-                .contains("let mut __java_varargs = vec![Some(Box::new(max)")
-            && translation.rust.contains(
-                "__java_varargs.extend(java_clone_optional_erased_object_vec_ref(&(args)))"
-            )
+                .contains("Some(Box::new(args) as Box<dyn std::any::Any>)")
+            && !translation.rust.contains("__java_varargs.extend")
             && !translation.rust.contains("__java_self.get_context()")
             && !translation.rust.contains("vec![max, args]")
             && !translation.rust.contains("compile_error!"),
@@ -49488,6 +49484,7 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "consume".to_string(),
             receiver_type: Some("NativeConsumer".to_string()),
             arg_count: None,

@@ -13,6 +13,7 @@ name = "java-math-runtime"
 version = "0.1.0"
 dependencies = [
  "num-bigint",
+ "num-integer",
 ]
 
 [[package]]

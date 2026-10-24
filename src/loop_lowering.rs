@@ -7,6 +7,13 @@ pub fn assemble_for_loop(
     body: Vec<RustStmt>,
     label: Option<String>,
 ) -> RustStmt {
+    // Rust's `while true` has unit type. Java's conditionless/constant-true
+    // for loop may be the only path to a non-void method's return.
+    if condition.as_ref().is_none_or(
+        |condition| matches!(condition.unshaped(), RustExpr::Literal(value) if value == "true"),
+    ) {
+        return RustStmt::Loop { label, body };
+    }
     if let Some(label) = label {
         let mut loop_body = Vec::new();
         loop_body.push(RustStmt::If {
@@ -40,6 +47,19 @@ pub(crate) fn continue_with_updates(update_exprs: &[RustExpr]) -> Vec<RustStmt> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconditional_for_keeps_divergence_and_its_label() {
+        for condition in [None, Some(RustExpr::Literal("true".into()))] {
+            for label in [None, Some("scan".to_string())] {
+                let body = vec![RustStmt::Continue(label.clone())];
+                assert_eq!(
+                    assemble_for_loop(condition.clone(), body.clone(), label.clone()),
+                    RustStmt::Loop { label, body },
+                );
+            }
+        }
+    }
 
     #[test]
     fn continue_with_updates_replays_updates_before_continue() {

@@ -73,21 +73,45 @@ impl ExternalExceptionConversion {
 pub(crate) fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
     let source_parent_arms = source_exception_parent_match_arms(facts);
-    let builtin_aliases = crate::stdlib::JDK_EXCEPTION_PARENTS
+    let builtin_aliases = crate::stdlib::JDK_EXCEPTION_BINARY_NAMES
         .iter()
-        .flat_map(|(child, parent)| [*child, *parent])
-        .chain([
-            "Throwable",
-            "Exception",
-            "Error",
-            "InterruptedException",
-            "ExecutionException",
-        ])
+        .map(|(short, binary)| format!("        {short:?} | {binary:?} => {binary:?},\n"))
+        .collect::<String>();
+    let source_aliases = facts
+        .exception_facts
+        .iter()
+        .filter_map(|fact| {
+            let binary = fact.binary_name.as_deref()?;
+            (fact.type_name != binary
+                && crate::stdlib::jdk_exception_binary_name(&fact.type_name).is_none())
+            .then(|| format!("        {:?} => {binary:?},\n", fact.type_name))
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|name| format!("{name:?}"))
-        .collect::<Vec<_>>()
-        .join(" | ");
+        .collect::<String>();
+    let builtin_parents = crate::stdlib::JDK_EXCEPTION_PARENTS
+        .iter()
+        .copied()
+        .chain([
+            ("RuntimeException", "Exception"),
+            ("Exception", "Throwable"),
+            ("Error", "Throwable"),
+            ("IOException", "Exception"),
+            ("InterruptedException", "Exception"),
+            ("ExecutionException", "Exception"),
+            ("ClassNotFoundException", "Exception"),
+            ("AssertionError", "Error"),
+            ("OutOfMemoryError", "Error"),
+            ("StackOverflowError", "Error"),
+        ])
+        .map(|(child, parent)| {
+            format!(
+                "        {:?} => Some({:?}),\n",
+                crate::stdlib::jdk_exception_binary_name(child).unwrap(),
+                crate::stdlib::jdk_exception_binary_name(parent).unwrap()
+            )
+        })
+        .collect::<String>();
     let mut item = r#"pub trait JavaInputStreamDispatch {
     fn identity(&self) -> *const ();
     fn available(&self) -> i32 { 0 }
@@ -301,57 +325,27 @@ where I: Iterator<Item = Result<T, E>>, F: FnMut(T) -> Result<U, E> {
     item.push_str(r#"
 fn java_exception_parent(class_name: &str) -> Option<&'static str> {
     match class_name {
-__SOURCE_EXCEPTION_PARENT_ARMS__        _ => match class_name.rsplit('.').next().unwrap_or(class_name) {
-            "ArrayIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
-            "ArrayStoreException" => Some("RuntimeException"),
-            "ArithmeticException" => Some("RuntimeException"),
-            "ClassCastException" => Some("RuntimeException"),
-            "ConcurrentModificationException" => Some("RuntimeException"),
-            "ExecutionException" => Some("Exception"),
-            "Exception" => Some("Throwable"),
-            "IllegalArgumentException" => Some("RuntimeException"),
-            "IllegalMonitorStateException" => Some("RuntimeException"),
-            "IllegalStateException" => Some("RuntimeException"),
-            "IndexOutOfBoundsException" => Some("RuntimeException"),
-            "InputMismatchException" => Some("NoSuchElementException"),
-            "InterruptedException" => Some("Exception"),
-            "IOException" => Some("Exception"),
-            "NegativeArraySizeException" => Some("RuntimeException"),
-            "NoSuchElementException" => Some("RuntimeException"),
-            "NullPointerException" => Some("RuntimeException"),
-            "NumberFormatException" => Some("IllegalArgumentException"),
-            "PatternSyntaxException" => Some("IllegalArgumentException"),
-            "StringIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
-            "UncheckedIOException" => Some("RuntimeException"),
-            "UnsupportedOperationException" => Some("RuntimeException"),
-            "RuntimeException" => Some("Exception"),
-            "Throwable" => Some("Object"),
-            "Error" => Some("Throwable"),
-            _ => None,
-        },
+__SOURCE_EXCEPTION_PARENT_ARMS____JDK_EXCEPTION_PARENT_ARMS__        "java.lang.Throwable" => Some("java.lang.Object"),
+        _ => None,
     }
 }
 
-fn java_exception_builtin_name(name: &str) -> &str {
-    // Only platform-qualified names have these short aliases. Do not merge
-    // an unrelated application exception merely because its leaf name agrees.
-    if !name.starts_with("java.") { return name; }
-    let simple = name.rsplit('.').next().unwrap_or(name);
-    match simple {
-        __JDK_EXCEPTION_ALIASES__ => simple,
+fn java_exception_runtime_name(name: &str) -> &str {
+    match name {
+__JDK_EXCEPTION_ALIASES____SOURCE_EXCEPTION_ALIASES__
         _ => name,
     }
 }
 
 fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
-    let target = java_exception_builtin_name(target);
-    let mut current = java_exception_builtin_name(actual);
+    let target = java_exception_runtime_name(target);
+    let mut current = java_exception_runtime_name(actual);
     if current == target { return true; }
     for _ in 0..32 {
         let Some(parent) = java_exception_parent(current) else {
             return false;
         };
-        let parent = java_exception_builtin_name(parent);
+        let parent = java_exception_runtime_name(parent);
         if parent == target {
             return true;
         }
@@ -489,6 +483,8 @@ impl std::fmt::Display for JavaException {
     );
     item = item.replace("__SOURCE_EXCEPTION_PARENT_ARMS__", &source_parent_arms);
     item = item.replace("__JDK_EXCEPTION_ALIASES__", &builtin_aliases);
+    item = item.replace("__SOURCE_EXCEPTION_ALIASES__", &source_aliases);
+    item = item.replace("__JDK_EXCEPTION_PARENT_ARMS__", &builtin_parents);
     for conversion in conversions {
         item.push_str("\n\n");
         let value = if let Some(function) = &conversion.nullable_message_function {
@@ -549,27 +545,6 @@ fn java_exception_native_format(value: &JavaException, f: &mut std::fmt::Formatt
 }
 
 fn source_exception_parent_match_arms(facts: &FactSet) -> String {
-    let built_in_children = BTreeSet::from([
-        "ArrayIndexOutOfBoundsException",
-        "ArrayStoreException",
-        "ArithmeticException",
-        "ClassCastException",
-        "ConcurrentModificationException",
-        "IllegalArgumentException",
-        "IllegalMonitorStateException",
-        "IllegalStateException",
-        "IndexOutOfBoundsException",
-        "InputMismatchException",
-        "NegativeArraySizeException",
-        "NoSuchElementException",
-        "NullPointerException",
-        "NumberFormatException",
-        "PatternSyntaxException",
-        "StringIndexOutOfBoundsException",
-        "UncheckedIOException",
-        "UnsupportedOperationException",
-        "RuntimeException",
-    ]);
     let exception_edges = facts
         .exception_facts
         .iter()
@@ -593,23 +568,29 @@ fn source_exception_parent_match_arms(facts: &FactSet) -> String {
     let mut arms = BTreeSet::new();
     for (child_name, parent_name) in exception_edges {
         let child_simple = child_name.rsplit('.').next().unwrap_or(child_name);
-        if built_in_children.contains(child_simple) {
+        if crate::stdlib::jdk_exception_binary_name(child_name).is_some()
+            && facts.exception_binary_name_for(child_name) == child_name
+        {
             continue;
         }
-        let parent_simple = parent_name.rsplit('.').next().unwrap_or(&parent_name);
+        let binary_child = facts.exception_binary_name_for(child_name);
+        let binary_parent = facts.exception_binary_name_for(&parent_name);
         if parent_name == child_name || parent_name.is_empty() {
             continue;
         }
         arms.insert(format!(
-            "        {child_name:?} => Some({parent_name:?}),\n"
+            "        {binary_child:?} => Some({binary_parent:?}),\n"
         ));
         let child_simple_is_unique = simple_child_counts
             .iter()
             .find(|(name, _)| *name == child_simple)
             .is_some_and(|(_, count)| *count == 1);
-        if child_simple_is_unique && parent_simple != child_simple && !parent_simple.is_empty() {
+        if child_simple_is_unique
+            && binary_child != child_simple
+            && crate::stdlib::jdk_exception_binary_name(child_simple).is_none()
+        {
             arms.insert(format!(
-                "        {child_simple:?} => Some({parent_simple:?}),\n"
+                "        {child_simple:?} => Some({binary_parent:?}),\n"
             ));
         }
     }
@@ -2205,11 +2186,13 @@ mod tests {
     fn java_exception_support_includes_source_exception_parent_edges() {
         let mut facts = FactSet::default();
         facts.exception_facts.push(ExceptionFact {
+            binary_name: None,
             type_name: "BaseProblem".to_string(),
             kind: ExceptionKind::Checked,
             provenance: FactProvenance::ParsedSource,
         });
         facts.exception_facts.push(ExceptionFact {
+            binary_name: None,
             type_name: "SpecificProblem".to_string(),
             kind: ExceptionKind::Checked,
             provenance: FactProvenance::ParsedSource,
@@ -2266,6 +2249,7 @@ mod tests {
         let mut facts = FactSet::default();
         for type_name in ["a.Problem", "b.Problem"] {
             facts.exception_facts.push(ExceptionFact {
+                binary_name: None,
                 type_name: type_name.to_string(),
                 kind: ExceptionKind::Checked,
                 provenance: FactProvenance::ParsedSource,

@@ -515,6 +515,7 @@ fn rust_method_family_key_matches(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
+    source_local_slots: Option<std::sync::Arc<crate::null_diagnostic::SourceLocalSlots>>,
     bindings: HashMap<String, BindingUseFacts>,
     bindings_by_id: HashMap<BindingId, BindingUseFacts>,
     type_params_in_scope: Vec<String>,
@@ -790,6 +791,18 @@ fn contains_aliased_resolved_source_method_key(
 }
 
 impl MethodUsageFacts {
+    pub(crate) fn source_local_null_slot(
+        &self,
+        binding: &BindingId,
+    ) -> Option<&crate::null_diagnostic::SourceLocalSlot> {
+        self.source_local_slots.as_ref()?.get(binding)
+    }
+
+    pub(crate) fn source_array_loop_receiver_slot(&self, binding: &BindingId) -> Option<usize> {
+        self.source_local_slots
+            .as_ref()?
+            .array_loop_receiver(binding)
+    }
     pub(crate) fn null_assigned_source_fields(&self) -> &[crate::facts::FieldKey] {
         &self.null_assigned_source_fields
     }
@@ -2159,6 +2172,9 @@ fn analyze_type_usage(
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                method_facts.source_local_slots =
+                    crate::null_diagnostic::SourceLocalSlots::for_method(method)
+                        .map(std::sync::Arc::new);
                 method_facts.static_field_names = std::sync::Arc::clone(&static_field_names);
                 method_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 method_facts.type_params_in_scope =
@@ -6516,6 +6532,23 @@ fn record_native_value_domain_storage(
                     .push((source, target));
                 return;
             }
+            if source.path.is_empty()
+                && destination.path.is_empty()
+                && effective.native_functional_carrier(&source.ty).is_some()
+                && effective
+                    .native_functional_carrier(&destination.ty)
+                    .is_some()
+            {
+                // Native SAM facades already clone a canonical callback
+                // reference. Propagate its local/synchronized ABI without
+                // adding a container-style RefCell/Mutex allocation shell.
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source.clone(), destination.clone()));
+                facts
+                    .native_collection_reference_transfers
+                    .push((source.clone(), destination.clone()));
+            }
             if let Some(source_functional) = effective.native_functional_carrier(&source.ty)
                 && let Some(target_functional) =
                     effective.native_functional_carrier(&destination.ty)
@@ -10641,9 +10674,33 @@ class CastContracts {
                 continue;
             }
             let usage = semantic.usage.source_method_usage(owner, method).unwrap();
-            let flows = usage.nullable_collection_storage_flows();
+            let all_flows = usage.nullable_collection_storage_flows();
             let returns_callback =
                 matches!(method.name.as_str(), "local" | "assigned" | "function");
+            let callback_roots = all_flows
+                .iter()
+                .filter(|(source, target)| source.path.is_empty() && target.path.is_empty())
+                .collect::<Vec<_>>();
+            assert_eq!(callback_roots.len(), usize::from(returns_callback));
+            if returns_callback {
+                let (source, target) = callback_roots[0];
+                assert!(matches!(
+                    source.root,
+                    NativeCollectionStorageRoot::Binding(_)
+                ));
+                assert!(matches!(target.root, NativeCollectionStorageRoot::Return));
+                assert!(
+                    usage
+                        .native_collection_reference_transfers()
+                        .contains(&(source.clone(), target.clone()))
+                );
+            }
+            // Check the original result-domain edges separately from the
+            // newly preserved callback allocation reference.
+            let flows = all_flows
+                .iter()
+                .filter(|(source, target)| !source.path.is_empty() || !target.path.is_empty())
+                .collect::<Vec<_>>();
             assert_eq!(
                 flows.len(),
                 3 + usize::from(returns_callback),
@@ -12052,6 +12109,7 @@ class Use {
             source_name: "self".to_string(),
             initializer: Some(Expr::Var("input".to_string())),
             binding: Some(binding.clone()),
+            is_final: false,
         };
         let mut facts = MethodUsageFacts::default();
         insert_binding_use_facts(
@@ -12719,6 +12777,7 @@ class TernaryPatternUsageScope {
             body: Some(Block {
                 statements: vec![
                     Stmt::VarDecl {
+                        is_final: false,
                         ty: JavaType::String,
                         name: "x".to_string(),
                         source_name: "x".to_string(),

@@ -284,9 +284,9 @@ fn checked_calls_preserve_source_behavior() {
     assert_eq!(Use::null_probe(), 12);
     assert_eq!(Use::one_argument_null_probe(), 1);
     assert_eq!(Use::present_message_probe(), 127);
-    assert_eq!(Use::optional_probe(), 0);
-    assert_eq!(Use::inline_optional_probe(), 1);
-    assert_eq!(Use::empty_optional_with_message_probe(), 0);
+    assert_eq!(Use::optional_probe().unwrap(), 0);
+    assert_eq!(Use::inline_optional_probe().unwrap(), 1);
+    assert_eq!(Use::empty_optional_with_message_probe().unwrap(), 0);
     assert_eq!(Use::alias_probe(), 1);
 }
 "#,

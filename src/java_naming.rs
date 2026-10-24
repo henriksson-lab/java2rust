@@ -6,6 +6,10 @@ use crate::java_ir::{FieldDecl, Member, Modifier, Program, TypeDecl};
 /// Resolver identity and exception propagation must refer to the same body.
 pub(crate) const ENUM_VALUE_OF_RESULT_METHOD: &str = "__java_value_of_result";
 
+pub(crate) fn outer_handle_companion_name(method: &str) -> String {
+    format!("{method}_with_outer")
+}
+
 /// All runtime class-token producers share original binary source identity.
 pub(crate) fn source_binary_class_name(ty: &TypeDecl, package: Option<&str>) -> String {
     if let Some(names) = &ty.source_names {
@@ -107,6 +111,11 @@ pub(crate) fn rust_name_for_java_named_type(name: &str) -> String {
     if !name.contains('.') {
         if name == "Result" {
             return "JavaResult".to_string();
+        }
+        if name.contains('$') {
+            let mut out = String::with_capacity(name.len());
+            push_upper_camel_identifier_part(&mut out, name);
+            return out;
         }
         return name.to_string();
     }
@@ -513,6 +522,14 @@ mod tests {
     fn nested_type_name_mangling_preserves_type_path_boundaries() {
         assert_eq!(rust_name_for_java_named_type("K.AB"), "K_AB");
         assert_eq!(rust_name_for_java_named_type("K.A.B"), "K_A_B");
+        assert_eq!(
+            rust_name_for_java_named_type("Literal$Dollar"),
+            "LiteralDollar"
+        );
+        assert_eq!(
+            rust_name_for_java_named_type("K.Literal$Dollar"),
+            "K_LiteralDollar"
+        );
         assert_eq!(
             rust_name_for_java_named_type("java.io.InputStream"),
             "JavaIoInputStream"

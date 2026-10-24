@@ -759,6 +759,23 @@ fn apply_native_java_static_method(
             };
             crate::coercion::math_copy_sign_projection(left, right, primitive, magnitude, sign)
         }
+        NativeJavaStaticMethod::IntegralToString { .. } => {
+            if !matches!(args.len(), 1 | 2) {
+                return compile_error_call("integral toString requires one or two arguments");
+            }
+            let mut args = args.into_iter();
+            let value = RustExpr::Cast {
+                expr: Box::new(args.next().unwrap()),
+                ty: "i64".into(),
+            };
+            let radix = args
+                .next()
+                .unwrap_or_else(|| RustExpr::Literal("10".into()));
+            function_call_projection(
+                RustExpr::path(["java_integral_to_string"]),
+                vec![value, radix],
+            )
+        }
         NativeJavaStaticMethod::IntegralFormat { primitive, radix } => {
             let Some(value) = args.into_iter().next() else {
                 return compile_error_call("integral radix formatting requires one argument");
@@ -794,6 +811,16 @@ fn apply_native_java_static_method(
                 }),
                 ty: "i64".into(),
             }
+        }
+        NativeJavaStaticMethod::IntegralCompare {
+            primitive,
+            unsigned,
+        } => {
+            let [left, right]: [RustExpr; 2] = match args.try_into() {
+                Ok(args) => args,
+                Err(_) => return compile_error_call("integral comparison requires two arguments"),
+            };
+            crate::coercion::integral_compare_projection(left, right, primitive, unsigned)
         }
         NativeJavaStaticMethod::FloatingCompare { primitive } => {
             let mut args = args.into_iter();
@@ -971,12 +998,14 @@ fn apply_native_java_static_method(
             let arg = java_integral_parse_null_argument_as_number_format(arg);
             primitive_parse_projection(arg, PrimitiveType::Int)
         }
-        NativeJavaStaticMethod::IntegralBitCount { primitive }
+        NativeJavaStaticMethod::IntegralSignum { primitive }
+        | NativeJavaStaticMethod::IntegralBitCount { primitive }
         | NativeJavaStaticMethod::IntegralZeroCount { primitive, .. } => {
             let Some(arg) = args.into_iter().next() else {
                 return compile_error_call("integral bit counting requires one argument");
             };
             let operation = match method {
+                NativeJavaStaticMethod::IntegralSignum { .. } => "signum",
                 NativeJavaStaticMethod::IntegralZeroCount { leading: true, .. } => "leading_zeros",
                 NativeJavaStaticMethod::IntegralZeroCount { leading: false, .. } => {
                     "trailing_zeros"
@@ -1183,7 +1212,15 @@ fn apply_native_java_static_method(
                     let value_name = "_java_require_non_null_value";
                     let tail = RustExpr::Var(value_name.to_string());
                     let tail = if nullable {
-                        crate::coercion::unwrap_java_null_receiver_projection(tail)
+                        let exception = function_call_projection(
+                            RustExpr::path(["JavaException", "from_constructor"]),
+                            vec![
+                                rust_string_literal_projection("NullPointerException"),
+                                RustExpr::Var("_java_require_non_null_message".into()),
+                                RustExpr::Var("None".into()),
+                            ],
+                        );
+                        crate::coercion::java_null_check_with_exception_projection(tail, exception)
                     } else {
                         tail
                     };
@@ -1198,7 +1235,9 @@ fn apply_native_java_static_method(
                             RustStmt::Let {
                                 mutable: false,
                                 name: "_java_require_non_null_message".to_string(),
-                                ty: None,
+                                ty: Some(crate::rust_ir::RustType::Option(Box::new(
+                                    crate::rust_ir::RustType::Named("JavaExceptionText".into()),
+                                ))),
                                 value: Some(message),
                             },
                         ],

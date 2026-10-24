@@ -346,6 +346,14 @@ impl<'a> EffectiveFacts<'a> {
         self.facts.external_crate_rust_type_name_for(type_name)
     }
 
+    pub(crate) fn external_crate_reference_identity_method_for(
+        &self,
+        type_name: &str,
+    ) -> Option<&'a str> {
+        self.facts
+            .external_crate_reference_identity_method_for(type_name)
+    }
+
     pub fn dispatch_requirements_for(&self, type_name: &str) -> Vec<DispatchRequirementKind> {
         self.facts.dispatch_requirements_for(type_name)
     }
@@ -1166,7 +1174,13 @@ mod type_fact_lookup_session_tests {
     #[test]
     fn native_functional_carriers_keep_source_and_user_precedence() {
         let mut facts = facts_for(false);
-        for name in ["IntSupplier", "Comparator", "BiFunction", "Runnable"] {
+        for name in [
+            "IntSupplier",
+            "Comparator",
+            "Comparable",
+            "BiFunction",
+            "Runnable",
+        ] {
             let ty = JavaType::Named {
                 name: name.to_string(),
                 args: Vec::new(),

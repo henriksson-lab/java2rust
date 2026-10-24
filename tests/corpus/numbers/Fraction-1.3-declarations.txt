@@ -1,0 +1,506 @@
+Compiled from "BigFraction.java"
+public final class org.apache.commons.numbers.fraction.BigFraction extends java.lang.Number implements java.lang.Comparable<org.apache.commons.numbers.fraction.BigFraction>, org.apache.commons.numbers.core.NativeOperators<org.apache.commons.numbers.fraction.BigFraction>, java.io.Serializable {
+  public static final org.apache.commons.numbers.fraction.BigFraction ZERO;
+    descriptor: Lorg/apache/commons/numbers/fraction/BigFraction;
+  public static final org.apache.commons.numbers.fraction.BigFraction ONE;
+    descriptor: Lorg/apache/commons/numbers/fraction/BigFraction;
+  private static final long serialVersionUID;
+    descriptor: J
+  private static final int DEFAULT_MAX_ITERATIONS;
+    descriptor: I
+  private static final java.lang.String NOT_FINITE;
+    descriptor: Ljava/lang/String;
+  private static final long OVERFLOW;
+    descriptor: J
+  private final java.math.BigInteger numerator;
+    descriptor: Ljava/math/BigInteger;
+  private final java.math.BigInteger denominator;
+    descriptor: Ljava/math/BigInteger;
+  private org.apache.commons.numbers.fraction.BigFraction(java.math.BigInteger, java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;Ljava/math/BigInteger;)V
+
+  private org.apache.commons.numbers.fraction.BigFraction(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)V
+
+  private static org.apache.commons.numbers.fraction.BigFraction from(double, double, int, int);
+    descriptor: (DDII)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction from(double);
+    descriptor: (D)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction from(double, double, int);
+    descriptor: (DDI)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction from(double, int);
+    descriptor: (DI)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(long);
+    descriptor: (J)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(long, long);
+    descriptor: (JJ)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction of(java.math.BigInteger, java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public static org.apache.commons.numbers.fraction.BigFraction parse(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction zero();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public boolean isZero();
+    descriptor: ()Z
+
+  public org.apache.commons.numbers.fraction.BigFraction one();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public boolean isOne();
+    descriptor: ()Z
+
+  public java.math.BigInteger getNumerator();
+    descriptor: ()Ljava/math/BigInteger;
+
+  public int getNumeratorAsInt();
+    descriptor: ()I
+
+  public long getNumeratorAsLong();
+    descriptor: ()J
+
+  public java.math.BigInteger getDenominator();
+    descriptor: ()Ljava/math/BigInteger;
+
+  public int getDenominatorAsInt();
+    descriptor: ()I
+
+  public long getDenominatorAsLong();
+    descriptor: ()J
+
+  public int signum();
+    descriptor: ()I
+
+  public org.apache.commons.numbers.fraction.BigFraction abs();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction negate();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction reciprocal();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public double doubleValue();
+    descriptor: ()D
+
+  public float floatValue();
+    descriptor: ()F
+
+  public int intValue();
+    descriptor: ()I
+
+  public long longValue();
+    descriptor: ()J
+
+  public java.math.BigDecimal bigDecimalValue();
+    descriptor: ()Ljava/math/BigDecimal;
+
+  public java.math.BigDecimal bigDecimalValue(java.math.RoundingMode);
+    descriptor: (Ljava/math/RoundingMode;)Ljava/math/BigDecimal;
+
+  public java.math.BigDecimal bigDecimalValue(int, java.math.RoundingMode);
+    descriptor: (ILjava/math/RoundingMode;)Ljava/math/BigDecimal;
+
+  public org.apache.commons.numbers.fraction.BigFraction add(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction add(long);
+    descriptor: (J)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction add(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction add(org.apache.commons.numbers.fraction.BigFraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/BigFraction;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction subtract(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction subtract(long);
+    descriptor: (J)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction subtract(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction subtract(org.apache.commons.numbers.fraction.BigFraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/BigFraction;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction multiply(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction multiply(long);
+    descriptor: (J)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction multiply(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction multiply(org.apache.commons.numbers.fraction.BigFraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/BigFraction;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction divide(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction divide(long);
+    descriptor: (J)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction divide(java.math.BigInteger);
+    descriptor: (Ljava/math/BigInteger;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction divide(org.apache.commons.numbers.fraction.BigFraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/BigFraction;)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public org.apache.commons.numbers.fraction.BigFraction pow(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/BigFraction;
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  public int compareTo(org.apache.commons.numbers.fraction.BigFraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/BigFraction;)I
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public int hashCode();
+    descriptor: ()I
+
+  private long toFloatingPointBits(int, int);
+    descriptor: (II)J
+
+  private static java.math.BigInteger roundAndRightShift(java.math.BigInteger, int, boolean);
+    descriptor: (Ljava/math/BigInteger;IZ)Ljava/math/BigInteger;
+
+  public int compareTo(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)I
+
+  public java.lang.Object pow(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object multiply(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object divide(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object subtract(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object negate();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object zero();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object add(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object reciprocal();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object one();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object multiply(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "ContinuedFraction.java"
+class org.apache.commons.numbers.fraction.ContinuedFraction$1 implements java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient> {
+  private int n;
+    descriptor: I
+  final double val$x;
+    descriptor: D
+  final org.apache.commons.numbers.fraction.ContinuedFraction this$0;
+    descriptor: Lorg/apache/commons/numbers/fraction/ContinuedFraction;
+  org.apache.commons.numbers.fraction.ContinuedFraction$1();
+    descriptor: (Lorg/apache/commons/numbers/fraction/ContinuedFraction;D)V
+
+  public org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient get();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/GeneralizedContinuedFraction$Coefficient;
+
+  public java.lang.Object get();
+    descriptor: ()Ljava/lang/Object;
+}
+Compiled from "ContinuedFraction.java"
+public abstract class org.apache.commons.numbers.fraction.ContinuedFraction {
+  public org.apache.commons.numbers.fraction.ContinuedFraction();
+    descriptor: ()V
+
+  protected abstract double getA(int, double);
+    descriptor: (ID)D
+
+  protected abstract double getB(int, double);
+    descriptor: (ID)D
+
+  public double evaluate(double, double);
+    descriptor: (DD)D
+
+  public double evaluate(double, double, int);
+    descriptor: (DDI)D
+}
+Compiled from "Fraction.java"
+public final class org.apache.commons.numbers.fraction.Fraction extends java.lang.Number implements java.lang.Comparable<org.apache.commons.numbers.fraction.Fraction>, org.apache.commons.numbers.core.NativeOperators<org.apache.commons.numbers.fraction.Fraction>, java.io.Serializable {
+  public static final org.apache.commons.numbers.fraction.Fraction ZERO;
+    descriptor: Lorg/apache/commons/numbers/fraction/Fraction;
+  public static final org.apache.commons.numbers.fraction.Fraction ONE;
+    descriptor: Lorg/apache/commons/numbers/fraction/Fraction;
+  private static final long serialVersionUID;
+    descriptor: J
+  private static final double DEFAULT_EPSILON;
+    descriptor: D
+  private static final int DEFAULT_MAX_ITERATIONS;
+    descriptor: I
+  private static final java.lang.String NOT_FINITE;
+    descriptor: Ljava/lang/String;
+  private static final long OVERFLOW;
+    descriptor: J
+  private final int numerator;
+    descriptor: I
+  private final int denominator;
+    descriptor: I
+  private org.apache.commons.numbers.fraction.Fraction(int, int);
+    descriptor: (II)V
+
+  private org.apache.commons.numbers.fraction.Fraction(int);
+    descriptor: (I)V
+
+  private org.apache.commons.numbers.fraction.Fraction(double, double, int, int);
+    descriptor: (DDII)V
+
+  public static org.apache.commons.numbers.fraction.Fraction from(double);
+    descriptor: (D)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public static org.apache.commons.numbers.fraction.Fraction from(double, double, int);
+    descriptor: (DDI)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public static org.apache.commons.numbers.fraction.Fraction from(double, int);
+    descriptor: (DI)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public static org.apache.commons.numbers.fraction.Fraction of(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public static org.apache.commons.numbers.fraction.Fraction of(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public static org.apache.commons.numbers.fraction.Fraction parse(java.lang.String);
+    descriptor: (Ljava/lang/String;)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction zero();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public boolean isZero();
+    descriptor: ()Z
+
+  public org.apache.commons.numbers.fraction.Fraction one();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public boolean isOne();
+    descriptor: ()Z
+
+  public int getNumerator();
+    descriptor: ()I
+
+  public int getDenominator();
+    descriptor: ()I
+
+  public int signum();
+    descriptor: ()I
+
+  public org.apache.commons.numbers.fraction.Fraction abs();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction negate();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction reciprocal();
+    descriptor: ()Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public double doubleValue();
+    descriptor: ()D
+
+  public float floatValue();
+    descriptor: ()F
+
+  public int intValue();
+    descriptor: ()I
+
+  public long longValue();
+    descriptor: ()J
+
+  public org.apache.commons.numbers.fraction.Fraction add(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction add(org.apache.commons.numbers.fraction.Fraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction subtract(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction subtract(org.apache.commons.numbers.fraction.Fraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  private org.apache.commons.numbers.fraction.Fraction addSub(org.apache.commons.numbers.fraction.Fraction, boolean);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;Z)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction multiply(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction multiply(org.apache.commons.numbers.fraction.Fraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  private org.apache.commons.numbers.fraction.Fraction multiply(int, int);
+    descriptor: (II)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction divide(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction divide(org.apache.commons.numbers.fraction.Fraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public org.apache.commons.numbers.fraction.Fraction pow(int);
+    descriptor: (I)Lorg/apache/commons/numbers/fraction/Fraction;
+
+  public java.lang.String toString();
+    descriptor: ()Ljava/lang/String;
+
+  public int compareTo(org.apache.commons.numbers.fraction.Fraction);
+    descriptor: (Lorg/apache/commons/numbers/fraction/Fraction;)I
+
+  public boolean equals(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Z
+
+  public int hashCode();
+    descriptor: ()I
+
+  public int compareTo(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)I
+
+  public java.lang.Object pow(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object multiply(int);
+    descriptor: (I)Ljava/lang/Object;
+
+  public java.lang.Object divide(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object subtract(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object negate();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object zero();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object add(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  public java.lang.Object reciprocal();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object one();
+    descriptor: ()Ljava/lang/Object;
+
+  public java.lang.Object multiply(java.lang.Object);
+    descriptor: (Ljava/lang/Object;)Ljava/lang/Object;
+
+  static {};
+    descriptor: ()V
+}
+Compiled from "FractionException.java"
+class org.apache.commons.numbers.fraction.FractionException extends java.lang.ArithmeticException {
+  static final java.lang.String ERROR_CONVERSION_OVERFLOW;
+    descriptor: Ljava/lang/String;
+  static final java.lang.String ERROR_CONVERSION;
+    descriptor: Ljava/lang/String;
+  static final java.lang.String ERROR_ZERO_DENOMINATOR;
+    descriptor: Ljava/lang/String;
+  static final java.lang.String ERROR_DIVIDE_BY_ZERO;
+    descriptor: Ljava/lang/String;
+  private static final long serialVersionUID;
+    descriptor: J
+  org.apache.commons.numbers.fraction.FractionException(java.lang.String, java.lang.Object...);
+    descriptor: (Ljava/lang/String;[Ljava/lang/Object;)V
+
+  org.apache.commons.numbers.fraction.FractionException(java.lang.String);
+    descriptor: (Ljava/lang/String;)V
+}
+Compiled from "GeneralizedContinuedFraction.java"
+public final class org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient {
+  private final double a;
+    descriptor: D
+  private final double b;
+    descriptor: D
+  private org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient(double, double);
+    descriptor: (DD)V
+
+  public double getA();
+    descriptor: ()D
+
+  public double getB();
+    descriptor: ()D
+
+  public static org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient of(double, double);
+    descriptor: (DD)Lorg/apache/commons/numbers/fraction/GeneralizedContinuedFraction$Coefficient;
+}
+Compiled from "GeneralizedContinuedFraction.java"
+public final class org.apache.commons.numbers.fraction.GeneralizedContinuedFraction {
+  static final double SMALL;
+    descriptor: D
+  static final int DEFAULT_ITERATIONS;
+    descriptor: I
+  private static final double MIN_EPSILON;
+    descriptor: D
+  private static final double MAX_EPSILON;
+    descriptor: D
+  private static final double DEFAULT_LOW;
+    descriptor: D
+  private static final double DEFAULT_EPS;
+    descriptor: D
+  private org.apache.commons.numbers.fraction.GeneralizedContinuedFraction();
+    descriptor: ()V
+
+  public static double value(java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>);
+    descriptor: (Ljava/util/function/Supplier;)D
+
+  public static double value(java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>, double);
+    descriptor: (Ljava/util/function/Supplier;D)D
+
+  public static double value(java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>, double, int);
+    descriptor: (Ljava/util/function/Supplier;DI)D
+
+  public static double value(double, java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>);
+    descriptor: (DLjava/util/function/Supplier;)D
+
+  public static double value(double, java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>, double);
+    descriptor: (DLjava/util/function/Supplier;D)D
+
+  public static double value(double, java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>, double, int);
+    descriptor: (DLjava/util/function/Supplier;DI)D
+
+  static double evaluate(double, java.util.function.Supplier<org.apache.commons.numbers.fraction.GeneralizedContinuedFraction$Coefficient>, double, int);
+    descriptor: (DLjava/util/function/Supplier;DI)D
+
+  private static double updateIfCloseToZero(double);
+    descriptor: (D)D
+}

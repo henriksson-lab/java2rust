@@ -342,6 +342,9 @@ pub struct RustMatchArm {
 /// the answer; recording it here is what stops the consumer from guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustExprShape {
+    /// Compiler-owned null projection with an explicit Java exception payload.
+    /// The catchable lowering consumes this marker, never its message text.
+    ExplicitJavaNullFailure,
     /// A compiler-generated contextual NPE error value. Source rewrites can
     /// preserve the original operation without recognizing diagnostic prose
     /// or changing a source-written exception message.

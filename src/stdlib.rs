@@ -64,6 +64,26 @@ pub(crate) fn is_borrowed_string_view_method(name: &str, arg_count: usize) -> bo
 /// Declared Java parameter types of the native String search overload, not
 /// the actual operand types (a char/byte/short search widens to int). This is
 /// useful when a native call has no source ResolvedCall declaration.
+pub(crate) fn string_native_declared_parameter_types(
+    name: &str,
+    actual: &[JavaType],
+) -> Option<Vec<JavaType>> {
+    if name == "replace" && actual.len() == 2 {
+        if actual
+            .iter()
+            .all(|ty| *ty == JavaType::Primitive(PrimitiveType::Char))
+        {
+            return Some(vec![JavaType::Primitive(PrimitiveType::Char); 2]);
+        }
+        if actual.iter().all(|ty| matches!(ty, JavaType::String)
+            || matches!(ty, JavaType::Named { name, .. } if matches!(name.as_str(), "String" | "java.lang.String" | "CharSequence" | "java.lang.CharSequence"))) {
+            return Some(vec![JavaType::Named { name: "java.lang.CharSequence".into(), args: vec![] }; 2]);
+        }
+        return None;
+    }
+    string_search_declared_parameter_types(name, actual)
+}
+
 pub(crate) fn string_search_declared_parameter_types(
     name: &str,
     actual: &[JavaType],
@@ -416,6 +436,25 @@ impl FunctionalInterfaceShape {
         &self.inputs
     }
 
+    /// JVM invocation descriptors erase interface type parameters to Object.
+    /// Keep this separate from instantiated input types used for conversions.
+    pub(crate) fn erased_input_types(&self) -> Vec<JavaType> {
+        self.inputs
+            .iter()
+            .map(|source| match source {
+                FunctionalTypeSource::TypeArgument(_) => JavaType::Named {
+                    name: "java.lang.Object".into(),
+                    args: vec![],
+                },
+                FunctionalTypeSource::Primitive(primitive) => JavaType::Primitive(*primitive),
+                FunctionalTypeSource::AppliedUnary { type_name, .. } => JavaType::Named {
+                    name: (*type_name).into(),
+                    args: vec![],
+                },
+            })
+            .collect()
+    }
+
     pub fn returns(&self) -> Option<FunctionalTypeSource> {
         self.returns
     }
@@ -535,6 +574,14 @@ pub fn functional_interface_shape(name: &str) -> Option<FunctionalInterfaceShape
         ),
         "Runnable" => shape("run", Vec::new(), None),
         "Supplier" => shape("get", Vec::new(), Some(TypeArgument(0))),
+        // Comparable is a one-argument native interface view. Its source
+        // implementor, retained receiver and identity use the same adapter
+        // contract as the other object-backed single-method interfaces.
+        "Comparable" => shape(
+            "compareTo",
+            vec![TypeArgument(0)],
+            Some(Primitive(PrimitiveType::Int)),
+        ),
         "Consumer" => shape("accept", vec![TypeArgument(0)], None),
         "BiConsumer" => shape("accept", vec![TypeArgument(0), TypeArgument(1)], None),
         "Function" => shape("apply", vec![TypeArgument(0)], Some(TypeArgument(1))),
@@ -606,6 +653,7 @@ pub fn is_known_functional_interface(name: &str) -> bool {
     matches!(
         name,
         "Supplier"
+            | "Comparable"
             | "Consumer"
             | "Function"
             | "Predicate"
@@ -709,6 +757,30 @@ fn is_known_boxed_number_receiver(receiver: &str) -> bool {
     )
 }
 
+/// JDK classes whose Comparable argument is exactly their own type. Keep
+/// qualified identity here so an unrelated example.String is not admitted.
+pub(crate) fn is_known_self_comparable_type(name: &str) -> bool {
+    let leaf = name.strip_prefix("java.lang.").unwrap_or(name);
+    if matches!(
+        leaf,
+        "String"
+            | "Byte"
+            | "Short"
+            | "Integer"
+            | "Long"
+            | "Float"
+            | "Double"
+            | "Boolean"
+            | "Character"
+    ) {
+        return true;
+    }
+    matches!(
+        name,
+        "BigInteger" | "java.math.BigInteger" | "BigDecimal" | "java.math.BigDecimal"
+    )
+}
+
 pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
     let actual = canonical_subtype_name(actual);
     let target = canonical_subtype_name(target);
@@ -804,69 +876,95 @@ pub(crate) fn canonical_subtype_name(name: &str) -> String {
 /// an `IOException`. So this is a table on purpose — but a table of *edges*,
 /// where each entry is one checkable fact about the JDK, rather than a table of
 /// answers.
-pub(crate) const JDK_EXCEPTION_PARENTS: &[(&str, &str)] = &[
-    ("MissingFormatArgumentException", "IllegalFormatException"),
-    ("IllegalFormatException", "IllegalArgumentException"),
-    // java.io
-    ("FileNotFoundException", "IOException"),
-    ("EOFException", "IOException"),
-    ("InterruptedIOException", "IOException"),
-    ("UnsupportedEncodingException", "IOException"),
-    ("CharConversionException", "IOException"),
-    ("UTFDataFormatException", "IOException"),
-    ("SyncFailedException", "IOException"),
-    ("ObjectStreamException", "IOException"),
-    ("NotSerializableException", "ObjectStreamException"),
-    ("InvalidObjectException", "ObjectStreamException"),
-    ("StreamCorruptedException", "ObjectStreamException"),
-    ("InvalidClassException", "ObjectStreamException"),
-    ("OptionalDataException", "ObjectStreamException"),
-    ("WriteAbortedException", "ObjectStreamException"),
-    // java.util.zip / jar
-    ("ZipException", "IOException"),
-    ("JarException", "ZipException"),
-    // java.net
-    ("SocketException", "IOException"),
-    ("SocketTimeoutException", "InterruptedIOException"),
-    ("MalformedURLException", "IOException"),
-    ("UnknownHostException", "IOException"),
-    ("UnknownServiceException", "IOException"),
-    ("ProtocolException", "IOException"),
-    ("BindException", "SocketException"),
-    ("ConnectException", "SocketException"),
-    ("NoRouteToHostException", "SocketException"),
-    // java.nio
-    ("ClosedChannelException", "IOException"),
-    ("FileSystemException", "IOException"),
-    ("NoSuchFileException", "FileSystemException"),
-    ("FileAlreadyExistsException", "FileSystemException"),
-    ("AccessDeniedException", "FileSystemException"),
-    // java.lang unchecked
-    ("IllegalArgumentException", "RuntimeException"),
-    ("IllegalStateException", "RuntimeException"),
-    ("NoSuchElementException", "RuntimeException"),
-    ("NumberFormatException", "IllegalArgumentException"),
-    ("PatternSyntaxException", "IllegalArgumentException"),
-    ("ArithmeticException", "RuntimeException"),
-    ("IndexOutOfBoundsException", "RuntimeException"),
-    (
-        "ArrayIndexOutOfBoundsException",
-        "IndexOutOfBoundsException",
-    ),
-    (
-        "StringIndexOutOfBoundsException",
-        "IndexOutOfBoundsException",
-    ),
-    ("ConcurrentModificationException", "RuntimeException"),
-    ("UnsupportedOperationException", "RuntimeException"),
-    ("UncheckedIOException", "RuntimeException"),
-    ("NullPointerException", "RuntimeException"),
-    ("ClassCastException", "RuntimeException"),
-    ("NegativeArraySizeException", "RuntimeException"),
-    ("ArrayStoreException", "RuntimeException"),
-    ("InputMismatchException", "NoSuchElementException"),
-    ("IllegalMonitorStateException", "RuntimeException"),
-];
+// One catalog supplies both the existing nominal relation and binary identity.
+// Namespace cannot be inferred from an exception's superclass.
+macro_rules! jdk_exception_catalog {
+    (parents { $($name:ident => ($binary:literal, $parent:ident),)* }
+     names { $($root:ident => $root_binary:literal,)* }) => {
+        pub(crate) const JDK_EXCEPTION_PARENTS: &[(&str, &str)] = &[
+            $((stringify!($name), stringify!($parent)),)*
+        ];
+        pub(crate) const JDK_EXCEPTION_BINARY_NAMES: &[(&str, &str)] = &[
+            $((stringify!($name), $binary),)*
+            $((stringify!($root), $root_binary),)*
+        ];
+    };
+}
+jdk_exception_catalog! {
+    parents {
+        MissingFormatArgumentException => ("java.util.MissingFormatArgumentException", IllegalFormatException),
+        IllegalFormatException => ("java.util.IllegalFormatException", IllegalArgumentException),
+        FileNotFoundException => ("java.io.FileNotFoundException", IOException),
+        EOFException => ("java.io.EOFException", IOException),
+        InterruptedIOException => ("java.io.InterruptedIOException", IOException),
+        UnsupportedEncodingException => ("java.io.UnsupportedEncodingException", IOException),
+        CharConversionException => ("java.io.CharConversionException", IOException),
+        UTFDataFormatException => ("java.io.UTFDataFormatException", IOException),
+        SyncFailedException => ("java.io.SyncFailedException", IOException),
+        ObjectStreamException => ("java.io.ObjectStreamException", IOException),
+        NotSerializableException => ("java.io.NotSerializableException", ObjectStreamException),
+        InvalidObjectException => ("java.io.InvalidObjectException", ObjectStreamException),
+        StreamCorruptedException => ("java.io.StreamCorruptedException", ObjectStreamException),
+        InvalidClassException => ("java.io.InvalidClassException", ObjectStreamException),
+        OptionalDataException => ("java.io.OptionalDataException", ObjectStreamException),
+        WriteAbortedException => ("java.io.WriteAbortedException", ObjectStreamException),
+        ZipException => ("java.util.zip.ZipException", IOException),
+        JarException => ("java.util.jar.JarException", ZipException),
+        SocketException => ("java.net.SocketException", IOException),
+        SocketTimeoutException => ("java.net.SocketTimeoutException", InterruptedIOException),
+        MalformedURLException => ("java.net.MalformedURLException", IOException),
+        UnknownHostException => ("java.net.UnknownHostException", IOException),
+        UnknownServiceException => ("java.net.UnknownServiceException", IOException),
+        ProtocolException => ("java.net.ProtocolException", IOException),
+        BindException => ("java.net.BindException", SocketException),
+        ConnectException => ("java.net.ConnectException", SocketException),
+        NoRouteToHostException => ("java.net.NoRouteToHostException", SocketException),
+        ClosedChannelException => ("java.nio.channels.ClosedChannelException", IOException),
+        FileSystemException => ("java.nio.file.FileSystemException", IOException),
+        NoSuchFileException => ("java.nio.file.NoSuchFileException", FileSystemException),
+        FileAlreadyExistsException => ("java.nio.file.FileAlreadyExistsException", FileSystemException),
+        AccessDeniedException => ("java.nio.file.AccessDeniedException", FileSystemException),
+        IllegalArgumentException => ("java.lang.IllegalArgumentException", RuntimeException),
+        IllegalStateException => ("java.lang.IllegalStateException", RuntimeException),
+        NoSuchElementException => ("java.util.NoSuchElementException", RuntimeException),
+        NumberFormatException => ("java.lang.NumberFormatException", IllegalArgumentException),
+        PatternSyntaxException => ("java.util.regex.PatternSyntaxException", IllegalArgumentException),
+        ArithmeticException => ("java.lang.ArithmeticException", RuntimeException),
+        IndexOutOfBoundsException => ("java.lang.IndexOutOfBoundsException", RuntimeException),
+        ArrayIndexOutOfBoundsException => ("java.lang.ArrayIndexOutOfBoundsException", IndexOutOfBoundsException),
+        StringIndexOutOfBoundsException => ("java.lang.StringIndexOutOfBoundsException", IndexOutOfBoundsException),
+        ConcurrentModificationException => ("java.util.ConcurrentModificationException", RuntimeException),
+        UnsupportedOperationException => ("java.lang.UnsupportedOperationException", RuntimeException),
+        UncheckedIOException => ("java.io.UncheckedIOException", RuntimeException),
+        NullPointerException => ("java.lang.NullPointerException", RuntimeException),
+        ClassCastException => ("java.lang.ClassCastException", RuntimeException),
+        NegativeArraySizeException => ("java.lang.NegativeArraySizeException", RuntimeException),
+        ArrayStoreException => ("java.lang.ArrayStoreException", RuntimeException),
+        InputMismatchException => ("java.util.InputMismatchException", NoSuchElementException),
+        IllegalMonitorStateException => ("java.lang.IllegalMonitorStateException", RuntimeException),
+    }
+    names {
+        Object => "java.lang.Object",
+        Throwable => "java.lang.Throwable",
+        Exception => "java.lang.Exception",
+        Error => "java.lang.Error",
+        RuntimeException => "java.lang.RuntimeException",
+        IOException => "java.io.IOException",
+        InterruptedException => "java.lang.InterruptedException",
+        ExecutionException => "java.util.concurrent.ExecutionException",
+        ClassNotFoundException => "java.lang.ClassNotFoundException",
+        AssertionError => "java.lang.AssertionError",
+        OutOfMemoryError => "java.lang.OutOfMemoryError",
+        StackOverflowError => "java.lang.StackOverflowError",
+    }
+}
+
+pub(crate) fn jdk_exception_binary_name(name: &str) -> Option<&'static str> {
+    JDK_EXCEPTION_BINARY_NAMES
+        .iter()
+        .find(|(short, binary)| name == *short || name == *binary)
+        .map(|(_, binary)| *binary)
+}
 
 /// Whether the edge table mentions `name` at all, as a child or a parent.
 ///
@@ -1642,6 +1740,7 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
         facts
             .external_api_argument_effect_facts
             .push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
                 method_name: method.to_string(),
                 receiver_type: Some("String".to_string()),
                 arg_count: Some(4),
@@ -2916,6 +3015,7 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             facts
                 .external_api_argument_effect_facts
                 .push(ExternalApiArgumentEffectFact {
+                    null_message_function: None,
                     method_name: method.to_string(),
                     receiver_type: Some(owner.to_string()),
                     arg_count: Some(4),
@@ -3576,6 +3676,7 @@ fn jdk_owned_argument_effect(
     parameter_type: JavaType,
 ) -> ExternalApiArgumentEffectFact {
     ExternalApiArgumentEffectFact {
+        null_message_function: None,
         method_name: method_name.to_string(),
         receiver_type: Some(owner.to_string()),
         arg_count: Some(arg_count),
@@ -4906,6 +5007,12 @@ pub fn known_external_method_return_type_for_receiver(
 
     let receiver_key = receiver_type.and_then(external_known_builtin_receiver_owner_key);
     match (receiver_key.as_deref(), name, arg_count) {
+        (Some("Integer" | "Long"), "signum", 1) => {
+            return Some(JavaType::Primitive(PrimitiveType::Int));
+        }
+        (Some("Integer" | "Long"), "compare" | "compareUnsigned" | "compare_unsigned", 2) => {
+            return Some(JavaType::Primitive(PrimitiveType::Int));
+        }
         (Some("Integer"), "toUnsignedLong" | "to_unsigned_long", 1)
         | (
             Some("Long"),
@@ -15235,31 +15342,47 @@ impl<T: JavaArraysToStringElement> JavaArraysToStringElement for Option<T> {
 }
 
 pub trait JavaArraysToStringInput<T> {
-    fn java_arrays_to_string_slice(&self) -> Option<&[T]>;
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R;
 }
 
 impl<T> JavaArraysToStringInput<T> for [T] {
-    fn java_arrays_to_string_slice(&self) -> Option<&[T]> {
-        Some(self)
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        visit(Some(self))
     }
 }
 
 impl<T> JavaArraysToStringInput<T> for Vec<T> {
-    fn java_arrays_to_string_slice(&self) -> Option<&[T]> {
-        Some(self.as_slice())
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        visit(Some(self.as_slice()))
     }
 }
 
 impl<T, U: JavaArraysToStringInput<T> + ?Sized> JavaArraysToStringInput<T> for &U {
-    fn java_arrays_to_string_slice(&self) -> Option<&[T]> {
-        (*self).java_arrays_to_string_slice()
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        (*self).with_java_arrays_to_string_slice(visit)
     }
 }
 
 impl<T, U: JavaArraysToStringInput<T>> JavaArraysToStringInput<T> for Option<U> {
-    fn java_arrays_to_string_slice(&self) -> Option<&[T]> {
-        self.as_ref()
-            .and_then(JavaArraysToStringInput::java_arrays_to_string_slice)
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        match self.as_ref() {
+            Some(value) => value.with_java_arrays_to_string_slice(visit),
+            None => visit(None),
+        }
+    }
+}
+
+impl<T> JavaArraysToStringInput<T> for std::rc::Rc<std::cell::RefCell<Vec<T>>> {
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        let values = self.borrow();
+        visit(Some(values.as_slice()))
+    }
+}
+
+impl<T> JavaArraysToStringInput<T> for std::sync::Arc<std::sync::Mutex<Vec<T>>> {
+    fn with_java_arrays_to_string_slice<R>(&self, visit: impl FnOnce(Option<&[T]>) -> R) -> R {
+        let values = self.lock().expect("Java shared array mutex poisoned");
+        visit(Some(values.as_slice()))
     }
 }
 
@@ -15269,15 +15392,17 @@ pub fn java_arrays_to_string<
 >(
     values: V,
 ) -> String {
-    let Some(values) = values.java_arrays_to_string_slice() else {
-        return "null".to_string();
-    };
-    let body = values
-        .iter()
-        .map(JavaArraysToStringElement::java_arrays_to_string_element)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{body}]")
+    values.with_java_arrays_to_string_slice(|values| {
+        let Some(values) = values else {
+            return "null".to_string();
+        };
+        let body = values
+            .iter()
+            .map(JavaArraysToStringElement::java_arrays_to_string_element)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("[{body}]")
+    })
 }
 
 pub mod logger {
@@ -16515,7 +16640,9 @@ fn source_erased_object_reference_identity_downcasts_with_optional(
         arms: &mut BTreeSet<String>,
         optional: bool,
     ) {
-        if plan.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name)) {
+        if plan.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name))
+            && !source_type_is_source_hierarchy_carrier_root(ty, plan)
+        {
             for member in &ty.members {
                 if let Member::Type(nested) = member {
                     visit(nested, facts, plan, arms, optional);
@@ -16782,7 +16909,9 @@ fn collect_source_erased_object_clone_downcasts(
     representations: Option<&RepresentationPlan>,
     arms: &mut BTreeSet<String>,
 ) {
-    if representations.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name)) {
+    if representations.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name))
+        && !source_type_is_source_hierarchy_carrier_root(ty, representations)
+    {
         for member in &ty.members {
             if let Member::Type(nested) = member {
                 collect_source_erased_object_clone_downcasts(
@@ -18540,7 +18669,7 @@ fn collect_source_erased_object_to_string_downcasts(
     {
         let rust_name = rust_name_for_java_named_type(&ty.name);
         let has_to_string_name_collision = ty.members.iter().any(|member| {
-            matches!(member, Member::Method(method) if crate::parser::to_snake_case(&method.name) == "to_string")
+            matches!(member, Member::Method(method) if crate::java_signature::source_method_rust_name(method) == "to_string")
         }) && !source_type_has_effective_java_to_string(ty, program);
         if has_to_string_name_collision && !result_mode {
             let java_name = if ty.name.contains('.') {
@@ -18613,6 +18742,9 @@ fn source_type_is_source_hierarchy_carrier_root(
     let Some(representations) = representations else {
         return false;
     };
+    if representations.abstract_owner_is_declaration_only(&ty.name) {
+        return false;
+    }
     let java_ty = JavaType::Named {
         name: ty.name.clone(),
         args: Vec::new(),
@@ -19822,6 +19954,25 @@ pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
     }
 }
 
+pub fn java_integral_to_string(value: i64, radix: i32) -> String {
+    let radix = if (2..=36).contains(&radix) { radix as u64 } else { 10 };
+    let mut magnitude = value.unsigned_abs();
+    let mut buffer = [0u8; 65];
+    let mut cursor = buffer.len();
+    loop {
+        let digit = (magnitude % radix) as u8;
+        cursor -= 1;
+        buffer[cursor] = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
+        magnitude /= radix;
+        if magnitude == 0 { break; }
+    }
+    if value < 0 {
+        cursor -= 1;
+        buffer[cursor] = b'-';
+    }
+    String::from_utf8(buffer[cursor..].to_vec()).expect("integral formatter emits ASCII digits")
+}
+
 pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
     value
         .as_ref()
@@ -20034,6 +20185,8 @@ pub(crate) fn java_string_identity_support_item() -> crate::rust_ir::RustItem {
         concat!(
             include_str!("java_string_identity.rs"),
             include_str!("java_utf16_string.rs"),
+            include_str!("../runtime/java-math/src/numeric_text.rs"),
+            include_str!("java_integral_text.rs"),
             include_str!("java_float_text.rs"),
             include_str!("java_string_split.rs"),
             r#"pub type JavaString = JavaUtf16String;
@@ -20764,6 +20917,7 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     support.promote_external_generic_bound_traits(
         &[program, local_type_program, source_summary_type_program],
         &declared_external_type_exclusions,
+        facts,
     );
     record_external_facade_profile_phase(
         profile_facade,
@@ -22204,6 +22358,7 @@ impl ExternalApiFacadeSupport {
         &mut self,
         programs: &[&Program],
         local_types: &BTreeSet<String>,
+        facts: &FactSet,
     ) {
         let mut bounds = BTreeMap::<String, ExternalGenericBoundEvidence>::new();
         for program in programs {
@@ -22215,6 +22370,12 @@ impl ExternalApiFacadeSupport {
             let trait_name = rust_name_for_java_named_type(&type_key);
             if local_type_set_matches_external_name(local_types, &bound_name)
                 || is_builtin_external_facade_type(&trait_name)
+                || crate::effective_facts::EffectiveFacts::new(facts)
+                    .native_functional_carrier(&JavaType::Named {
+                        name: bound_name.clone(),
+                        args: Vec::new(),
+                    })
+                    .is_some()
                 || !valid_external_facade_type_ident(&trait_name)
             {
                 continue;
@@ -35059,6 +35220,22 @@ fn source_summary_facade_args_with_prefix(
     }
 }
 
+pub(crate) fn source_summary_facade_varargs_param_shape(
+    java_type: &JavaType,
+) -> Option<crate::slot_shape::RustSlotShape> {
+    let JavaType::Array(element) = java_type else {
+        return None;
+    };
+    if !source_summary_facade_param_is_erased_object(element) {
+        return None;
+    }
+    Some(crate::slot_shape::RustSlotShape::for_storage(
+        JavaType::Array(Box::new(crate::types::optional_java_type(
+            element.as_ref().clone(),
+        ))),
+    ))
+}
+
 fn source_summary_facade_param_type(
     facts: &FactSet,
     owner: &str,
@@ -35069,11 +35246,10 @@ fn source_summary_facade_param_type(
     varargs: bool,
     returned_param: bool,
 ) -> String {
-    if varargs
-        && let JavaType::Array(element) = java_type
-        && source_summary_facade_param_is_erased_object(element)
-    {
-        return "Vec<Option<Box<dyn std::any::Any>>>".to_string();
+    if varargs && let Some(shape) = source_summary_facade_varargs_param_shape(java_type) {
+        return crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
+            &shape, facts,
+        ));
     }
     if !varargs && !returned_param {
         if matches!(java_type, JavaType::Named { name, .. } | JavaType::Unknown(name)
@@ -42590,6 +42766,36 @@ mod source_summary_method_identity_tests {
     use super::*;
 
     #[test]
+    fn source_summary_varargs_shape_matches_the_declared_facade_abi() {
+        let java_type = crate::parser::parse_type("Object[]");
+        let shape = source_summary_facade_varargs_param_shape(&java_type).unwrap();
+        assert!(!shape.native_allocation.shared());
+        assert!(
+            crate::types::optional_element_type(&shape.sequence_element_type().unwrap()).is_some()
+        );
+        assert_eq!(
+            source_summary_facade_param_type(
+                &FactSet::default(),
+                "Context",
+                "append",
+                1,
+                0,
+                &java_type,
+                true,
+                false
+            ),
+            crate::emit::emit_type(&crate::slot_render::rust_type_for_slot_with_facts(
+                &shape,
+                &FactSet::default()
+            ))
+        );
+        assert!(
+            source_summary_facade_varargs_param_shape(&crate::parser::parse_type("int[]"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn source_summary_boxed_primitive_param_keeps_nullable_concrete_type() {
         assert_eq!(
             source_summary_facade_param_type(
@@ -43585,6 +43791,14 @@ mod functional_interface_shape_tests {
     fn object_roots_match_the_java_signatures() {
         assert_eq!(shape_of("Runnable"), ("run", vec![], None));
         assert_eq!(shape_of("Supplier"), ("get", vec![], Some(TypeArgument(0))));
+        assert_eq!(
+            shape_of("Comparable"),
+            (
+                "compareTo",
+                vec![TypeArgument(0)],
+                Some(Primitive(PrimitiveType::Int))
+            )
+        );
         assert_eq!(
             shape_of("Consumer"),
             ("accept", vec![TypeArgument(0)], None)

@@ -10265,6 +10265,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     external_constructor_facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
             arg_count: None,
@@ -11448,6 +11449,7 @@ fn static_external_owner_argument_shapes_use_external_effect_facts() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
             arg_count: None,
@@ -11525,6 +11527,7 @@ fn static_import_lowering_borrows_arguments_from_external_effect_facts() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
             arg_count: None,
@@ -11589,6 +11592,7 @@ fn static_import_support_uses_external_return_facts_without_instance_duplicate()
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
             arg_count: None,
@@ -11721,6 +11725,7 @@ fn static_external_facade_uses_nullable_argument_fact_without_call_site_type_hac
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "read".to_string(),
             receiver_type: Some("external.lib.ReaderFactory".to_string()),
             arg_count: None,
@@ -11796,6 +11801,7 @@ fn external_static_validation_facade_uses_side_effect_fact_return() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "validate".to_string(),
             receiver_type: Some("org.example.validation.Utils".to_string()),
             arg_count: None,
@@ -12186,6 +12192,7 @@ fn static_import_support_reuses_fqn_return_facts_for_simple_owner_facade() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "isGenomicsDBArray".to_string(),
             receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
             arg_count: None,
@@ -12199,6 +12206,7 @@ fn static_import_support_reuses_fqn_return_facts_for_simple_owner_facade() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "isGenomicsDBArray".to_string(),
             receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
             arg_count: None,
@@ -17595,6 +17603,7 @@ fn external_api_call_lookup_uses_argument_effect_types_before_arity_fallback() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: "read".to_string(),
             receiver_type: Some("TypedReader".to_string()),
             arg_count: Some(1),
@@ -28433,6 +28442,7 @@ class UseExternalGetterMissingReturnFact {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("ExternalHandle".to_string()),
             method_name: "fetchRecord".to_string(),
             arg_count: Some(1),
@@ -28616,6 +28626,7 @@ class UseImportedStaticMissingReturnFact {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("external.lib.StaticUtility".to_string()),
             method_name: "fetchRecord".to_string(),
             arg_count: Some(1),
@@ -38955,7 +38966,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_varargs_source.contains("format!(\"vec![{}]\""));
     assert!(!lower_varargs_source.contains("let mut __java_varargs = {packed_vec}"));
     assert!(lower_varargs_source.contains("varargs_packed_vec_projection(varargs)"));
-    assert!(lower_varargs_source.contains("varargs_spread_extend_projection(packed_vec, tail)"));
+    // A trailing array after other varargs is one Java element, not a spread.
+    assert!(!lower_varargs_source.contains("varargs_spread_extend_projection(packed_vec, tail)"));
     assert!(coercion_source.contains("pub(crate) fn varargs_packed_vec_projection"));
     assert!(coercion_source.contains("pub(crate) fn varargs_spread_extend_projection"));
     assert!(coercion_source.contains("fn varargs_spread_extend_block_leaf"));
@@ -43045,6 +43057,7 @@ fn nullable_external_constructor_callback_slot_wraps_method_reference_branch() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
             arg_count: None,
@@ -43120,6 +43133,7 @@ fn unknown_external_constructor_callback_nullability_stays_non_optional() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
             arg_count: None,
@@ -43172,6 +43186,7 @@ fn external_constructor_owned_set_param_clones_optional_self_field_element() {
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
             arg_count: None,

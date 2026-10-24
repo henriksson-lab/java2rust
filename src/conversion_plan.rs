@@ -465,6 +465,7 @@ pub enum DispatchCoercionPolicy {
         clone_source: bool,
     },
     EraseObject,
+    CloneHierarchyToErasedObject,
     /// Clone the concrete Java reference, not its interface adapter box.
     CloneDynTraitToErasedObject {
         trait_name: String,
@@ -1579,6 +1580,7 @@ pub fn java_cast_semantics_policy_with_facts(
             | DispatchCoercionPolicy::BoxDynTrait { .. }
             | DispatchCoercionPolicy::UpcastBoxedDynTrait { .. }
             | DispatchCoercionPolicy::EraseObject
+            | DispatchCoercionPolicy::CloneHierarchyToErasedObject
             | DispatchCoercionPolicy::CloneDynTraitToErasedObject { .. } => {
                 JavaCastSemanticsPolicy::ReferenceUpcast
             }
@@ -2946,11 +2948,18 @@ pub fn dispatch_coercion_policy_with_facts(
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
             DispatchCoercionPolicy::EraseObject
         }
-        (DispatchShape::ClosedEnum { .. }, DispatchShape::ErasedObject) => {
+        (DispatchShape::ClosedEnum { enum_name }, DispatchShape::ErasedObject) => {
             // A closed hierarchy enum is already the concrete runtime carrier
             // for the Java value.  Crossing an Object boundary erases that
             // carrier in exactly the same way as a concrete struct.
-            DispatchCoercionPolicy::EraseObject
+            if facts
+                .source_hierarchy_carrier_variants
+                .contains_key(enum_name)
+            {
+                DispatchCoercionPolicy::CloneHierarchyToErasedObject
+            } else {
+                DispatchCoercionPolicy::EraseObject
+            }
         }
         (DispatchShape::ClosedEnum { enum_name }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
@@ -3202,8 +3211,20 @@ fn erased_object_closed_enum_variants_for_target(
         JavaType::Named { args, .. } => args.clone(),
         _ => Vec::new(),
     };
-    let mut variants = vec![target_name.to_string()];
-    for fact in &facts.type_capability_overrides {
+    let published = match &target.dispatch {
+        DispatchShape::ClosedEnum { enum_name } => {
+            facts.source_hierarchy_carrier_variants.get(enum_name)
+        }
+        _ => None,
+    };
+    let mut variants = published
+        .cloned()
+        .unwrap_or_else(|| vec![target_name.to_string()]);
+    for fact in facts
+        .type_capability_overrides
+        .iter()
+        .filter(|_| published.is_none())
+    {
         if fact.provenance != crate::facts::FactProvenance::ParsedSource {
             continue;
         }
@@ -3258,8 +3279,17 @@ fn closed_enum_variants_reaching_target(
         args: Vec::new(),
     };
     let mut variants = std::collections::BTreeSet::new();
+    let published = match &actual.dispatch {
+        DispatchShape::ClosedEnum { enum_name } => {
+            facts.source_hierarchy_carrier_variants.get(enum_name)
+        }
+        _ => None,
+    };
     for fact in &facts.type_capability_overrides {
         if fact.provenance != crate::facts::FactProvenance::ParsedSource {
+            continue;
+        }
+        if published.is_some_and(|owners| !owners.contains(&fact.type_name)) {
             continue;
         }
         let candidate = JavaType::Named {
@@ -3607,6 +3637,9 @@ impl ShapeCoercionPlan {
     ) -> Self {
         let native_allocation = if actual.native_allocation == target.native_allocation
             || (!actual.native_allocation.shared() && !target.native_allocation.shared())
+            // Erasure boxes the existing carrier; the Object slot has no
+            // collection allocation to convert to. Preserve its identity.
+            || matches!(dispatch, DispatchCoercionPolicy::EraseObject)
         {
             NativeAllocationCoercionPolicy::Preserve
         } else {
@@ -3909,6 +3942,9 @@ pub enum InstanceOfCheck {
     BoxedDynTraitType {
         target_type: String,
     },
+    OptionalPayload {
+        check: Box<InstanceOfCheck>,
+    },
     ErasedObjectType {
         target_type: String,
     },
@@ -4097,7 +4133,7 @@ pub fn plan_instanceof_check_with_facts(
         | JavaType::Unknown(class_name) = &target.java_ty
     {
         return InstanceOfCheck::ThrowableType {
-            class_name: class_name.clone(),
+            class_name: facts.exception_binary_name_for(class_name).to_owned(),
             optional: actual.optional_element_type().is_some(),
         };
     }
@@ -4153,6 +4189,19 @@ pub fn plan_instanceof_check_with_facts(
     }
     if let Some(element_ty) = actual.optional_element_type() {
         let element_shape = optional_element_slot_shape(actual, element_ty);
+        if matches!(
+            element_shape.dispatch,
+            DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+        ) && matches!(target.dispatch, DispatchShape::Concrete)
+        {
+            return InstanceOfCheck::OptionalPayload {
+                check: Box::new(plan_instanceof_check_with_facts(
+                    &element_shape,
+                    target,
+                    facts,
+                )),
+            };
+        }
         if matches!(element_shape.dispatch, DispatchShape::ErasedObject)
             && matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
             && let InstanceOfCheck::ErasedObjectClosedEnum {
@@ -5747,6 +5796,28 @@ mod tests {
             optional_plan.native_allocation(),
             &NativeAllocationCoercionPolicy::Preserve
         );
+    }
+
+    #[test]
+    fn native_array_erasure_preserves_handle_but_array_storage_changes_are_rejected() {
+        use super::*;
+        let mut actual = RustSlotShape::for_storage(crate::parser::parse_type("int[]"));
+        actual.native_allocation =
+            crate::storage_strategy::StoragePlacement::new(true, true, false);
+        let mut target = RustSlotShape::for_storage(crate::parser::parse_type("Object"));
+        target.dispatch = DispatchShape::ErasedObject;
+        let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
+        assert_eq!(plan.dispatch(), &DispatchCoercionPolicy::EraseObject);
+        assert_eq!(
+            plan.native_allocation(),
+            &NativeAllocationCoercionPolicy::Preserve
+        );
+        let target = RustSlotShape::for_storage(crate::parser::parse_type("int[]"));
+        let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
+        assert!(matches!(
+            plan.native_allocation(),
+            NativeAllocationCoercionPolicy::UnsupportedPlacementChange { .. }
+        ));
     }
 
     use super::*;

@@ -1391,6 +1391,7 @@ fn push_external_api_argument_effect_fact(
     facts
         .external_api_argument_effect_facts
         .push(ExternalApiArgumentEffectFact {
+            null_message_function: None,
             method_name: method_name.to_string(),
             receiver_type: parse_receiver_type(receiver_type),
             arg_count: None,

@@ -10,7 +10,10 @@ use crate::java_ir::{
     WildcardBound,
 };
 
-pub(crate) fn declaration_only_abstract_owners(program: &Program) -> HashSet<String> {
+pub(crate) fn declaration_only_abstract_owners(
+    program: &Program,
+    captures: &crate::facts::CaptureFacts,
+) -> HashSet<String> {
     fn types<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>, captured: &mut HashSet<String>) {
         out.push(ty);
         for member in &ty.members {
@@ -47,7 +50,7 @@ pub(crate) fn declaration_only_abstract_owners(program: &Program) -> HashSet<Str
         return candidates;
     }
 
-    let mut uses = ValueTypeUses::default();
+    let mut uses = ValueTypeUses::from_captures(captures);
     for ty in &program.types {
         uses.declaration(ty);
     }
@@ -128,7 +131,10 @@ fn leaf(name: &str) -> &str {
 /// promising an impossible raw virtual receiver. This is deliberately a
 /// separate admission tier from the stateless declaration-only proof above.
 /// All ordinary instance bodies still materialize on concrete descendants.
-pub(crate) fn construction_only_abstract_owners(program: &Program) -> HashSet<String> {
+pub(crate) fn construction_only_abstract_owners(
+    program: &Program,
+    captures: &crate::facts::CaptureFacts,
+) -> HashSet<String> {
     fn collect<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>, captured: &mut HashSet<String>) {
         out.push(ty);
         for member in &ty.members {
@@ -148,7 +154,7 @@ pub(crate) fn construction_only_abstract_owners(program: &Program) -> HashSet<St
     for ty in &program.types {
         collect(ty, &mut declarations, &mut captured);
     }
-    let mut uses = ValueTypeUses::default();
+    let mut uses = ValueTypeUses::from_captures(captures);
     for ty in &program.types {
         uses.declaration(ty);
     }
@@ -321,6 +327,17 @@ struct ValueTypeUses {
     opaque: bool,
 }
 impl ValueTypeUses {
+    fn from_captures(captures: &crate::facts::CaptureFacts) -> Self {
+        let mut uses = Self::default();
+        // Closure environments are real typed values even when no source
+        // local or field spells the captured receiver's type.
+        for owner in &captures.owners {
+            for capture in &owner.captures {
+                uses.ty(&capture.ty);
+            }
+        }
+        uses
+    }
     fn ty(&mut self, ty: &JavaType) {
         match ty {
             JavaType::Named { name, args } => {
@@ -490,7 +507,7 @@ mod tests {
              class Uses {{ {extra} }}"
         ));
         assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
-        construction_only_abstract_owners(&parsed.program).contains("Base")
+        construction_only_abstract_owners(&parsed.program, &Default::default()).contains("Base")
     }
 
     #[test]
@@ -561,7 +578,10 @@ mod tests {
                 "{parent} abstract class Base extends Parent {{ int state; Base(int x) {{ state = x; }} abstract int next(); }}
                  class Leaf extends Base {{ Leaf() {{ super(7); }} int next() {{ return state; }} }}"
             ));
-            assert!(!construction_only_abstract_owners(&parsed.program).contains("Base"));
+            assert!(
+                !construction_only_abstract_owners(&parsed.program, &Default::default())
+                    .contains("Base")
+            );
         }
     }
 
@@ -574,14 +594,14 @@ class Uses {{ {extra} }}
 "#
         ));
         assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
-        declaration_only_abstract_owners(&parsed.program).contains("Base")
+        declaration_only_abstract_owners(&parsed.program, &Default::default()).contains("Base")
     }
 
     #[test]
     fn stateless_abstract_bodies_have_a_concrete_materialization_owner() {
         assert!(admits("static int run() { return new Leaf().twice(); }"));
         let parsed = parse_java_source("abstract class Base { abstract int next(); }");
-        assert!(declaration_only_abstract_owners(&parsed.program).is_empty());
+        assert!(declaration_only_abstract_owners(&parsed.program, &Default::default()).is_empty());
     }
 
     #[test]
@@ -616,7 +636,8 @@ class Uses {{ {extra} }}
                 "{base} class Leaf extends Base {{ int next() {{ return 1; }} }}"
             ));
             assert!(
-                !declaration_only_abstract_owners(&parsed.program).contains("Base"),
+                !declaration_only_abstract_owners(&parsed.program, &Default::default())
+                    .contains("Base"),
                 "{base}"
             );
         }
@@ -628,6 +649,6 @@ class Uses {{ {extra} }}
             "class Outer { int value; abstract class Base { abstract int next(); } class Leaf extends Base { int next() { return value; } } }",
         );
         assert!(!parsed.diagnostics.has_errors());
-        assert!(declaration_only_abstract_owners(&parsed.program).is_empty());
+        assert!(declaration_only_abstract_owners(&parsed.program, &Default::default()).is_empty());
     }
 }

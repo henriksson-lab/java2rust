@@ -2,6 +2,22 @@
 mod common;
 
 #[test]
+fn literal_string_replacement_keeps_utf16_overloads_nulls_and_identity() {
+    common::verify_java_fixture_zero_contract(
+        "lossless_string_replace",
+        "StringReplaceProbe",
+        "tests/corpus/numbers/StringReplaceProbe.java",
+        include_str!("corpus/numbers/StringReplaceProbe.java"),
+        r#"
+trait OracleExitCode { fn value(self) -> i32; }
+impl OracleExitCode for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> OracleExitCode for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn replacement() { assert_eq!(StringReplaceProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
 fn reflective_class_names_share_the_logical_string_result_boundary() {
     common::verify_java_fixture_zero_contract(
         "reflective_class_name_contracts",

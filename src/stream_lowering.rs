@@ -4231,6 +4231,7 @@ fn emit_stream_lambda_stmt_structured(
             source_name,
             initializer,
             binding,
+            ..
         } => {
             let rust_name = ctx
                 .env
