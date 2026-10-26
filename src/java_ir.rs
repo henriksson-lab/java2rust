@@ -174,6 +174,9 @@ pub enum Modifier {
     Abstract,
     /// Set only by an enum constant declaration, not a Java source modifier.
     EnumConstant,
+    /// An abstract surface contract materialized from a source/native parent.
+    /// This is derived IR provenance, not a declared Java source modifier.
+    InheritedContract,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -404,6 +407,10 @@ pub enum Expr {
     MethodReference {
         target: String,
         method: String,
+        /// Parsed receiver/ambiguous expression name. Type-only constructor
+        /// targets have no expression. Resolution retains call identities here;
+        /// consumers must not reconstruct this tree from `target` text.
+        receiver: Option<Box<Expr>>,
     },
     ClassLiteral(JavaType),
     Unsupported {
@@ -415,6 +422,8 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LambdaParam {
+    /// Declaration identity in the enclosing callable's lexical local frame.
+    pub binding: Option<BindingId>,
     pub name: String,
     pub source_name: String,
     pub ty: Option<JavaType>,
@@ -518,6 +527,10 @@ fn expr_mentions_this_or_super(expr: &Expr) -> bool {
     match expr {
         Expr::This | Expr::Super => true,
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => expr_mentions_this_or_super(receiver),

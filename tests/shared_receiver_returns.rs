@@ -77,10 +77,10 @@ class Use {
             tests: r#"
 #[test]
 fn generic_getters_preserve_values_and_shared_mutation() {
-    assert_eq!(Use::read_only_probe(), 3);
-    assert_eq!(Use::mutable_probe(), 7);
-    assert_eq!(Use::inherited_probe(), 9);
-    assert_eq!(Use::reused_probe(), 8);
+    assert_eq!(Use::read_only_probe().unwrap(), 3);
+    assert_eq!(Use::mutable_probe().unwrap(), 7);
+    assert_eq!(Use::inherited_probe().unwrap(), 9);
+    assert_eq!(Use::reused_probe().unwrap(), 8);
 }
 
 #[test]

@@ -1,0 +1,2268 @@
+Jahmm translator efficiency: consolidated current handover
+
+Scope and user steering
+- Active goal: efficient, semantically correct generated Rust for the saved
+  Jahmm inference workload, through general translator/runtime changes.
+- Commons Statistics remains paused. Preserve docs/commons-statistics-handover.txt.
+- Do not change pinned Java sources or repair generated corpus bodies. Thin
+  benchmark callers may be updated mechanically to the emitted API.
+- The user explicitly says further profiling/benchmarking is barely needed:
+  generated code and counted reference-copy probes establish the overhead.
+  This supersedes the goal's profile-first wording. Use focused semantic and
+  allocation checks while editing; one final timing/RSS/parity comparison.
+- Batch coherent changes before expensive release rebuilds/full corpus checks.
+  Do not stage/commit without a new request. The large dirty worktree includes
+  paused Statistics changes: preserve them.
+
+Baseline and acceptance
+Saved runner: scripts/benchmark-showcase.py. Thin callers and Java driver are
+in benchmarks/showcase/. Frozen translation .tmp/jahmm-full-v122; saved run
+.tmp/showcase-jahmm-20261025 includes portable reproduction inputs.
+Jahmm v0.7.1-SNAPSHOT: 95 source files, about 8904 lines. Saved workload:
+16 states, 5 symbols, 32 sequences of 4000 observations. Original run produced
+128000 decoded states and 64 likelihoods; Java/Rust stdout and stderr matched
+exactly, including raw likelihood bits (no tolerance).
+One-run baseline: default Java 0.86s / 105.07 MiB, capped Java 0.81s / 67.80 MiB,
+release Rust 1.36s / 3.84 MiB. This is library inference, not full API acceptance;
+the frozen summary includes four no-op facade sites. Preserve that limitation.
+The frozen producer lacks a binary SHA; current pipeline records one.
+Final acceptance remains UNPROVEN: regenerate all 95 files, compile complete
+crate, adapt only caller plumbing, run saved workload, preserve exact parity
+and record elapsed/RSS comparison. No final updated workload run has happened.
+
+Full-source command (increase vN for each substantial batch)
+NEW_JAVA2RUST_BIN="$PWD/target/release/new-java2rust" \
+NEW_JAVA2RUST_BUILD_PROFILE=release \
+CARGO_TARGET_DIR=/tmp/jahmm-efficiency-cargo-target \
+scripts/translate-focused-package.sh \
+ --primary /home/mahogny/github/claude/java2rust/testdata/jahmm/src/main/java \
+ --out /tmp/jahmm-efficiency-vN --skip-resolver-bench --offline-cargo --jobs 4
+Build: CARGO_NET_OFFLINE=true cargo build --release --bin new-java2rust.
+Full pass takes about 4 minutes, including about 2 minutes emission and
+90-100 seconds assembly. Release rebuilds usually take about 1m50s.
+Final runner: python3 scripts/benchmark-showcase.py jahmm --translation-root
+/tmp/jahmm-efficiency-vN --out /tmp/jahmm-showcase-vN --target-dir /tmp/...
+Runner verifies emitted module hashes and compiles complete translation.
+Current APIs have retained Rc/RefCell JavaNativeCollection and array handles,
+nullable arguments and other differences from frozen caller's Vec APIs.
+
+Completed whole-path improvements and regression repairs
+1. Receiver-independent handle companions (src/lower.rs).
+   Reused source_method_body_is_receiver_independent from private receiver
+   elimination. Do not replace a lowered pure shared-handle body with a
+   borrowed-method delegate that reacquires the payload Mutex/RefCell guard.
+   LogSpace.log_impl/exp_impl now execute scalar arithmetic without that guard.
+   Preserve the handle parameter, null/evaluation semantics, virtual dispatch
+   and synchronized-method monitors. Field-reading/mutating methods keep guards.
+   LogSpace.INST is public static MUTABLE, not final: its storage mutex remains.
+   Static-final concrete shared source references initialized at declaration
+   can use OnceLock through the common storage/coercion projection. Mutable
+   statics and blank finals initialized by clinit retain the old storage path.
+   tests/receiver_identity.rs covers held-mutex pure calls, required monitors,
+   field reads, final singleton cross-thread identity and mutable/blank-final
+   fallback. Four checks passed in the initial batches.
+
+2. Native reference copies versus Java clone.
+   Qualified native Rc/Arc copies with typed Rust Clone to avoid source Java
+   clone methods shadowing Rc::clone/Arc::clone. Runtime erased-reference copy
+   registries also use qualified Rust Clone. Generic carrier forwarding uses
+   the existing trait_value_path turbofish helper. This eliminated 1195 E0034
+   diagnostics in the first fresh run.
+   A final missed Arc::clone in src/java_byte_buffer.rs::array was found by a
+   non-generic Java clone interface witness during v8. It now uses the same
+   typed qualification. This one-line runtime fix is needed for generic source
+   compilation; it does not resume paused Statistics corpus work.
+
+3. Ownership snapshots (lower.rs, coercion.rs).
+   snapshot_java_reference_value moves new/already-owned call results and
+   recovered native handles instead of cloning and immediately dropping them.
+   Ordinary and mapped interface staging, object display and retained array
+   reads/writes share the policy. Canonical native clone producers use typed
+   TraitAssociatedPath IR and OwnedRecovery evidence. Recovery recognizes
+   typed native Rc/Arc clone maps after adapter tags obscure the original
+   marker; arbitrary value.clone() maps are deliberately not ownership proofs
+   because they can copy a loan instead of the payload.
+   Counted interface regression establishes 2 -> 1 wrapper copies per getter
+   invocation against the previous v4 release. Shared mutation/null checks
+   remain intact. A field/list read still copies one Box wrapper: this is NOT
+   an allocation-free interface representation. The saved workload performs
+   about 4.1M getter calls. v122 often already made one copy, so do not claim
+   that 2 -> 1 alone establishes a speedup over the frozen baseline.
+   Array oracle verifies aliases and capture before an index that rebinds the
+   owner; nullable capture still throws after index effects. tests/owned_receiver_snapshots.rs
+   has two checks and passes with the current batch.
+
+4. Implicit and explicit Java object text.
+   Interface concatenation/valueOf reuse checked virtual Object-string
+   dispatch, including source overrides, foreign trait fallback, null text,
+   nullable toString returns, exceptions and owner reentry. Capture references
+   before override callbacks; do not hold owner guards across Java code.
+   Effect planning includes implicit interface display. Signature inference
+   preserves nullable implicit Object results through interface wrappers.
+   Native throwable display uses JavaException and lossless logical text;
+   append/concat borrow the real runtime carrier. StreamTokenizer char-range
+   methods accept JavaCodeUnit via JavaTokenizerCharCode.
+   Generic inherited interface Java clone calls use physical stored-child
+   shape, not a nominal erased Object result; same helper handles staging.
+   Collection display's null branch converts its literal to logical Java text.
+   Focused interface/throwable/sampling/source-clone/tokenizer syntax checks
+   passed. Broader tokenizer still has preexisting Reader/StringReader logical
+   String ABI and StreamTokenizer.sval() native String gaps; not fixed yet.
+
+5. Generic inference and collection read contracts.
+   src/resolve/inference_capture.rs implements shallow invocation-local capture
+   of direct wildcard arguments. Fresh binder names avoid source/caller names;
+   TypeEnv stores lower bounds and declaration upper/intersection bounds.
+   Invariant positions seed substitutions before inequality inference. Captured
+   applicability gates single-candidate recovery too: independent captures
+   cannot unify invariant containers and arbitrary writes through extends/?
+   remain invalid. Restore source wildcards in selected callable evidence;
+   expression results expose upper bounds, with no synthetic names leaking.
+   Resolver unit checks and javac positive/negative witnesses passed; evidence
+   is under .tmp/jahmm-efficiency-v3-evidence/capture-javac-oracle.
+   v4 fixed the actual Jahmm compute_probability Hmm/list storage contracts.
+   Existing generic_read_type now has a borrowed projection shared by generic
+   rendering, iterator clone selection and collection read/storage shapes.
+   ? extends O reads O; ? super O and ? keep their erased read domains. This
+   projects one value; never reinterprets an invariant container.
+   wildcard_inference: seven checks passed, including method/owner generic read
+   oracles and capture/write rejection. slot_render: 39 unit checks passed.
+   Direct iterator-domain unit ran once with its fully qualified --exact name;
+   the earlier unqualified filter ran zero and is not evidence.
+
+6. Generic source hierarchy marker.
+   Generic closed carriers retain logical parameters with a fresh impossible
+   variant containing Infallible and PhantomData<fn() -> (T,...)>. Adds no
+   inhabited case or T Clone/Send/Sync bound. All generated reference matches
+   explicitly eliminate that variant: forwarding, clone, text, hash, identity,
+   class, field get/set/borrow and erased references. Name avoids real variants.
+   tests/generic_hierarchy_markers.rs runs a Java/Rust alias/dispatch/hash
+   oracle, has a source subtype named __JavaTypeMarker, and proves Clone for
+   a non-Clone logical parameter. It passed; 77 representation unit tests passed.
+
+7. Private receiver elimination and argument contracts.
+   A private helper became a Rust static function with owned retained-array
+   parameters, but call lookup rejected its original instance declaration and
+   passed a borrow. Static-target lookup now admits the declaration only when
+   the existing receiver-removal proof applies, then uses the common emitted
+   parameter contract. The v6 unmodified ArrayParameterContract witness has two
+   E0308 errors reproduced by rustc; the new nullable-array/alias oracle passes.
+   Evidence: .tmp/jahmm-efficiency-v6-evidence/contract-audit.
+
+V8 batch: enums and fresh borrowed arguments
+- JavaEnum supplies the JavaMapKey capability already implemented by every
+  source enum, plus Any (singleton tokens are static). Opaque generic-bound
+  promotion consults the existing JDK bound projection in item_assembly, so
+  it cannot invent a conflicting Enum<T> trait alongside the native protocol.
+  Parsed source types retain precedence over platform-name projection.
+- Calls through an enum binder reuse checked virtual Object-string handling,
+  including nullable/throwing overrides. name() uses existing enum API lowering
+  and interned Java strings. Copy enum references before callbacks to release
+  any owner payload guard. Ordinary enum methods explicitly bind physical
+  borrowed this metadata through the existing shape environment. Initialization
+  frames still own their current instance. Shared physical metadata serves
+  equality, returns and other consumers; no comparison-only workaround remains.
+  Canonical equality type matching is reused for borrowed/owned operands.
+- EnumBoundMapProbe passes against Java for enum maps, ordinal, name identity,
+  overridden lossless text, null text, throwing/null receivers, field/alias
+  reads and returning this. The audit caught Unknown("this") in enum method
+  frames; temporary debug instrumentation has been removed.
+- Existing argument-owner temporary handling now also activates for fresh
+  call/new/conditional/array results lent to borrowed parameters at any callee,
+  using physical producer shapes. Retain complete argument evaluation order.
+  Fresh owned receiver calls are captured before those argument temporaries;
+  defer the null receiver check until after argument effects. A Java/Rust oracle
+  checks receiver -> Java clone -> later argument order (123) and the same
+  effects before null-receiver NPE. It passes.
+- This witness also exposed the ByteBuffer Arc qualification issue noted above.
+  Its unmodified v7 output and E0034 log are preserved under
+  .tmp/jahmm-efficiency-v7-evidence/borrowed-argument-before-v8. Do not claim that
+  this small before witness reproduces all three Jahmm temporary-loan errors;
+  the complete next corpus run is the authority for those.
+- Current gates: enum bound/text/this oracle passed; constructor delegation/
+  publication check passed; final enum callback check passed; source_call_staging
+  all six passed; owned_receiver_snapshots both passed. Operator lowering's 19
+  tests passed. Earlier clone-recovery unit gate has 16 passing checks.
+  git diff --check passes.
+- Existing unrelated failure: exception_text_contracts offline had eight passing
+  checks and NativeNullMessageProbe returned 16 for a BigDecimal null rounding
+  message mismatch. Exact re-emission/execution with old v5 SHA
+  4330283645fcdbc7f2801ecbbcd835d7f2288606f19381c20fa4a7327e5052f6 also returns 16.
+  Evidence .tmp/jahmm-efficiency-v5-evidence/native-null-message-before-v6.
+
+Current full-corpus inventories and process state
+v1: 1475 diagnostics; v2: 324; v3: 288; v4: 252; v5: 190; v6: 184;
+v7: 160; v8: 162; v9 initially 135, reassembled v9 127; v10 127; v11 105;
+v12 101; v13 91.
+Latest completed translation is v13 (95 files), producer SHA
+ 73c231074503b2baee656f550f9dd1679a822e7089949726f003ecaa9c8fe1e9.
+Final release built in 2m20s. Full pass took 284322ms: translation 155670ms,
+assembly 116377ms, check 9909ms. It is terminal. Canonical evidence is under
+/tmp/jahmm-efficiency-v13 and copied to .tmp/jahmm-efficiency-v13-evidence.
+No own jobs remain live. V13 removes ten diagnostics in the Gaussian reader
+and three learners by preserving solved partial-array carriers. Error-heading/
+file comparison has ten removals, no additions; source-error files remain the
+same SimpleExample and KullbackLeiblerDistanceCalculator as before.
+Remaining 91 diagnostics include generic reader/covariance conversions, two
+native toArray producer placements, IO string representation and incidental
+API contracts. Counts are diagnostics, not distinct root causes.
+No updated inference speed/RSS/parity run has happened; goal remains active.
+User clarified: overhead is known, further profiling/benchmarking is barely
+needed. Implement from existing evidence, use focused semantic gates, reserve
+one final saved workload run for the acceptance measurement.
+Older v9 evidence (135 before assembler fix, 127 after it) is under
+.tmp/jahmm-efficiency-v9-evidence and reassembled/. No full run is live now.
+Evidence copied to .tmp/jahmm-efficiency-v8-evidence. Increased v8 count is
+not a simple regression count: the old HmmLogSpace/KMeans temporary lifetime
+errors disappeared; enum bounds exposed eight map query lifetimes, while new
+factory staging introduced eight OpdfDiscrete allocation conversion markers.
+
+v9 batch (implemented; full corpus checked, 127 errors remain):
+- Enum constructor delegation and constant publication now reuse the existing
+  lower_resolved_constructor_varargs_args builder instead of packing a Vec
+  before adapting to a retained array. EnumVarargsArrayProbe verifies packed,
+  delegated, explicit, empty and null-array calls plus returned-array aliasing.
+- Argument staging reuses lower_retained_collection_factory with an owned
+  version of the target slot. The factory chooses its contextual representation;
+  an inferred nominal Vec cannot describe an Arrays.asList retained array view.
+  BorrowedArrayViewProbe verifies varargs -> Collection, List writes, null
+  elements, live backing aliases, and later argument mutation/evaluation order.
+- JavaClass uses PhantomData<fn() -> T> and an unconditional manual Debug impl.
+  A token names T; it does not contain an instance. This removes false Send,
+  Sync and Debug obligations on local ActionHandler carriers without promoting
+  their payloads to synchronized storage. A generated-support test publishes
+  JavaClass<Rc<RefCell<NoTraits>>> in OnceLock, clones and debugs it, moves it
+  between threads, and compares tokens across generic instance types.
+- Retained map query argument planning preserves owned carriers for owned
+  field/call/array/conditional results instead of borrowing short-lived projected
+  values. Stable locals/loans retain borrowed query ABI. The shared key-query
+  runtime accepts Option<T> directly without a Clone bound. EnumBoundMapProbe
+  now checks generic shared-cell field get/contains/remove, null queries and a
+  stored null key. Existing native storage/query policy remains authoritative.
+Gates: source_call_staging all seven and enum_initialization_contracts all six
+passed (/tmp/jahmm-staging-enum-v9.log). Extended enum bound map oracle passed
+(/tmp/jahmm-enum-map-query-v9.log). cargo fmt --check and git diff --check passed.
+Release v9 completed (2m14s); log /tmp/jahmm-efficiency-translator-build-v9.log.
+Full v9 and assembly-only rerun are terminal. Raw generated CommandLineArguments
+and OpdfDiscrete have zero native-allocation conversion markers (v8: 11 + 8).
+The eight OpdfDiscrete E0716 errors are gone. Corrected full assembly has zero
+false Send errors for handler class tokens and zero duplicate Debug errors.
+
+Follow-up v10 changes (included in release v10; historical gates):
+- Temporary owners for native collection constructors now also reuse existing
+  lower_retained_collection_construction. Broader array-backed boundary test
+  exposed pass(new HashSet<>()) staging a plain HashSet before a retained
+  Collection argument. Construct the final retained collection directly.
+  array_backed_collection_boundaries: both tests pass; source_call_staging:
+  seven tests passed after this extension.
+- Removed the package assembler's hardcoded JavaClass/ProtectionDomain/CodeSource
+  bodies. Keep shared-type ownership seeds and let the existing merger restore
+  producer declarations/impls from raw output, including one-file packages.
+  This is a script fix, so v9 reassembly already verifies it against all 95
+  files. New package-level class token test passes thread publication, Debug,
+  canonical int[] -> [I name and is_array, using a separate generated consumer.
+  scripts/test_shared_runtime_registries.py: all ten passed; bash -n passed.
+- Native retained handle loans participate in the existing ordinary owned
+  argument adapter in trait/hierarchy forwarding, even when borrow_target was
+  not explicitly Carrier. Rust physical ABI is &Rc/&Arc, and an override that
+  rebinds needs a pointer copy. RetainedOverrideArgumentProbe reproduced a
+  single &Rc<Vec<i32>> -> Rc<Vec<i32>> mismatch before the fix, with producers,
+  storage and signatures already correct. Smallest correct rewrite clones
+  the handle at the dispatch arm; no representation redesign is needed for
+  this family. Java/Rust oracle passes and verifies shared alias mutation.
+  Before evidence saved in reassembled/retained-override-before-v10.
+  All three focused forwarding unit tests passed; log
+  /tmp/jahmm-forwarding-unit-v10.log. Those verification processes completed.
+- A broader retained_map_views run has six passes and one pre-existing failure
+  (nested_factory_and_map_storage_preserve_one_element_contract). Re-emitting
+  that unchanged fixture with earlier binary SHA
+  48babe67ed69a6c4664bff7438d98df12e53e86605a98f3f1852d6d1051fc8b8
+  reproduces exactly three diagnostics: Set<E> vs Set<Option<E>> factory return,
+  and two null-membership Default obligations for ContractItem. Evidence under
+  .tmp/jahmm-efficiency-v9-evidence/nested-map-preexisting. Do not present this
+  broad suite as green or attribute those old failures to the current fixes.
+The old v9 127-error inventory excluded the collection-constructor and
+forwarding extensions. Full v10 includes them. Final cheap checks passed.
+No final updated inference benchmark has been run. Further profiling is not
+required: the user's repeated instruction is to use the known overhead evidence.
+
+Current v10 batch gate and rewrite audit
+- Generalized retained_native_queue_result_shape into the canonical retained
+  collection element result contract for get/set/remove as well as queues.
+  Runtime returns a copied/moved stored child after releasing its storage
+  loan; no additional Option or borrowed payload belongs in that success ABI.
+  Expr shape, physical call shape, expression emission and stream emission
+  all use this same projection. Plain non-retained lists retain their current
+  policy. Representative pre-fix generated generic set/remove wrapped an
+  Option<K> in another Some; correct rewrite forwards the existing carrier.
+- Nullable shared source dispatch/accessor adaptation now consults physical
+  call values and recognizes both Named and Unknown source type spellings via
+  the existing concrete-name helper. Representative direct.get(1).read() was
+  emitted as a method on Rc<RefCell<Item>> without its payload borrow. Existing
+  accessor adaptation now handles it, preserving the fast scalar field path;
+  no new parallel dispatcher or interface representation was introduced.
+- Object.super.clone projection knows its current shared-handle context.
+  Clone the payload through &*borrow()/&*lock() (or the immutable dereferenced
+  handle), not a RefMut passed to UFCS and not the Rc itself. Ordinary borrowed
+  method spelling stays unchanged. Generated shallow copy retains child
+  reference identity but has independent object/scalar state.
+- Native numeric argument owner staging reuses native_numeric_parse_argument_plan,
+  matching value lowering. Temporary nullable strings reach the parser as
+  Option<&JavaString>; null parses throw NumberFormatException after evaluating
+  radix, rather than changing into an early NullPointerException or invalid ABI.
+- Removed three enum-specific bare .len() shortcuts. Enum field/parameter lengths
+  now reuse physical array storage, null checks, lock/cell projection and scalar
+  staging. A real null-array probe exposed missing field/computed-array length
+  fallibility. The existing shaped immediate-effect framework now seeds
+  NullReceiverThrow for nullable array length expressions using solved lexical
+  shapes and existing catch analysis; non-null arrays are not promoted.
+- Enum method/accessor deduplication compares the actual allocated synthetic
+  accessor name, not the Java field spelling. A source method prefix() must be
+  retained when the collision allocator has emitted the field accessor prefix_.
+  This reuses java_naming::source_enum_field_accessor_name.
+These are local emission/contract corrections using existing representations;
+no pinned corpus bodies or generated corpus code were edited. Pre-fix compiler
+witnesses are under .tmp/jahmm-efficiency-v10-evidence. Read/set/remove probe
+covers generic nullable children, alias mutation, bounds and nullable receiver
+method calls. Shallow clone probe covers a mutable generic enum-bound owner,
+new outer identity and retained array alias identity. Numeric probe checks
+factory/radix order on valid, null and invalid input. Extended enum varargs
+probe checks implicit/explicit field lengths, caught nulls and getter collision.
+All 19 focused integration tests passed (11 source_call_staging, seven enum
+initialization contracts, one retained deque). All 38 exception_plan unit tests
+passed, including non_throwing_interface_override_group_stays_infallible.
+Release v10 finished in 1m55s; log /tmp/jahmm-efficiency-translator-build-v10.log.
+Full v10 translation/check is complete. Final fmt/diff checks passed. No updated
+inference speed/RSS/parity run has happened; goal remains active.
+
+Enum getter follow-up v11 (completed; included in release v11)
+The changed getter dedup exposed ActionHandler.handler() emitted as
+Option<&JavaClass<...>> forwarding to handler_().as_ref(), an invalid loan on a
+temporary. The previous allocator reserved all public method spellings even
+for identical field-only getters. Reusing the synthetic publication getter is
+both more efficient and correct: central java_naming now shares the existing
+trivial field-read detector and permits name reuse only for a non-static,
+zero-arg, non-generic getter whose returned field and return type exactly match.
+Reserved runtime names/keywords and other method collisions still use the old
+allocator. The lowerer compares actual allocated names before suppressing a
+redundant source wrapper, and source-call ABI lookup reuses that same predicate.
+A new native Class-valued getter regression passes; all seven enum initialization
+tests passed. An additional two-file package/consumer check passes through real
+production assembly and verifies the source caller contract. Final fmt/diff
+checks passed; the subsequent full v11 inventory includes this fix. Logs preserved
+under .tmp/jahmm-efficiency-v10-evidence/jahmm-enum-accessor*.log.
+
+Historical v10 audit: fallible size producers (resolved in v11 below)
+- V10 generated Hmm.nb_states and HmmLogSpace.nb_states both return
+  Result<i32, JavaException>. Some generic/inherited consumers use the result
+  directly in dimension validation/casts (notably ViterbiCalculatorLogSpace and
+  BaumWelchLearnerLogSpace). Correct rewrite propagates the call's exception
+  before validation; preserve left-to-right evaluation of every dimension and
+  negative-size checks after all successful dimension expressions.
+- Do not blindly add ? to lower_array_dimension_expr: it already lowers through
+  Slot::Assignment(Int), and many ordinary producer calls are already discharged.
+  Audit selected callable identity/fallibility, shared source summaries and
+  early getter paths across the producer/consumer boundary.
+- A control with a nullable array field and pure size()/mutating checkedSize(),
+  split across two Java files, compiles successfully in production assembly:
+  /tmp/jahmm-fallible-dimensions-audit/control-primary and out/, pipeline.log.
+  Thus plain multi-file fallible dimensions work. The packaged generic/inherited
+  variant finished with the same Result comparison/cast failure in both pure
+  size() and mutating checkedSize() (four diagnostics). Three additional private
+  inherited-field access diagnostics are incidental to this mini-fixture.
+  Its original Java compiles and prints 0, checking dimension call order and
+  null exception behavior. Sources primary/, output generic-out/, log
+  generic-pipeline.log in that directory. Evidence copied to
+  .tmp/jahmm-efficiency-v10-evidence/fallible-dimensions-audit. No processes live.
+  This audit led to the missing array-child resolution traversal fixed in v11;
+  the counterexample ruled out a blanket array-dimension lowering deficiency.
+- Constructor placeholder audit: OpdfDiscrete initializes values, validates it,
+  then creates distribution from values.size() before invoking createMap on this.
+  Current stage_constructor_initialization_prefix stops at a read of an already
+  staged field. A general prefix scheduler could substitute prior field temps
+  into validation/producer expressions, preserving order until any this escape
+  or unknown/raw operation. Existing all-placeholder/super-state barriers must
+  remain; callbacks and superclass publication are not safe to hoist blindly.
+  Do not fabricate Default user objects to silence missing OpdfInteger: Default.
+  This is a future producer/scheduling batch, not an implemented fix.
+
+Disk recovery notes: only this task's generated test executables were moved
+when the data disk filled (not source deleted). Manifests:
+/tmp/new-java2rust-jahmm-v8-build-space/moved.json (four binaries ~904MB),
+/tmp/new-java2rust-jahmm-build-space-20261025/moved.json and
+/tmp/new-java2rust-capture-build-space-20261025/moved.json.
+Recheck df before large builds. Write this handover by atomic replacement.
+
+Remaining whole-path audits and work
+- Full v11 families include generic covariance/reader conversions, native
+  allocation contract disagreements, temporary borrowed results, default
+  initialization, logical IO strings, command-line shared/sync placement and
+  incidental nominal/stub APIs. Use the saved v11 compiler evidence to choose
+  the next coherent batch; diagnostic counts are not distinct root-cause counts.
+- Model<? super O> -> Model<Box<dyn Any>> is not a safe reinterpretation of
+  Model<O>. Storing List<O> as List<? extends Base> needs an identity-preserving
+  view. Reuse inherited_members::method_with_synthesized_source_wildcard_params
+  for unbounded/extends source inputs; it deliberately excludes super. Do not
+  weaken Java variance rules to silence Rust errors.
+- Generic reader carriers have fixed concrete subtype payloads but logical O
+  returns. Simply retagging their marker to a requested Box<dyn Opdf<Obs>> and
+  Any-downcasting the concrete Rc result to O would panic. Typed conversion
+  must flow through constructors, variant storage and return dispatch. Existing
+  generic interface retarget adapters cover some erasure, not arbitrary typed
+  covariance. Audit that whole contract before extending it.
+- Framework design for eliminating the remaining interface wrapper allocation
+  is still NOT implemented: a nominal InterfaceRef<T> can hold Rc/Arc of an
+  object-safe shared-receiver dispatch surface implemented by canonical concrete
+  reference carriers, then forward existing mutable public trait methods through
+  that surface. Clone only the shared pointer. Rc<RefCell<Box<dyn Trait>>> is
+  insufficient: holding its guard around forwarding breaks reentrant callbacks;
+  Rc<dyn Trait> alone cannot call existing &mut methods.
+  Apply representation consistently in ObjectModel/DispatchShape, producers,
+  fields/lists/signatures/consumers, casts, generic retargets and upcasts.
+  Delegate identity/as_any/clone_any to canonical concrete references, not outer
+  adapter addresses. Derive Rc/Arc and Send+Sync from existing storage analysis.
+  Required gates include aliases/mutation, reentry through interface aliases,
+  downcast, inherited/default dispatch, upcast, generics/list returns, nulls,
+  sync carriers and allocation-free repeated getter/copy boundaries.
+- Do not hoist HmmValue/collection payload guards across Java calls without a
+  whole-loop alias/effect proof. Such hoisting can change reentrancy semantics.
+- Final workload parity/runtime/RSS comparison and complete-goal audit remain
+  pending. Leave goal active; do not claim complete merely because local gates
+  pass or this handover exists.
+
+Completed v11 batch (included in the full inventory above)
+- Root cause of inherited/generic array-call ABI errors: resolve_expr_calls
+  did not visit ArrayCreation dimensions/initializers or ArrayInitializer
+  values. Added the missing traversal; reuse existing overload/coercion/effect
+  machinery, no blanket question-mark added in the array emitter.
+- New separate-package inherited generic fixture checks 2D dimensions, explicit
+  and brace initializers, mutation counts, negative sizes after all successful
+  dimension evaluations and NPE short circuit. Java oracle prints 0.
+- Flattened inherited fields now reuse the same visibility policy as declared
+  fields, retaining public and crate access without exposing unrelated private
+  fields. The regression exercises public inherited field reads and writes.
+- Generic wildcard read normalization reuses generic_read_type_preserving_optional
+  in shared storage and borrowed-sequence paths. Nullable extends reads remain
+  typed and nullable. Owned destination slots materialize a single checked
+  sequence read; borrowed slots retain borrowing. Full KMeans removes four
+  erased recovery operations (nine to five), preserving null checks.
+- Enum getter naming change described above is included in v11.
+- Focused gates: source_call_staging 12, inherited_member_visibility 3,
+  wildcard_inference 7 all pass (22 total). cargo fmt --check and diff check pass.
+- Broader resolver gate: 292 pass, two pre-existing heuristic resolver-benchmark
+  explanation-count assertions fail. Immutable v10 CLI reproduces both exact
+  counts: inherited unresolved 2/explained 1, record unresolved 1/explained 0.
+  Inputs contain undeclared receiverless APIs; do not force source resolution
+  or claim that whole gate passes. Sources and v10 reports saved with v11 evidence.
+- Release v11 built in 2m09s. No benchmark was run. Next choose a coherent
+  remaining producer/storage/consumer contract batch using compile.log.
+
+V12 batch implementation and historical rewrite evidence (full check now complete)
+- Extended constructor initialization-prefix scheduling to substitute reads of
+  already staged fields into later validation/producer expressions. Uses a
+  structured mutable Rust IR visitor; opaque code, unknown fields, whole-this
+  uses/publication, deferred lambda reads and writes through this remain
+  barriers. Original all-placeholder literal gate remains. Staged bindings keep
+  mutability; names reserve nested bindings/patterns to avoid shadowing.
+- ConstructorPrefixProbe independently runs on Java before Rust. It checks
+  constructor effect/exception order, null/empty input, retained array identity
+  and mutation, and a nested local colliding with the staged-field name family.
+  Initial focused fixture passed before adding the nested-name witness; final
+  combined gate is pending. Two constructor barrier/name unit tests passed.
+- Direct emission of production OpdfDiscrete with the emitted context completed:
+  both constructors now assign a computed OpdfInteger into their struct literal,
+  removing their fake Default payloads. Saved production output and old release
+  regression output under v12 evidence/constructor-and-accessor-audit. This is an
+  emission witness; the complete crate still needs its next normal compile.
+- Generic interface string paths now use the selected emitted source-call ABI.
+  Generalized existing receiver-instantiated return protection to nested owner
+  parameters (e.g. Opdf<Capture>, not Opdf<Bound>). All used owner parameters must
+  have been substituted or remain valid in lexical scope; method binders are
+  excluded. Accessor type projection reuses that protection.
+- Generic field shape inference now consumes the physical receiver's captured
+  arguments instead of its intentionally separate nominal Java wildcard type.
+  Owned field-copy recovery similarly specializes the declaring field contract
+  from that receiver, using apply_receiver_generic_return_shape.
+- Fresh borrowed argument staging reuses the same source wildcard specialization
+  as ordinary argument lowering, preventing provisional wildcard slots from
+  reappearing on the temporary's second conversion. The inline fresh AppendBox
+  failure found while expanding the regression is included and fixed in this
+  batch, rather than removed from acceptance.
+- Expanded InterfaceAppendProbe covers explicit generic and wildcard getter
+  display, checked nullable results, reentrant callbacks, lossless surrogate
+  text, and both named and inline fresh wildcard inputs. Final focused Java/Rust
+  check passed (jahmm-generic-interface-string-v12-final.log). Failed intermediate
+  logs are diagnostic history, not final gate results. Temporary accessor audit
+  instrumentation was removed from source.
+- Final unit/shared-source gates and release/full compile results are recorded
+  below. No profiling or workload benchmark was run. The goal remains active.
+
+V12 final focused gates and next rewrite audit
+- All 32 expr_shape tests, two constructor-prefix unit tests and one resolved
+  accessor-owner unit test pass. The shape gate includes a receiver with a
+  physical captured generic argument and a distinct nominal Java wildcard,
+  checking both field reads and assignment targets.
+- Shared receiver integration: one pass. Source-call staging: 13 pass, including
+  the final nested-name constructor witness and inherited generic dimensions.
+  Wildcard inference: seven pass, including unsafe-write/invariance rejection
+  and nullable typed reads. Expanded interface display gate also passes.
+- Release v12 built in 1m48s, SHA
+  de90a0643761cdaa8c1ad55c05514dcccb59403a67f6ab15acdaae280ffd4f21.
+  All 95 sources emitted in 125975ms. Full assembly/check still pending at this
+  note; do not claim an updated full diagnostic count yet.
+- Next concrete native-allocation audit: V11 OpdfMultiGaussianReader.read creates
+  covariance as a shared allocation but annotates the local as Vec<Option<Vec>>;
+  row producers return retained Rc rows, causing shared->value row assignment
+  and value->shared constructor argument errors. Correct whole-path rewrite is
+  an Rc/RefCell outer matrix of nullable Rc/RefCell rows, preserving aliases from
+  producer through row writes and the receiving constructor. No deep copies.
+- Located one root cause in lower VarDecl handling: when
+  partially_specified_array_storage_java_type adds null row storage, both
+  emitted_local_plan and env_shape are reset with RustSlotShape::for_storage,
+  discarding the previously solved native allocation and nested qualifiers.
+  Candidate local emission batch: overlay the new storage type on the solved
+  local shape using the existing shape specialization utility, retain identical
+  contracts in declaration and ShapeEnv, audit row producers/slots/consumers.
+  Extend coverage to rank-three partial arrays and alias mutation. This is a
+  concrete planning result, not implemented yet. Collection.toArray(destination)
+  is a related producer but needs its separate destination-identity/capacity/
+  null-termination/exception-order audit; do not silently allocate a fresh Vec.
+
+V12 full-check result and next action
+- Full 95-file pipeline completed, 101 diagnostics (v11 105). Both invalid
+  OpdfInteger Default placeholders and both captured Opdf object-string type
+  mismatches are absent. Diagnostic-heading/file comparison finds only these
+  four removals; no added heading/file errors. Detailed compiler output and
+  delta report saved with v12 evidence.
+- Final focused coverage: 35 unit tests and 22 integration tests pass (13 source
+  staging, one shared receiver, seven wildcard inference, one expanded checked
+  interface display), plus the fixtures' independent Java oracles. fmt/diff
+  checks pass. No full generic resolver suite rerun: its two documented v10
+  baseline heuristic failures remain outside this batch.
+- No processes from this batch remain running. No staging/commit performed.
+  Full workload speed/RSS/exact parity and remaining interface-wrapper allocation
+  elimination are still unproven/incomplete. Commons Statistics remains paused.
+- Next implement the audited partial-array local shape projection batch, with
+  rank-two/rank-three alias/null-row behavior checked from producers through
+  element writes and consuming source constructors. Inspect remaining toArray
+  producer contracts in that batch; do not replace Java aliases with copies.
+
+V13 completed batch: partial array storage projection and alias witnesses
+- Implemented the audited local emission correction: partial_array_shape overlays
+  nullable row storage onto the solved local shape with the existing
+  specialize_slot_shape_java_type utility. Both the emitted declaration and
+  subsequent ShapeEnv use this same result, retaining outer and nested native
+  allocation qualifiers rather than rebuilding a context-free storage shape.
+- PartialArrayCarrierProbe checks rank-two and rank-three primitive arrays from
+  row producer through partial allocation, element assignment, constructor-held
+  aliases and consumers. It observes identity and mutations through every alias,
+  null rows/matrices and NPE behavior. Independent original Java oracle returns
+  zero. The first corrected emitter exposed an existing alias-check rejection
+  before Rust compilation; old v12 release reproduces that rejection and a
+  declaration Vec<Option<Vec<f64>>> initialized by an Rc. Baseline output,
+  stderr and exact producer SHA preserved under v13 evidence/before-v12.
+- NativeAliasStorage now keeps borrowed references to solved local/parameter
+  slots and the signature catalog. Stored row/field aliases are checked by
+  projecting their actual destination place through existing signature field
+  and indexed_read_shape_for_access_with_facts operations. Compare source and
+  destination supported shared mutable placements; no blanket diagnostic skip.
+- Outer-array storage no longer proves that row elements preserve identity:
+  only direct local declarations use the local-root proof. Array and object
+  field writes require a supported destination-slot witness. A focused negative/
+  positive unit covers shared outer arrays with value rows versus retained rows.
+- Lexical binding lookup is fail-closed: a known local without a slot witness
+  cannot fall back to an unrelated same-named instance field. Added a specific
+  shadowing unit check. Slot references avoid copying signature plans or
+  recomputing representation analyses. Non-native-only methods retain the old
+  fast skip for the native alias proof.
+- Before that final lexical guard, all 28 alias units and all 14 source-staging
+  integrations passed; the new fixture compiles and matches Java. Final gate
+  reruns 29 alias units and the array fixture with the guard included, then
+  builds release and runs one full corpus compile. Command session 64846 has
+  now completed; final outcome is recorded below.
+- The first v13 release was built before the final lexical guard and is not the
+  acceptance producer. Its log has the suffix before-scope-guard. The final
+  release/full output will be /tmp/jahmm-efficiency-v13 and v13 normal build log.
+- toArray audit: native ToArray argument planning currently returns no slots
+  for both overloads, and call emission returns an owned collection snapshot,
+  discarding the destination expression. Correct handling must evaluate it at
+  the Java boundary, reuse a large enough destination, null-terminate the used
+  prefix, and preserve array identity/typed stores. Existing reference arrays
+  lack a general runtime component/store-check protocol (only exception names
+  are modeled), so do not pass off a fresh Vec conversion as a general repair.
+  Exact freshly-created compatible arrays admit a proof-based producer rule,
+  but arbitrary/covariant destinations need the complete runtime contract.
+  This is an outstanding architectural audit, not an implemented toArray fix.
+- No workload benchmark/profile ran. Latest completed full inventory remains
+  v12, 101 errors, until the v13 command above completes. Goal remains active.
+
+Next larger architecture audit: output-only generic hierarchy carriers
+- V12 OpdfReaderValue<O> stores concrete reader handles and an Infallible marker,
+  while its read dispatch boxes a concrete product as Any and downcasts it to O.
+  OpdfGenericReader constructs ReaderValue<Box<dyn Opdf<JavaErasedValue>>> from
+  integer/Gaussian/etc readers, but their generated From implementations only
+  target their exact concrete product. A marker retag alone would compile an
+  invalid downcast and is not a semantic repair.
+- Representative correct rewrite candidate: each producer variant stores its
+  canonical reader handle plus a typed product-conversion function. Construction
+  chooses the conversion for the requested source contract; read dispatch runs
+  the concrete reader then applies that function, with no Any box/downcast.
+  Function pointers are noncapturing, and clones copy the reader handle and
+  pointer. Identity/as_any/downcast refer to the original reader, not adapters.
+- Apply only after an output-only binder proof: scalar/nullable returned binder,
+  no binder-consuming methods/storage requiring invariant reinterpretation.
+  Nested invariant containers and input/escaping callback cases need distinct
+  contracts, not element copies. Need to audit conversion construction for both
+  concrete product and erased/generic interface targets; reuse existing source
+  generic-allocation/upcast pair inventory and interface-retarget conversions.
+- This touches variant schema, constructors/From, clone/display/identity/casts
+  and return dispatch together. Existing dynamic-return adapters are around
+  representation_lowering.rs generic hierarchy return handling (about 2600-2770).
+  It is an architectural batch candidate, not implemented or yet fully proved.
+  It may remove the reader conversion family while also avoiding per-read Any
+  allocations. Interface-reference getter-copy redesign remains independently
+  outstanding; do not claim this candidate solves that representation too.
+
+V13 final outcome and handoff
+- Final 29 alias units pass, including retained-outer/value-row rejection and
+  missing-local-witness shadowing. All 14 source-call staging integrations pass;
+  the partial-array Java/Rust probe was rerun after the final lexical guard and
+  passes. Java independently prints zero. fmt and diff checks pass.
+- Full 95-file check: 91 diagnostics, down from 101. Ten removals with no added
+  error-heading/file pairs. All six Gaussian reader diagnostics disappear;
+  three native-placement errors in learners and one additional LogSpace learner
+  mismatch disappear through the same partial-local shape correction. No new
+  source-error files. Detailed diagnostics/delta/provenance preserved with v13.
+- New fields and local shape references in NativeAliasStorage are borrowed from
+  the existing signature plan; no cloned catalog or secondary analysis pass.
+  Actual store targets, not outer aggregate roots, determine alias preservation.
+- The two remaining native-placement diagnostics are OpdfGaussianMixture's
+  co.toArray(new ObservationReal[co.size()]) paths. The broader toArray audit
+  above applies. A proof-based rule for an exact fresh compatible destination
+  can reuse fresh_java_array_value_for_slot and existing collection/element
+  conversions, but must evaluate receiver/argument once in Java order, preserve
+  negative-size/NPE behavior, honor destination length and null termination.
+  Unknown/covariant destinations must be diagnosed as unsupported unless
+  their identity and runtime component/store-check contracts are expressible;
+  do not silently discard their expressions or claim full toArray support.
+- Generic-reader typed conversion-function carrier candidate above is a larger
+  architecture batch. Complete its production/storage/dispatch audit before
+  implementation, especially erased interface targets and invariant-input
+  exclusions. It should replace per-read Any boxes/downcasts with typed
+  conversions, not merely retag an unconstrained marker.
+- Remaining getter interface-wrapper allocation redesign and final workload
+  speed/RSS/exact parity acceptance remain incomplete. No benchmark/profile run
+  in this batch. Commons Statistics stays paused. No staging or commit performed.
+- All commands are terminal; no live handle must be resumed. Goal stays active.
+
+V14 in progress: exact fresh Collection.toArray producer
+- No benchmark or profiler has run; the known reference-copy/locking overhead
+  remains the basis for this work. User's latest reminder confirms that policy.
+- Native ToArray carries whether a destination is present through planning.
+  All fallback paths now explicitly diagnose unsupported typed destinations
+  instead of silently discarding the destination expression. Arbitrary named,
+  covariant, erased or initialized-nonempty destination identity/store checks
+  are not claimed implemented. Exact compatible fresh reference arrays are
+  supported, including zero/positive size and empty explicit initializer.
+- New producer reuses physical stored-child shapes, slot conversions and
+  fresh_java_array_value_for_slot. It captures receiver then dimension once,
+  checks negative length before invocation NPE, snapshots after argument effects,
+  retains source child identity, and preserves requested length/null padding.
+  Alias graph connects only child allocation domains, never fresh outer array.
+- Moved existing nullable collection argument policy from signature to call_plan
+  so usage and signature share it. Literal-null reference inserts use existing
+  nullable storage flow graph, including owner.field.add(null), rather than
+  default-constructing an object. Slot-specific ternary lowering handles nullable
+  retained collection returns branch by branch.
+- Retained nested-row reads use existing owned nullable array-read projection
+  to copy handles instead of RefCell/Vec payloads. Nullable array-element field
+  read/mutation uses physical element shapes; shared referent mutation needs
+  an immutable array slot borrow. Generic optional-field entry delegates array
+  elements to that projection, including numeric operands/accessor callers.
+- FreshCollectionArrayProbe independently compares Java and compiled Rust for
+  requested lengths, nullable elements/padding, receiver/argument effect order,
+  negative/NPE precedence, referent and nested-array identity/mutation, and
+  direct nullable-key/value map views. That version passed (v14j log).
+- Latest expanded probe adds retained named map-key view after backing map
+  mutation and variable rebinding. Retained view physical carrier is preserved,
+  not replaced by a Vec snapshot contract. Session 20894 is currently running;
+  log /tmp/jahmm-fresh-collection-array-v14k.log. Follow up on it before any
+  release/corpus pass. This batch is not yet a final verification claim.
+- Need boundary regression, focused shared nullable/alias/call gates and one
+  substantive full v14 compile after this batch. Latest complete corpus is
+  still v13 (91 diagnostics). Goal remains active. No staging/commit.
+
+V14 focused gates and final producer build
+- Named live map view probe passed, including backing mutation and variable
+  rebinding. Retained physical view contract is preserved. No dangling audit
+  instrumentation remains.
+- All 16 source-staging checks passed; 37 call-plan units and 62 nullable-flow
+  units passed. Existing empty String array/map-view generated-crate idiom
+  passes after its old caller assertion was corrected to JavaUtf16String.
+- Existing interface-array mutation check exposed borrowed array-slot receiver
+  staging: copying &Option<Box<dyn Trait>> kept a Rust borrow, and zero-argument
+  dispatch tried to move an Option from that slot. Extended the existing
+  source-interface canonical reference-copy proof to stored array elements,
+  preserving boxed storage versus borrowed dyn Trait distinction. Reused typed
+  owned nullable array reads; ordinary call staging captures the reference
+  before arguments, without holding a slot guard. No new dynamic carrier.
+- The interface-array identity check now passes; checked array access makes
+  its enclosing API Result, so only its Rust caller assertion uses unwrap.
+- Expanded FreshCollectionArrayProbe adds interface-array receiver whose
+  argument clears that same array slot. Java and Rust preserve the captured
+  original object and observe its mutation. All 16 source-staging integrations
+  pass again with this final source state; /tmp/jahmm-v14-source-staging-final.log.
+  /tmp/jahmm-v14-interface-array-identity.log is the final successful standalone
+  interface identity check. Earlier logs were superseded as described above.
+- cargo fmt and git diff --check pass. Release producer build currently running
+  session 3574, /tmp/jahmm-efficiency-translator-build-v14.log. Poll that exact
+  handle; once terminal-success run full 95-file pipeline to new v14 directory.
+  Do not use the release binary while the build is live. V13 is still the latest
+  complete full inventory (91 diagnostics). No benchmark/profile, stage or
+  commit has occurred. Goal active; Commons Statistics remains paused.
+
+Next interface-reference audit evidence (not implemented)
+- v13 Opdf.probability and log_probability trait methods take &mut self, even
+  though concrete OpdfInteger implementations take &self. OpdfGaussian concrete
+  variants currently also take &mut self. Therefore Rc<Box<dyn Opdf>> plus
+  ordinary deref cannot supply the whole public interface ABI. RefCell<Box>
+  would hold a payload guard across callbacks and is not a correctness solution.
+- A candidate general whole-path rewrite is a per-source-interface reference
+  carrier owning Rc/Arc of an object-safe shared-receiver dispatch table.
+  Implement its existing public trait by forwarding. Dispatch adapters copy
+  the canonical concrete handle before calling any public mutable-receiver
+  method; copying Rc/Arc must not allocate a Box or borrow the payload. This
+  needs an explicit canonical-reference-copy admission proof, not arbitrary
+  T: Clone (which can duplicate state). Existing source shared-handle forwarding
+  and clone_box reference-copy proof are the starting points.
+- Such a batch must change producers/upcasts, collection/field storage, getter
+  returns and consumers together. Preserve as_any/downcast, identity, Java clone
+  versus Rust reference-copy, interface inheritance and generic retargets.
+  Runtime erased Any boxes are a separate representation. Audit all trait
+  adapters including anonymous callbacks and closed hierarchy values; do not
+  assume their Clone alone proves identity preservation. This is a candidate
+  for eliminating the remaining per-getter Box, not an implemented guarantee.
+
+V14 final outcome (authoritative latest full inventory)
+- All commands are terminal. Release build completed in 2m33s. Final producer
+  SHA d713f2d06f4be26b6e9cba88c36d3d48edb55bca64319d60992d221491b34718.
+- Full 95-file regeneration /tmp/jahmm-efficiency-v14: 89 compiler diagnostics
+  versus v13's 91. Both OpdfGaussianMixture fresh toArray allocation conversion
+  errors disappear, with no added error-heading/file pairs. This confirms the
+  existing wildcard-bound source collection goes through the general producer.
+- Full pipeline 226182ms: translation125594ms, assembly90605ms, check7947ms.
+  These are operational gate timings, not a workload benchmark or speedup claim.
+- Durable evidence .tmp/jahmm-efficiency-v14-evidence contains producer identity,
+  inventory, complete compiler output, heading/file diagnostic delta, focused
+  regression logs and representative generated modules. The successful focused
+  gates and semantics/representation scope are described immediately above.
+- Full crate remains uncompilable. No updated workload timing/RSS/parity exists
+  yet; preserve the exact saved-workload acceptance. No profiling/benchmark ran.
+  Arbitrary typed toArray destination/runtime component checks remain explicit
+  unsupported boundaries. Interface getter Box allocation redesign and typed
+  generic-reader carrier architecture remain outstanding larger batches.
+- Goal active, no staging/commit, Commons Statistics handover preserved. There
+  is no live v14 process/session to poll. Earlier in-progress session notes are
+  historical and superseded by this terminal result.
+
+V15 in progress: nested covariant native-storage paths
+- Previous turn is progress: v14 removed both fresh toArray errors with no new
+  error-heading/file pairs; all commands terminal. No profiling/benchmark ran.
+- Audit of remaining learner/flattening failures: source producers return
+  retained List<List<T>> rows, while List<? extends List<? extends T>> fields
+  and parameters can emit Vec<T> rows. For example Observation.flat's loop body
+  calls borrow().cloned_items() on an emitted &Vec<T>. The smallest correct
+  whole-path rewrite keeps each row's canonical handle through producer return,
+  caller argument, consumer parameter/field and foreach binding; fresh flat
+  output remains independent outer storage. Cross-function representation
+  contract, expressible by existing nested native allocation paths.
+- Baseline NestedSequenceCarrierProbe failed two generated-crate type checks:
+  field-to-count and actual caller-to-holder constructor disagreed on Vec rows
+  versus retained rows. /tmp/jahmm-nested-sequence-v15-before.log. Java prints0.
+- Root causes: native_child_type_at_path treated an extends qualifier as an
+  opaque extra type rather than a read of that same native slot; nested renderer
+  used generic_read_type on Optional<? extends List<T>>, so the null wrapper
+  prevented projection to the bound before native allocation wrapping.
+- Reused generic_read_type_preserving_optional at both boundaries. Native
+  child path projection is transparent to covariant bounds and null wrappers;
+  super bounds remain opaque, never a proof of readable native storage. No
+  change to declared Java variance or invariant-container reinterpretation.
+- New units cover path traversal, nullable covariant leaf and super rejection,
+  plus exact local/sync nullable child rendering. 4 slot-shape,39 slot-rendering
+  and4 native-allocation signature units pass. Initial Java/Rust probe passes.
+- Expanded probe adds null row insertion followed by checked NPE through both
+  direct and stored wildcard-qualified paths, alongside original reference
+  identity, later alias mutation, flatten output independence. Full17 source
+  staging checks then7 wildcard integration checks are running session47624,
+  /tmp/jahmm-v15-source-staging.log and /tmp/jahmm-v15-wildcard-inference.log.
+  Poll this exact handle before release/corpus. No v15 release built yet.
+- Latest complete corpus remains v14 (89 errors), producer SHA above. Active
+  goal unchanged; Commons Statistics paused; no stage/commit or workload run.
+
+V15 final focused gates; full pass live
+- All17 source-staging integrations pass including expanded null-row Java/Rust
+  checks, and all7 wildcard integrations pass (unsafe/invariant-write rejection
+  included). Final unit gates:4 slot-shape,39 slot-rendering,4 native-allocation
+  signature checks. fmt/diff checks pass. No new numerical/benchmark work.
+- Release producer build succeeded in1m47s, log
+  /tmp/jahmm-efficiency-translator-build-v15.log. Full95-file pipeline is live
+  session87492, /tmp/jahmm-efficiency-pipeline-v15.log, out
+  /tmp/jahmm-efficiency-v15. Poll this exact handle to completion. Do not rerun
+  the pipeline merely because output is sparse during assembly.
+- Direct inspection of emitted v15 code confirms Observation.flat and learner
+  constructors/iterate/learn all carry Option<Rc<RefCell<JavaNativeCollection>>>
+  rows, instead of the mismatched Option<Vec> rows. Iterate/learn outer/child
+  generic domains also now agree. Full compiler delta is still unverified.
+- Last complete inventory remains v14 until that terminal result is saved.
+  Current source is frozen for the full gate; goal active.
+
+V15 full result (latest complete corpus)
+- Full pipeline session87492 is terminal; no live job. 95 files,67 diagnostics
+  versus v14's89. Producer30b58247c837f0698b85de01416deefd6cbdcf5a128fc09ec8373c4fadce5d61.
+  Pipeline220661ms; translation119156ms, release build1m47s. Exact timings and
+  identity in .tmp/jahmm-efficiency-v15-evidence/summary.tsv.
+- 26 old heading/file diagnostics removed,4 added:2 are existing iterator
+  conversion failures whose type spelling now includes retained rows. The other
+  2 are newly exposed Viterbi/ViterbiLogSpace nullable element-contract mismatches.
+  Net improvement22. Saved exact delta and representative generated code.
+- Viterbi base constructor has JavaIterator<Option<O>> but declares observation:O
+  for next_result(). Derived inlined constructor declares JavaIterator<O> while
+  factory produces JavaIterator<Option<O>>. Do not unwrap observations: Java
+  Iterator.next may return null, so nullability must flow to locals/callees.
+- Audit found existing call_plan::native_list_cursor_returned_child recognizes
+  ListIterator only; EffectiveFacts::native_cursor_element_type already models
+  both Iterator and ListIterator with source/user override precedence. The
+  shared returned-child helper is used by usage's storage path projection and
+  lower's physical external return shape. Generalize it once, allowing previous
+  only for ListIterator, rather than duplicating Iterator next handling.
+- Factory element-domain transfers already exist in record_native_value_domain_storage.
+  Derived inlined constructor local contracts may additionally need initializer
+  overlay from its physical producer; audit this after general cursor transfer.
+  Tests must cover nullable results through ordinary and delegated/inherited
+  constructor bodies. All v15 gates passed; no v16 edits yet.
+- Remaining generic argument ABI conversions still try into_iter on retained
+  sequences in two Observation.flat calls; class binder O versus method T is
+  a concrete next audit. Other large group is generic reader output conversion.
+  Interface-reference allocation redesign and final benchmark acceptance remain
+  outstanding. Active goal, Statistics paused, no benchmark/stage/commit.
+
+V16 focused cursor-contract correction (not a new full inventory)
+- Previous v15 full result is progress:89->67, exact delta and producer saved.
+  V15 has2 newly exposed Viterbi nullable cursor mismatches,2 existing flat-call
+  generic retyping failures with changed nested type spellings, and unchanged
+  source-error files. Do not claim all67 remain after current unregenerated code.
+- New NullableCursorDomainProbe independently reproduces the exact base local
+  and inherited inlined-constructor iterator errors on v15. It uses a generic
+  Java constructor, Iterator<T>, nullable input elements and a nullable generic
+  consumer. Both Java and current generated Rust return0.
+- Reused EffectiveFacts::native_cursor_element_type by generalizing/renaming
+  native_list_cursor_returned_child to native_cursor_returned_child. next is
+  valid for ordinary/list iterators; previous remains list-only. The existing
+  usage storage projection and external physical result shape share this helper.
+  Added unit for nullable elements, arity, reverse traversal and custom owner.
+- Inlined/delegated bodies can lack the original constructor's local solver
+  entries. native_collection_call_return_shape now gives iterator producers
+  their actual stored child domain and nested placements, with no collection
+  root allocation copied to the cursor facade. Local refinement overlays these
+  qualified elements using specialize_slot_shape_java_type, preserving solved
+  local qualifiers/placements and requiring the same native cursor facade kind.
+- Initial correction compiled but Java/Rust probe caught an erroneous null
+  unwrap assigning next() to T. refine_local_plan_from_initializer now asks
+  preferred_planned_or_external_call_result_shape, reusing the stronger physical
+  external result ABI before generic declaration conversion. This preserves a
+  yielded null rather than converting it to a receiver exception. Probe passes.
+- Removed a duplicate literal-null branch in record_native_value_domain_storage
+  (earlier identical early return already handled it). No policy was forked.
+- Final gates pass:18 source-staging integrations,38 call-plan units,64 nullable
+  units,7 wildcard integrations. fmt/diff checks pass. Final focused evidence
+  .tmp/jahmm-efficiency-v16-focused-evidence includes logs, Java oracle fixture
+  and generated Rust; failed intermediate logs are explicitly superseded.
+- No v16 release or full corpus run yet; target/release binary remains v15 SHA.
+  Batch more related fixes before rebuilding/regenerating. All commands are
+  terminal, no live process to resume. No benchmark/profile or stage/commit.
+
+Next coherent batch candidates after V16 focused gates
+- Cursor whole-path follow-up: audit chained collection.iterator().next() too.
+  external_call_lowered_type_with_lower_context still gets the cursor parent
+  with infer_expr_shape_with_context, which may miss a freshly produced cursor's
+  qualified child. Reuse physical_call_value_shape of the smaller receiver if
+  evidence requires it. Test a null first element; do not simply unwrap it.
+  There is an older collection_iterator_next_element_type local fallback which
+  resets a nullable inline element to declared non-null shape; audit whether
+  that conflicts with the now-authoritative physical producer. This is an audit
+  candidate, not a new verified failure or required new corpus.
+- The2 retained sequences.into_iter conversions in generic Observation.flat
+  calls need resolved method binder instantiation through emitted signatures.
+  V15 output still refers to T from flat's declaration in a class-O constructor;
+  inspect source call argument planning, not a special case for Observation.
+  Existing specialize_resolved_source_call_argument_plan and declared-binder
+  substitution helpers must be reused. Extend NestedSequenceHolder from class-T
+  to class-O and call flat<T> inside it to expose accidental name coincidence.
+- Varargs readWords(st, keyword()) calls are another coherent argument ABI group.
+  Current staged scalar keyword is passed to a borrowed array parameter; audit
+  how staging preserves resolved variable-arity packing and null element domains.
+- Larger outstanding architectures unchanged: typed generic-reader product
+  adapters and cheap source interface references. Avoid RefCell<Box> across
+  callbacks. Do not make a fake Default native collection merely to satisfy
+  HmmValue's fallback; its uninitialized-reference/default contract needs proof.
+- Keep full objective active, Commons Statistics paused. Final updated complete
+  crate compile and saved workload timing/RSS/exact parity remain unproven.
+
+V17 argument-ABI batch in progress
+- Previous turn is progress: v15 full89->67 and v16 focused cursor checks pass;
+  v16 has not had a release/full pass. Latest complete inventory remains v15.
+- Expanded NullableCursorDomainProbe with chained values.iterator().next() on
+  a null first element passes unchanged. Therefore no extra cursor parent
+  rewrite is justified; earlier chained-read gap was only an audit hypothesis.
+- New StagedVarargsProbe reproduces readWords-style errors exactly: a staged
+  keyword scalar replaces the packed array when Java argument count equals
+  formal parameter count. Probe checks one/two elements, null as an element
+  and field-read/keyword effect order through an aliased shared receiver.
+- Added source_varargs_staging_arguments at the shared argument-staging
+  boundary. Reuses emitted_source_varargs_params and the resolver-owned
+  resolved_varargs_array_is_explicit predicate. Staging sees formal arguments
+  after packing, representing the synthetic Java array as ArrayCreation.
+  Fixed-arity explicit-array calls remain on their existing path. Initial Rust
+  argument lowering still uses original resolved source arguments; normalized
+  sources are used only when their count matches actual emitted Rust arguments.
+- General fresh-array staging now constructs the new owner in the target's
+  solved owned array carrier before lending it to the callee. This preserves
+  nullable children and canonical nested placements instead of trying to lend
+  an inferred bare scalar/array shape. Reuses ordinary array/slot conversion.
+- Final focused varargs probe passes /tmp/jahmm-v17-varargs-after-b.log; earlier
+  /tmp/jahmm-v17-varargs-after.log showed Vec versus borrowed-slice target and
+  was superseded. No final broad gates or v17 full corpus pass yet.
+- NestedSequenceHolder changed class binder T to O and adds flattened() calling
+  flat<T>. Baseline fails missing O:Clone (argument retagging itself is correct
+  in this ordinary method). expr_call_requires_clone_capability's cheap gate
+  checked only receiver and resolved target/return types, omitting actual
+  argument types. Added actual argument type relevance using existing inference
+  before callee clone requirement/substitution analysis. Current source is
+  compiling/running that probe in session85250, log
+  /tmp/jahmm-v17-nested-alpha-after.log. Poll exact handle.
+- Next: if that probe passes, add flat call inside class-O holder constructor
+  to reproduce the corpus's remaining retained sequences.into_iter retagging
+  at that context, rather than assuming ordinary-method inference covers it.
+  If it still fails O:Clone, inspect resolved substitutions/requirement reachability
+  instead of adding an unconditional Clone bound. Clone-on-handle-only paths
+  must remain free of unnecessary element Clone requirements.
+- Tests/fixtures modified during this batch: NestedSequenceCarrierProbe.java,
+  NullableCursorDomainProbe.java, new StagedVarargsProbe.java; source_call_staging
+  has19 tests. No pinned Java or generated corpus body edits. Product files
+  modified since v16: lower.rs and item_assembly.rs. No profile/benchmark, stage
+  or commit; Statistics stays paused, active goal unchanged.
+
+V17 resolver root cause and final focused gates
+- Session85250 was terminal-failed; temporary clone audit40357 likewise terminal.
+  Audit showed flat's ResolvedCall retained return List<T>, argument target
+  List<? extends List<? extends T>>, and self-substitution T->T, despite actual
+  List<? extends List<? extends O>>. Argument capture had CAP0 with known upper
+  bound List<? extends O>; structural covariant inference did not inspect that
+  bound. Missing O:Clone and corpus flat retagging share this resolver root cause.
+- Reused collect_type_substitutions via scoped internal collector, supplying
+  invocation TypeEnv through existing method inference/selection calls. For a
+  structural ? extends bound matched against an inference capture, traverse its
+  known upper bound to infer binders nested inside it. Direct method binder and
+  invariant positions retain capture identity. Existing invariant-first order,
+  constructor alignment and source-supertype projection remain authoritative.
+  No new name-based type inference or second capability solver.
+- Reverted the experimental Clone analysis argument-relevance gate and removed
+  all NEW_JAVA2RUST_CLONE_BOUND_AUDIT instrumentation. Correct resolved signature
+  metadata makes existing Clone capability/substitution propagation work.
+- Expanded class-O holder constructor also calls flat<T>, alongside its method,
+  and checks the initial flattened count before later alias mutation. It passes
+  independently against Java. Expanded varargs probe covers zero args, explicit
+  array and explicit null array, plus original scalar/null-element/effect cases.
+- Final gates pass:19 source-staging integrations,7 wildcard integrations with
+  unsafe/invariant rejection,49 item_assembly unit checks including canonical
+  carrier clone requirements, generic capabilities, recursive cache witnesses
+  and source lookalike precedence. fmt/diff checks pass. Logs
+  /tmp/jahmm-v17-{source-staging,wildcard-inference,clone-capabilities}.log.
+- Release build currently live session23365, log
+  /tmp/jahmm-efficiency-translator-build-v17.log. Poll exact handle; only after
+  terminal success run full95-file pipeline to /tmp/jahmm-efficiency-v17. No
+  v16 full pass exists; v17 will cover v16 cursor and v17 argument changes together.
+  Current source is frozen for that gate. Latest complete inventory v15:67.
+- No benchmark/profile, stage or commit; active goal and paused Statistics scope
+  unchanged. Earlier v17 pending notes are historical and superseded here.
+
+V17 final result (authoritative latest full inventory)
+- All commands terminal; no live process. Full95-file regenerated crate has
+  57 compiler diagnostics versus v15's67. Ten old diagnostics removed and no
+  added heading/file pairs. Both new Viterbi nullable cursor errors disappear;
+  all6 staged-keyword/readWords mismatches disappear; both retained sequences
+  into_iter retagging errors disappear. Source-error files unchanged.
+- Producer SHA dcd01a8e6d852c47a2d3010c8f1da58391f4984b1f6ea7a6d7cfe2e9b155d8bd.
+  Release build1m47s; full pipeline221106ms: translation
+  119873ms, assembly90993ms,
+  check8105ms. These are gate timings only.
+- .tmp/jahmm-efficiency-v17-evidence preserves exact provenance, summary, full
+  compiler output, delta, final focused logs/oracle Java fixtures, selected
+  generated examples, and intermediate clone audit establishing resolver cause.
+  Intermediate failing logs are diagnostic evidence, not final gate failures.
+- Current source/binary/full inventory agree. V17 includes the v16 cursor
+  correction plus varargs/formal staging and scoped nested capture inference.
+  Final19 source-call,7 wildcard,49 assembly/capability checks pass. fmt/diff pass.
+- Full crate still uncompilable, so final saved-workload timing/RSS/exact parity
+  remains unproven. No benchmark or profile ran. Goal active; no stage/commit;
+  Commons Statistics remains paused with its handover untouched.
+- Largest remaining family: concrete reader products lifted to generic interface
+  products across OpdfReaderValue. Existing Any/downcast retag is insufficient;
+  typed product conversion function schema needs the whole producer/storage/
+  dispatch/identity/clone audit already recorded above before implementation.
+  RelatedObjs wildcard package has nested Reader/Writer/service contracts and
+  is not automatically output-only: preserve correlated input/output types.
+  Other coherent group: native/source API nullable field/enum/string/reflection
+  boundaries; inspect generated code rather than blindly wrapping/unwrapping.
+  Cheap source-interface reference carrier architecture remains outstanding too.
+
+V18 reader-product architectural entry audit
+- Previous turn is progress: v17 full67->57, no added heading/file pairs.
+  V17 release/current product code still agree; no v18 product edits yet.
+- Added tests/fixtures/CovariantReaderProductProbe.java and a source_call_staging
+  oracle integration (now20 tests). Java prints0. Current Rust fails exactly
+  two From conversions: FirstProductReader canonical handle and bare
+  SecondProductReader into ProductReaderValue<Box<dyn ReaderProduct>>. Existing
+  From implementations target only each exact concrete product. No unrelated
+  diagnostic in this probe. Session50376 terminal101, expected baseline failure.
+- Probe exercises reader alias identity and shared mutation counts, two fixed
+  concrete product classes, fresh distinct returned objects, mutable product
+  interface access, concrete product/reader downcasts and instanceof. A changed
+  carrier must pass these together, not merely remove missing From diagnostics.
+  Evidence .tmp/jahmm-efficiency-v18-reader-audit includes Java, generated Rust
+  and log. New integration intentionally remains red pending architectural batch;
+  v17's original19 source checks were green. Do not claim current20 green.
+
+Chosen rewrite and required whole-path implementation
+- Existing enum OpdfReaderValue<O> stores a canonical reader handle per variant
+  plus an Infallible marker. Its read dispatch boxes the concrete product as Any
+  and downcasts to O; an existing fallback only handles selected erased interface
+  products. A generic marker retag or additional unchecked From implementations
+  would admit a construction without a valid typed product conversion.
+- Preferred schema: each eligible variant stores its canonical handle plus typed
+  fn(ActualProduct)->RequestedProduct converter for every direct output-binder
+  method. Dispatch invokes concrete reader, then converter; Result mapping must
+  preserve exceptions. No per-read Any box/downcast. Clone copies handle/function
+  pointer without requiring RequestedProduct:Clone. Identity/class/downcast and
+  non-product methods continue projecting the original reader handle.
+- Constructor design candidate: generic From<ReaderHandle> for Carrier<P> with
+  P:From<ActualProduct>, installing <P as From<ActualProduct>>::from. Identity
+  From<T>forT already exists. Source-interface product upcasts need generated
+  typed From implementations for the actual canonical source product, using
+  existing slot conversions / interface-retarget adapters and upcast pair dedup.
+  Reuse erased_interface_retarget_for_hierarchy_return's typed adapter recipe
+  without its Any recovery. Audit Rust coherence before emitting broad Froms.
+- Null/borrrowed outputs need deliberate contracts: fn(input)->P is sufficient
+  for owned non-null fixed product producers (the failing OpdfReader group).
+  Option/borrowed products must not acquire a premature null check or clone a
+  payload. Either map optional success with a converter on its base product, or
+  use a local typed lifting contract when standard From cannot express Option
+  adapters due to coherence. Do not silently enable an unproved nullable case.
+- Eligibility proof should use declaration-proven output-only binders: reject
+  any root binder consumed by fields/constructors/method inputs or nested
+  invariant service returns (RelatedObjs has Reader/Writer contracts and is not
+  automatically eligible). Respect shadowing by method binders. Require actual
+  fixed concrete product bindings for variants; generic payloads/inheritance
+  need whole-path proof rather than retyping their stored allocations.
+- Rendering metadata can be attached after signature solving, alongside
+  source_generic_allocations (lib.rs around1151, lower.rs around642), so actual
+  nullable/ownership success-slot contracts are authoritative. Build once from
+  the full support program; retain a read-only shared plan for worker lowering,
+  not repeated full source scans per cast or emitted method. No feature flag or
+  alternate generated-code repair is needed.
+
+Concrete implementation touch points found
+- Source enum schema/Clone in representation_lowering.rs::
+  source_hierarchy_carrier_enum_item (~1885). Single-payload variants currently
+  emit all Clone arms directly. Adding typed function fields needs copy bindings.
+- Read-only tuple patterns can use (source,..) for both old/new schemas: object
+  display/hash/key/class/identity/accessor/cast methods must keep projecting the
+  original source field. Enumerate external conversion/equality patterns too.
+  Product forwarding binds the converter(s) explicitly, invokes them on success
+  instead of adapt_source_hierarchy_carrier_covariant_return's Any path (~2609).
+- Producer conversions: lower.rs::source_supertype_conversion_impls_for_pair
+  (~6755) currently emits exact bound carrier target plus bare/handle companions.
+  It knows facts/representations but no signature argument; solved product
+  metadata or a signature parameter must supply converter types. Direct enum
+  variant construction in upcast coercion paths must route through the same
+  constructor protocol, including fresh reader constructors and intermediate
+  carrier widening. Existing sourceImpl bound propagation must not add blanket
+  output Clone constraints.
+- Reusing anonymous virtual carriers was audited and rejected as a shortcut: the
+  trait renderer currently lacks generic-owner declarations, checked Object
+  display, and canonical named-source identity/downcast delegation. Anonymous
+  identity points at the adapter Rc; sync anonymous payload may guard callbacks.
+  Broadening the anonymous flag would violate required semantics. Shared
+  helpers may still be reused after explicit protocol generalization, but it is
+  a larger change than typed product fields in the existing named enum.
+- Existing generic hierarchy variant root-binding helper only inverts direct
+  binder maps. Use source_ancestor_type_arguments for fixed product ancestors;
+  do not make that inversion accept structured/invariant retagging accidentally.
+- No live handles or processes. No v18 release/full regeneration. No benchmark,
+  profile, stage or commit. Goal remains active; Statistics handover unchanged.
+
+
+V18 IMPLEMENTATION CHECKPOINT (2026-10-26; overrides entry-audit no-edit status)
+- User explicitly requests no exploratory benchmarking: known overhead guides work.
+  Focused correctness/allocation gates, then one final workload comparison only.
+- Added hierarchy_products.rs: solved-signature output-only binder proof; rejects
+  consumed/stored/nested-invariant/nullable/borrowed or unfixed generic products.
+  Read-only Arc plan attached to RepresentationPlan once, reverse source index.
+- Eligible finite source carriers hold canonical reader plus typed product
+  conversion function pointers; dispatch converts directly without Any boxing.
+  Clone preserves canonical identity, copying converter fields without P:Clone.
+- Common __java_from_payload_Variant constructor protocol for source carriers and
+  old finite carriers; From producer/handle conversions install typed converters.
+  Read-only class/hash/identity/downcast patterns project (payload,..).
+- Product interface conversions reuse existing erased-interface retarget adapter;
+  specialize actual product generic args, avoid duplicate interface ancestor and
+  marker conversions. No source or generated corpus modifications as deliverable.
+- Original reader oracle and Object-erasure recovery oracle passed. Two original
+  planner proofs passed. Coercion 156 passed, six string snapshots updated after
+  constructor/rest-pattern changes; rerun pending. Source staging 19/20 passed
+  before Object-recovery fix, whole suite rerun pending.
+- CURRENT unverified additions: fixture now models generic ReaderProduct<T> and
+  raw bridge wrong-class/null exceptions; harness includes exact-dispatch one-Rc
+  allocation assertion. Nullable planner proof also new. These need focused run.
+- Check carrier-to-carrier widening still uses legacy construction in some paths;
+  preserve converter fields or prove typed conversion before generalizing.
+- No V18 release/full corpus yet. Latest full V17: 95 files,57 diagnostics; binary
+  dcd01a8e6d852c47a2d3010c8f1da58391f4984b1f6ea7a6d7cfe2e9b155d8bd.
+  Complete fresh crate and final workload remain unverified. Goal active.
+
+
+V18 PUBLIC GENERIC PRODUCT FOLLOW-UP (2026-10-26)
+- Three output-contract planner proofs passed (including nullable rejection).
+- Generic test extension exposed a separate pre-existing private-interface
+  existential representation: it emits a variant enum but lacks ordinary method,
+  identity and From protocols. Jahmm Opdf is public, so the production-like
+  regression now declares public ReaderProduct in its own Java source file.
+  javac verifies both actual files; one lowering unit includes both declarations.
+- SourceContextOwnerKey's combined lookup can see cloned planning programs as
+  ambiguous. Product conversion planning now uses the full support program's
+  inherited declaration lookup instead. Interface-name inventories also need
+  instantiated ancestor arguments; retrieve via interface_type_arguments_in_target
+  before rendering (otherwise accidental Box<dyn ReaderProduct> lacks args).
+- TupleVariantWildcard emitter previously rendered (_) despite earlier notes;
+  changed to (..) to support converter fields. Added reader instanceof regression.
+- Added compile proof that ProductReaderValue<NotClone>:Clone; focused allocator
+  asserts exactly one fresh product Rc allocation, no transient Any dispatch box.
+- Raw generic score(T) calls exposed a distinct staging issue: actual optional
+  observation is not converted to formal Option<JavaErasedValue>, and null retains
+  unbound T. Existing runtime retarget helper also panics on wrong-class inputs.
+  Diagnostic extension retained under .tmp/jahmm-efficiency-v18-reader-audit/
+  RawGenericReaderProductProbe.java.txt. Current regression exercises generic
+  product transport, ordinary interface dispatch, concrete typed input and NPE;
+  it does not claim raw generic wrong-class bridge exception correctness.
+- Coercion last prior run161 passed,1 stale constructor snapshot; fixed remaining
+  snapshot and adjusted wildcard-pattern expectations. Final rerun in progress.
+- Current jobs:15381 product-contract,2425 coercion-final; format54105 likely done.
+  Logs /tmp/jahmm-v18-{product-contract,coercion-final}.log. No V18 broad build,
+  corpus regeneration or performance benchmark has run. Goal remains active.
+
+
+V18 FOCUSED GATES PASSED (2026-10-26)
+- Public generic reader Java oracle + generated Rust oracle passed, including
+  exact dispatch allocation assertion (one canonical fresh Rc, no transient Any
+  box), product mutation/identity, reader identity/casts/Object roundtrip, reader
+  instanceof, concrete typed generic input/null exception, and no P:Clone bound.
+  Log /tmp/jahmm-v18-product-coherence.log (session27109 terminal0).
+- Existing generic_hierarchy_markers passed (session41495 terminal0), covering
+  legacy generic carrier handling. Log /tmp/jahmm-v18-generic-hierarchy.log.
+- All162 coercion tests passed (session2425 terminal0), log
+  /tmp/jahmm-v18-coercion-final.log. Three planner proofs passed previously;
+  fixture include updated for split public interface, rerun after final batch.
+- Shared-interface emitter already owns exact handle-to-interface From; product
+  conversion emission now defers to that existing contract and emits genuinely
+  new views such as wildcard interface instantiations. No duplicated From impls.
+- Full source_call_staging suite, final planner rerun, V18 release+95-file corpus
+  regeneration remain next gates; final saved workload remains unrun. No further
+  exploratory measurement required by user. Main getter/interface allocation
+  architecture remains outstanding beyond the typed fixed-reader product work.
+- No release build, corpus run, benchmark, profile, staging or commit this turn.
+  Goal active. Only format session88940 may still need final terminal poll.
+
+
+V18 FULL REGENERATION + V19 FORWARDING BATCH (2026-10-26)
+- Full source_call_staging20/20 and product planner3/3 passed after V18 final
+  source freeze. Release build succeeded1m45s; frozen V18 binary SHA
+  5291cfe0c41857bcaf7fb486119880e12875ce7cdc653bc4e44d9394a20ccd17.
+- Full95-file run ACTIVE session35943, /tmp/jahmm-efficiency-pipeline-v18.log,
+  out /tmp/jahmm-efficiency-v18. Poll exact handle; emission completed95/95
+  (~119s); assembly/check in progress. Do not restart on sparse log output.
+- NEW V19 source edits are NOT in V18 release binary: in representation_lowering
+  generic-hierarchy argument recovery preserves payload solved native allocation,
+  nested placements and list/hash views when rendering physical downcast type.
+  Specialized interface argument shapes use existing specialize_slot_shape_java_type
+  instead of for_storage(), retaining allocation/ownership solved metadata.
+  Ordinary forwarded-argument ownership conversion also handles matching native
+  list/hash views, not just Native. Reuses existing slot conversion planning.
+- Borrowed non-null shared native handles can be reified by cloning the handle,
+  downcasting its owned copy and borrowing the temporary for the override call.
+  No container payload clone or guard across call; optional borrowed case remains
+  deliberately excluded until its Option<&Handle> lifting contract is audited.
+- New tests/fixtures/RetainedDispatchArgumentProbe.java plus source_call_staging
+  regression retains List<String>/String[] via statics (sync allocation), sends
+  them through generic hierarchy and generic interface, then mutates aliases.
+  First gate exposed borrowed generic array omission; after above correction,
+  Java oracle+generated Rust test PASSED session41440 terminal0,
+  /tmp/jahmm-v19-retained-dispatch-borrowed.log. Original before Rust saved
+  /tmp/jahmm-v19-retained-dispatch-before.rs. No generated-code patch used.
+- Native forwarded-argument unit gate active session13529,
+  /tmp/jahmm-v19-forwarded-args.log. Full V19 broad run not yet warranted until
+  V18 inventory inspected and remaining related forwarding boundaries batched.
+- Main interface reference/getter-copy architecture remains outstanding; earlier
+  shared-dispatch nominal-reference design audit remains applicable. Do not claim
+  reader typed conversion alone solves getter wrapper allocations or final goal.
+- No benchmark/profile/stage/commit. Commons Statistics handover unchanged.
+
+
+V18 FULL RESULT / V19 ARCHITECTURAL BOUNDARY (2026-10-26)
+- V18 full95-file pipeline terminal1 (35943),53 compiler diagnostics vs57 V17.
+  Parse0; source-diagnostic files2; translation119215ms,assembly91080ms,
+  cargo check8065ms,total220376ms. This was a correctness inventory, not a new
+  performance benchmark. Frozen V18 binary SHA above verified producer manifest.
+- Durable .tmp/jahmm-efficiency-v18-evidence includes compiler/summary/provenance,
+  pipeline/build logs and diagnostic-delta.txt. Eighteen reader From headings
+  removed;14 added:4 old raw constructors for new converter-bearing variants,
+  5 invalid direct erased Opdf<Box<dyn Any>> casts and5 resulting return mismatches.
+- Full Opdf cannot use existing generic retarget adapter: its input collections
+  retain allocation identity. generic_retarget_shape_is_supported intentionally
+  rejects shared root/descendant or borrowed dependent inputs. Mapping to a new
+  Vec would lose aliases; do not relax that proof. This is a real live generic
+  collection-view architectural gap, separate from fixed exact reader products.
+- V19 product conversions now omit wildcard conversions when the existing
+  typed adapter proof fails; generic From construction still requires its real
+  From<Product> bound. No invalid vtable cast fallback is emitted. Exact typed
+  reader conversion remains enabled. This leaves the erased-view boundary
+  unsupported instead of pretending it is implemented; expect erased reader
+  missing From diagnostics to return until live view support is designed.
+- V19 covariant source-hierarchy and source-interface returns now use common
+  __java_from_payload factories too (representation_lowering around2897,8805).
+  Reader fixture now includes covariant reader providers through both an
+  interface and an abstract class. Extended Java+Rust oracle passed, including
+  prior allocation proof, /tmp/jahmm-v19-reader-providers.log (21887 terminal0).
+- V19 forwarding helper3/3 passed /tmp/jahmm-v19-forwarded-args.log. Broader
+  representation suite first71passed6 stale snapshot failures: all six expected
+  old one-field tuple patterns; updated expectations only. Final rerun active
+  5819 /tmp/jahmm-v19-representation-final.log. Source staging21 gate active31669
+  /tmp/jahmm-v19-source-staging.log (so far no failures).
+- Next: finish exact handles, format/diff checks. V19 release/full regeneration
+  only after this coherent batch is frozen. Main nominal interface-reference
+  shared-dispatch architecture remains outstanding; keep goal active. No final
+  timing/RSS/parity result, no main getter allocation-free claim. Statistics
+  stays paused. No profiling/benchmarking/staging/commit.
+
+
+V19 BATCH GATE COMPLETE (2026-10-26)
+- source_call_staging21/21 PASSED; representation_lowering77/77 PASSED.
+  Authoritative /tmp/jahmm-v19-{source-staging,representation-final}.log.
+  All test/build/pipeline handles terminal. No V19 release/corpus regeneration.
+- git diff --check passed. fmt check found only the updated snapshot wrapping;
+  cargo fmt applied afterward (final formatting handle may need terminal poll).
+- Next substantial work remains main nominal shared interface reference emission
+  across producers/storage/getters/consumers, with canonical identity/reentry
+  proof, plus retained generic collection-view erasure gap. Exact typed reader
+  and forwarding improvements are verified; full objective is NOT complete.
+- V18 remains latest measured full correctness inventory53errors. V19 has not
+  been measured full; don't extrapolate a diagnostic count or workload speed.
+  No exploratory profiling/benchmarking, stage/commit. Goal remains active.
+
+
+V20 MAIN INTERFACE REFERENCE IMPLEMENTATION IN PROGRESS (2026-10-26)
+- Actual architectural batch now begun; not another reader-only fix batch.
+  New source_interface_refs.rs builds per-program admission metadata: multi-method
+  source dynamic interfaces, all known concrete implementations already canonical
+  implemented shared handles, no anonymous implementations, existential carrier,
+  native SAM or source-interface inheritance; send-only without sync rejected.
+  Static-reachable interface uses Arc, local uses Rc. Plan built once, not percall.
+- Existing canonical source-handle interface adapters already invoke *_with_outer
+  without a payload guard around Java callbacks. Admitted public trait receiver
+  surface can therefore use &self for mutable virtual methods; concrete source
+  methods retain solved receiver contracts. trait_method_receiver_plan now takes
+  RepresentationPlan at all callers. Final SignaturePlan ABI projection aligns
+  admitted reference dispatch on fields, params, locals, returns and method aliases;
+  interface receiver projection preserves ReceiverPlan::None for static methods.
+- Added explicit DispatchShape::ReferenceDynTrait{trait_name,sync}; owned reference
+  projection/lattice/runtime casts/optional element projection use this metadata.
+- Raw Rc<dyn Trait> prototype exposed identity/orphan issues (recorded diagnostic
+  /tmp/jahmm-v20-shared-reference-first.log), so physical representation is nominal
+  __JavaReferenceTrait<...> holding Rc/Arc<dyn Trait>. Its Clone copies only pointer
+  with no binder Clone bound, Deref/AsRef/public trait forwarding delegates methods,
+  JavaReferenceIdentity/as_any/clone_any delegate canonical source reference. From
+  canonical handles is local/newtype and constructed with Self::new(handle).
+- New DispatchCoercionPolicy/Coercion ReferenceDynTrait constructs the nominal
+  reference. Ordinary source shared adapters retain legacy boxed compatibility.
+  Slot renderer handles reference in both direct and facade-aware projections;
+  optional payload projection must retain it instead of reverting to Box.
+- Reference-copy admission at source_owned_interface_reference_shape extended to
+  admitted nominal reference handles, so getter/field reads copy pointer instead
+  of moving a field out of a still-live owner. Identity lowering recognizes new
+  dispatch and uses existing java_reference_equals protocol.
+- New SharedInterfaceReferenceProbe.java + tests/shared_interface_references.rs:
+  aliases/mutation/canonical downcast/instanceof/Object erasure/reentrant callbacks,
+  generic input+output/string specialization, no generic Clone bound, plus1000
+  getter copies under allocation counter expected0. Current test in progress
+  session22611 /tmp/jahmm-v20-shared-reference-generic.log. Earlier nongeneric gate
+  reached one moved-field error; fixed reference-copy admission before generic run.
+  Harness itself fixed borrowed holder ABI; generated corpus bodies untouched.
+- New generic identity forwarding uses trait_value_path (::<T>) helper. Current
+  source formatting not yet run. No V20 release/full regeneration/benchmark.
+- NEED: finish generic gate, sync/reentry coverage and admission regression proofs;
+  audit new reference across covariance/clone/generic conversion/erasure metadata.
+  Then substantial regressions, regenerate95files after batch frozen. Main public
+  trait receiver representation change is not yet proved corpus-ready. Goal active.
+
+
+V20 ALLOCATION-FREE GETTER PROOF PASSED; MIGRATION GATES (2026-10-26)
+- Strong focused gate2/2 PASSED /tmp/jahmm-v20-shared-reference-native-list-b.log:
+  local generic RefCounter<T> stored in a List, with1000getter copies allocation0;
+  canonical identity, mutation, downcasts/instanceof/Object erasure, reentry,
+  generic input/output, default method, covariant Java copy/new-state semantics,
+  Rust Clone independent of T:Clone. Sync probe verifies Send+Sync and reentrant
+  virtual mutation using Arc/Mutex source handles. No payload guard across calls.
+- Sync admission now upgrades a send-required source interface to Sync only if
+  every canonical implementor has sync placement. source_interface_trait_item
+  adds Send+Sync for that admitted reference; old Box-only mutex storage needed
+  merely Send. Bare-source From -> reference creates its canonical storage using
+  existing storage_placement_construction_expr, in addition to From<Handle>.
+- Source product interface conversion now also targets admitted reference
+  carriers, wrapping existing proven generic retarget adapters in the nominal
+  reference; still skips unproved wildcard-retained-input conversions.
+- Fixture copy method renamed Java clone() after above success to cover existing
+  UFCS Java-clone-vs-Rust-reference-clone path. lower_boxed_dyn_java_clone_call
+  recognizes reference dispatch and keeps projected reference return shape.
+- Three admission proofs PASSED /tmp/jahmm-v20-reference-admission.log:
+  local mutable canonical admission, static/sync admission; reject anonymous
+  implementor subclasses, source-interface inheritance and enum implementors.
+  Ancestry inventory reused once per plan. Record/enum implementations excluded.
+- Broader batch /tmp/jahmm-v20-reference-regressions.log: focused2/2 PASSED with
+  Java clone semantics; source_call_staging19passed2failed. Failures were source
+  bare constructors passed directly to new<T:Trait> and native array element
+  inference retaining Box metadata despite reference physical storage.
+- Corrections now in source: ReferenceDynTrait coercion uses typed Into and the
+  existing From<Bare>/From<Handle> proofs. Shared apply_source_interface_reference_
+  dispatch projector reused in SignaturePlan ABI projection, expr-shape indexed
+  reads, and new indexed_read_shape_for_access_with_representations helper at
+  all lower.rs array consumers. Native collection storage projection preserves
+  admitted reference metadata instead of overwriting it with stale boxed tags.
+- Current broader rerun ACTIVE34535 /tmp/jahmm-v20-reference-regressions-b.log.
+  Prior handles48402,96827,84824,81005,89113,2584,30996,10878 may need terminal
+  polling but their complete logs are known; do not restart jobs from log silence.
+- Next: finish array/constructor migration gate, run meaningful representation/
+  coercion/source-interface admission gates, then freeze substantial batch and
+  regenerate95-file Jahmm. Need verify actual Opdf admission and core path emits
+  nominal reference. No full V20 crate/workload evidence or performance claim yet.
+  Goal active; no benchmark/profile/staging/commit; Statistics handover untouched.
+
+
+V20 BROAD GATES PASSED / SOURCE FREEZE (2026-10-26)
+- Final /tmp/jahmm-v20-reference-regressions-b.log: shared_interface_references2/2
+  PASSED (generic list-backed getter1000copies allocation0, Java clone distinct
+  state/default dispatch/reentry/identity/downcast plus sync Send+Sync reentry),
+  source_call_staging21/21 PASSED. Constructor/array regressions now fixed.
+- source_interface_refs::tests3/3 PASSED; representation_lowering77/77 PASSED;
+  coercion::tests162/162 PASSED. Logs respectively /tmp/jahmm-v20-reference-
+  admission.log, /tmp/jahmm-v20-representation-gate.log, /tmp/jahmm-v20-coercion-
+  gate.log. cargo fmt and git diff --check passed.
+- New shared Reference dispatch array projection helper is used consistently in
+  inference and lowering. Ref construction uses existing typed Into contracts,
+  wrapping fresh bare sources in canonical placement once; no blanket Clone or
+  owned mutable payload fabrication. Core new reference copies are cheap pointer
+  copies without source generic Clone bounds or payload guards.
+- Focused production Opdf emission still ACTIVE78172, debug translator with full
+  Jahmm context and --context-dir-emitted. Stdout /tmp/jahmm-v20-opdf-audit.rs,
+  stderr .log. Output printed only at completion; log silence is not terminal.
+  Verify __JavaReferenceOpdf and shared receiver signatures when it finishes.
+- Release V20 source freeze build just started; /tmp/jahmm-efficiency-translator-
+  build-v20.log. Poll returned exact handle, then capture binary SHA and run one
+  full95-file pipeline to new /tmp/jahmm-efficiency-v20. V19 changes included;
+  no V19 release was built. Do not use binary during its active rebuild.
+- No benchmark/profiling/stage/commit; Commons Statistics handover unchanged.
+  Objective still unproved until fresh crate/workload parity and final timing/RSS.
+
+
+V20 FULL SNAPSHOT / V21 POST-REGENERATION INTEGRATION FIXES (2026-10-26)
+- Focused production Opdf audit terminal0 (78172): actual Jahmm Opdf<O> admitted
+  as __JavaReferenceOpdf<O>(Rc<dyn Opdf<O>>); all virtual methods use &self;
+  Java clone() still returns distinct source state while Rust Clone copies handle.
+- V20 release terminal0 (70224),1m46s, SHA
+  6e4ee26460bf8cec9f6582ec9a5750caf8a7a25d21838c96874a02e87cd9838a.
+  Full95-file pipeline terminal1 (90056),48compiler diagnostics vs53 V18. Source
+  diagnostic files2; total218907ms. Durable .tmp/jahmm-efficiency-v20-evidence
+  includes producer/build/pipeline/compiler logs, summary, delta and selected
+  source modules plus focused Opdf emission and passing gate logs.
+- Actual Hmm.opdfs storage/get_opdf now uses JavaNativeCollection<Option<
+  __JavaReferenceOpdf<O>>> and getter returns cloned reference through existing
+  list_get_result; no per-getter Box adapter allocation. Dynamic calls preserve
+  canonical object dispatch. Do not claim final workload parity/runtime yet.
+- V20 full compile exposed6 layout integration errors:4 concatenation sites did
+  not recognize nominal reference as a source-interface object-string boundary;
+  2 MultiRandomDistribution From impls called missing new after assembly.
+- V21 corrections (NOT in release V20 binary): lower_source_interface_object_
+  string_result accepts ReferenceDynTrait and reuses checked staged virtual
+  stringification. No speculative JavaAppendValue/Display implementation that
+  bypasses callbacks or swallows exceptions. Fixture toString/concatenation now
+  checks expected logical text through the new reference.
+- Constructor loss cause: assembly extract_methods is line-oriented and sees
+  no method in a one-line inherent impl. Reference emitter now prints new and
+  as_ref on their own lines in an ordinary multiline impl. Existing ownership/
+  merge pipeline retained; no generated-corpus repair or special-case name list.
+- /tmp/jahmm-v21-reference-integration.log PASSED3/3: local generic/list-backed
+  no-allocation/canonical-identity/casts/defaults/Java-clone/reentry + concat,
+  static Arc Send+Sync/reentry, and production-crate assembly of the reference
+  constructors/From impls using the real assembly script. All sources untouched
+  except translator/tests; no release V21/full regeneration yet.
+- 48-current snapshot includes10 intentionally unsupported erased Opdf reader
+  From proofs (retained generic input collections need live views), existing
+  builder covariance, uninitialized/default generic Hmm carrier contract,
+  enum/reflection/null/logical-text CLI boundaries, SimpleExample type-binder
+  inference and KMeans generic Clone contracts. Two source-diagnostic files
+  remain. New layout integration6 above should be re-inventoried after the next
+  substantial batch, not assumed removed from a complete crate yet.
+- Next coherent core compile batch: inspect source_hierarchy_carrier_placeholder_
+  default_impl's unconditional Default body for generic payload whose own Default
+  is conditional; add matching proof bounds rather than a fake default collection
+  or fabricated non-null Java reference. Continue representative whole-path audits
+  for builder/capture conversion families and erased collection-view architecture.
+- Final full regenerated crate + saved workload exact parity/speed/RSS remain
+  required. Goal active. No benchmark/profiling/stage/commit; Statistics stays paused.
+
+V21 core batch checkpoint (2026-10-26; user cadence clarification)
+- User reiterates that benchmarking should barely be needed: known wrapper,
+  lock and reference-copy overheads guide implementation. This supersedes the
+  active goal's stale profile-first clause. No exploratory profiling/benchmark
+  required; focused correctness/allocation gates and final saved comparison only.
+- Generic source hierarchy placeholder Default now has matching payload: Default
+  bound. GenericPlaceholderDefaultProbe reproduces the former invalid body and
+  checks collection copy independence plus owner/reference aliasing.
+- Owned nullable generic map query borrows the original Option<K> carrier using
+  existing JavaMapKeyQuery<Option<K>> for &Option<K>, avoiding needless K:Clone.
+  GenericNullableMapLookupProbe covers public generic methods, null and nonnull
+  String keys, contains/get/remove. Borrowed Option<&K> query ABI is unchanged.
+- Bounded P entering an admitted reference interface uses its typed new(P)
+  constructor. Shared callable conversion-boundary visitor reuses existing Any
+  capability propagation, including caller Q->P forwarding; no blanket From<P>,
+  global Any supertrait or Clone requirement. Producer identity/mutation passes.
+- Fresh retained list copy reuses existing element optional-lifting proof and
+  projection before allocating copied storage. InterfaceListCopyProbe verifies
+  collection independence, shared element identity/mutation and later null slots.
+  Existing shared allocation/invariant element types are never retagged.
+- /tmp/jahmm-v21-core-batch.log: four focused integrations PASS (Default, owned
+  nullable map, producer reference, nullable interface list copy). Forwarded
+  generic producer additionally passed /tmp/jahmm-v21-producer-after.log.
+- Constructor-owner audit: simple nested enum/covariant factory fixture PASSES
+  existing implementation (/tmp/jahmm-v21-factory-holder-before.log). No resolver
+  fix claimed; actual SimpleExample has an additional nested ObservationDiscrete
+  type and enum bound. Continue at source constructor resolution before editing
+  downstream free-O emission. New fixture generic_factory_holder records audit.
+- No V21 release/full 95-file run yet; authoritative full snapshot remains V20
+  48 diagnostics. Do not extrapolate current corpus counts from focused passes.
+  Final fresh crate compilation/parity/timing remains outstanding. No commits,
+  staging, corpus modifications or exploratory benchmarks. Goal remains active.
+
+V21 constructor audit result and consolidated gates
+- Additional resolver-only representative adds the nested Observation<E>
+  product argument present in Jahmm. Reproduced resolve_constructor_ambiguous
+  on Holder<Observation<String>>(Factory<String>) with the pre-fix unit binary.
+- named_reference_match_score incorrectly compared a subtype's own binders to
+  its supertype's binders. It now reuses ProgramSymbols::source_supertype_args
+  before generic scoring, including nested covariant bounds. Preserves existing
+  raw generic recovery. No textual binder rewrite, new inference engine or
+  generated-corpus edit. Regression accepts valid nested factory and rejects
+  Integer/String mismatch. Scope checks and inherited-member substitution share
+  the same machinery already.
+- /tmp/jahmm-v21-resolver-batch.log: 42 resolver tests PASS, including new test.
+- /tmp/jahmm-v21-batch-validation.log: 29 integrations PASS: producer2, Default1,
+  nullable-map1, interface-list-copy1, shared-reference3, source-call-staging21.
+- cargo fmt complete. Release V21 build STARTED, output
+  /tmp/jahmm-efficiency-translator-build-v21.log; authoritative tool session from
+  this turn must be awaited before full regeneration. No performance benchmark.
+
+V21 full authoritative result (2026-10-26)
+- Release build PASS1m45s. Binary SHA256:
+  2db7da5d6265cbb07059d4870a19e314f7b3ab2d9a9ca1d9e4ece95e2c0616ea
+- Full95-file production pipeline terminal exit1 (generated Rust errors), total
+  218730ms. Translation118247ms, assembly90493ms, cargo-check7968ms. These are
+  routine pipeline timings, not a benchmark/profiling campaign.
+- Compiler diagnostics48 ->32. Source-diagnostic files2 ->1: SimpleExample
+  factory constructor resolution errors and free-owner-binder emission are gone.
+  Existing KullbackLeiblerDistanceCalculator/ForwardBackwardScaledCalculator
+  source resolution boundary remains. Complete crate still DOES NOT compile.
+- Generic Hmm carrier Default, interface stringification, assembly constructor
+  visibility, fresh list-copy nullable elements and KMeans owned nullable query
+  failures are removed. Do not claim the generic producer fix covers wildcard
+  captures: three reified __JavaWildcard0 -> RefOpdf boundaries still lack
+  conversion (HmmBuilder two sites, HmmReader collection add one site).
+- HmmBuilder invariant Opdf<T> -> Opdf<O> coercion remains explicit compile-error;
+  requires correct checked erased/capture contract, not an invariant retag.
+- Remaining10 erased concrete-product Froms require live generic collection
+  views; retain rejection of detached-copy adapters at shared collection inputs.
+  Runtime already has JavaNativeCollectionProjection for live map key/value
+  views; any extension needs typed element conversion, mutation semantics,
+  identity, modification-count/iterator behavior and correct local/sync tier.
+  Current projection API is remove-only, not a complete mutable generic view.
+- Other remaining diagnostics: OpdfDiscrete nullable Class enum_constants,
+  CLI reflection and text/null/array/enum contracts, bare reader payloads passed
+  to canonical-handle carrier factories, RelatedObjs existential Froms, tokenizer
+  sval native String vs logical UTF16. Fresh complete log/selected generated
+  code/summary preserved in .tmp/jahmm-efficiency-v21-evidence; full artifacts
+  /tmp/jahmm-efficiency-v21. No generated source edits.
+- Next batch: audit wildcard-capture generic producer conversion whole path;
+  named P regression passes but synthetic __JavaWildcard0 sites bypass that
+  branch. Reuse bound/capture environments and nullable/container conversion
+  staging; no blanket From<P>, fake null/default, relaxed adapter proof or
+  unrelated benchmark. Source frozen at V21; debug/release both include batch.
+- Final saved workload parity/time/RSS still unrun because crate compilation is
+  incomplete. Goal active; Commons Statistics remains paused. No staging/commit.
+
+V22 in-progress producer/capture batch (after V21 full result)
+- Reproduced6 errors with added wildcard producer return/local/list uses: three
+  __JavaWildcard0 escapes into nongeneric callers, three missing output coercions.
+- Reused emitted physical receiver shape when it contains synthesized captures;
+  source-interface method outputs now apply the existing receiver generic return
+  substitution before source/resolver surface-bound normalization. Named and
+  synthetic generic values share the original typed interface constructor path.
+- Reused source_ancestor_type_arguments for source implementors entering wildcard
+  generic input slots; infer the callee witness from its actual implemented
+  supertype, including concrete generic substitutions and existing raw erasures.
+  No invariant retag and no alternate subtype solver.
+- Shaped call argument planning respects nonnullable emitted source outputs too;
+  portable nominal inference previously bypassed the needed conversion.
+- Source subtype conversion now composes through optional storage via the same
+  payload conversion, mapping present values and preserving None. This removes
+  the last nonexistent From<Capture> generated by nullable collection insertion.
+- Existing receiver substitution accepts excluded method binders for interface
+  methods so owner-level instantiation respects method binder shadowing.
+- /tmp/jahmm-v22-producer-batch.log:2 PASS. Includes forwarded named P, wildcard
+  return/local/list, actual Java null producer results, and generic product<T>
+  outputs within a holder<T> across locals, stored list and returned interfaces.
+  Java identity/mutation/null and distinct factory result checks agree.
+- No new release/full pipeline; V21 remains authoritative32 diagnostics. New
+  regression for stateless reader directly entering ProductReader<ReaderProduct
+  <?>> is currently running to audit the two bare-reader canonical factory
+  errors. Do not claim a fix before checking its output. No benchmark.
+
+V22 integration checkpoint / next architectural boundary
+- /tmp/jahmm-v22-integration-batch.log:27 PASS (source_call_staging21,
+  generic_producer_references2, shared_interface_references3, list-copy1).
+- Stateless reader regression exposed fresh concrete product -> erased admitted
+  reference-interface conversion using From<Bare> although only canonical-handle
+  From is emitted. Reference conversion now applies the common effective storage
+  placement and bare-constructor detection before generated From; exact/erased
+  products share canonical storage. Counted exact-reader read still allocates
+  only its single new product. No generated-code repair.
+- The additional owned stateless reader variant makes the carrier receiver
+  mutable; the thin Rust allocation test now binds its local reader mutably.
+  Java fixture checks that variant's dispatch/output. This is NOT yet evidence
+  that the original two PrintActionHandler bare-reader factory errors are fixed.
+- Current release V22 build started with log
+  /tmp/jahmm-efficiency-translator-build-v22.log. No V22 corpus count yet.
+
+Architectural audit: retained collection inputs of erased interface adapters
+- Actual10 V21 diagnostics demand concrete Opdf<ObservationInteger/Real/Vector>
+  -> Opdf<JavaErasedValue> Froms. Probability's scalar input can use an existing
+  checked value conversion. fit(Collection<? extends O>) carries a shared native
+  collection whose element type changes: current generic_retarget_value_expr
+  would consume/map/collect a detached Vec. Admission correctly rejects this.
+- Rewrites must trace caller collection producer -> shared allocation/aliases ->
+  adapter input view -> concrete interface method -> stored/returned collection,
+  iterator and mutation consumers. A view must stay live when caller mutates,
+  preserve nulls and canonical element references, support removal/clear/null
+  insertion permitted by extends captures, report modification counts/fail-fast
+  behavior, and release collection loans before Java equality/callbacks.
+- Existing JavaNativeCollectionProjection provides live map key/value operations
+  (snapshot,len,get,position,remove_at,clear,modification_count), but is remove-only.
+  Its current wrapper is a new Rc/Arc allocation. Blanket JavaReferenceIdentity
+  for Rc/Arc uses the wrapper pointer, so merely wrapping a projected collection
+  would also change collection == / erasure / cast identity. Preserving identity
+  needs a canonical collection handle/view contract, not only another Vec mapper.
+- Possible general representation redesign: native collection handle with
+  canonical allocation identity and typed operation views, retaining original
+  erased allocation recovery. Reuse existing backing/projection tiers and
+  mutation policies; project local vs synchronized storage consistently. Trace
+  producers, slot rendering, coercion/reference-copy helpers, signatures, object
+  erasure/casts and iterators before implementation. Raw heap-pollution semantics
+  and reverse element conversions require explicit scope/proof; no blanket
+  bidirectional typed-retag admission. Open questions remain; no design claimed
+  complete or implemented. Surface this architecture gap; continue feasible local
+  compile families meanwhile. Do not weaken adapter checks to lower error count.
+- No profiling/benchmark; final saved workload still unproven. Goal active,
+  Commons Statistics paused. No staging/commit.
+
+V22 authoritative full result and V23 follow-up
+- Release build PASS1m48s; binary SHA256
+  35dce70cacc6f29cc239b2a057ea5fe16506e2e147f4f21b2f7d3d3eec41bb46.
+- Full95-file pipeline terminal exit1: cargo-check28 diagnostics (V21=32).
+  Source-diagnostic files1. No final benchmark/performance/parity run.
+- Three __JavaWildcard0 -> RefOpdf failures REMOVED (HmmBuilder2, HmmReader1).
+  Two PrintActionHandler bare reader -> canonical carrier factory failures also
+  REMOVED by the compositional optional/canonical conversion paths. RelatedObjs
+  private existential3 and typed Opdf<T> -> Opdf<O> compile-error remain.
+- New exposed integration error1: HmmBuilder generic factory local now emits
+  RefOpdf<T>::new(factory.factor()?)?; wrapping lost the ResultPropagated marker.
+  V23 source follow-up (NOT release V22): typed reference constructor preserves
+  existing marker just as target-typed Into and boxed source conversions do.
+  GenericProducerReferenceProbe now makes producer actually throw for a negative
+  value, verifies propagation through wildcard local and null preservation.
+  Focused gate to run before claiming this follow-up fixed.
+- V22 complete logs/summary/selected generated files preserved under
+  .tmp/jahmm-efficiency-v22-evidence; full /tmp/jahmm-efficiency-v22. All emitted
+  source immutable. Current release stays frozenV22 while follow-up develops.
+- Remaining diagnostics by emitted file:
+  00020_HmmBuilder.rs: 2
+  00030_OpdfDiscrete.rs: 1
+  00048_Cli.rs: 1
+  00049_CommandLineArguments.rs: 7
+  00057_Types.rs: 4
+  00065_HmmReader.rs: 1
+  00081_OpdfGenericReader.rs: 12
+
+- Next coherent local batch candidates: class-token reflection inventory/getter
+  shape, enum nullable array getter/Arrays.asList/complement/toString contracts,
+  and native StreamTokenizer.sval -> logical String/null contract. Actual sval
+  runtime currently returns String via unwrap_or_default despite internal
+  Option<String>; do not merely patch units() with a lossy text conversion.
+- Reflection preliminary audit: helper source_reflective_zero_arg_constructor_
+  item_for_type depends on ctx.program local class-token storage and subtype
+  constructor use. ClassLiteral already counts as constructor use; investigate
+  narrowed batch program ownership/nested enum inventory before deleting guards.
+  No reflection change/test implemented yet. Live collection-view architecture
+  audit above remains unresolved and admission checks remain intact.
+- Goal active. Statistics paused. No profiling, staging or commit.
+
+V23 follow-up verification / artifact durability
+- GenericProducerReferenceProbe now has a separate CheckedProducer<V> whose
+  checked() success value is nonnullable and whose body throws for negative
+  seeds. checkedLocal forces the exact capture -> interface local rewrite.
+  Frozen releaseV22 emission of this same source reproduces
+  RefProducedValue::new(producer.checked()?)? in checked_local. Saved diagnostic
+  under .tmp/jahmm-efficiency-v23-producer-evidence/v22-before.rs; never edited.
+- Current source preserves ResultPropagated through the constructor. Focused
+  command for bounded_generic_producer_values_enter_reference_interfaces_with_
+  their_real_type_contract completed terminal exit0 (tool38567), with this
+  nonnullable success/exception regression. Earlier two-producer test command
+  also terminal exit0 (91946), verified2 PASS before nonnullable extension.
+- Several /tmp Jahmm logs/full generated trees disappeared after completion;
+  cause not established. No process restarted solely because a log vanished.
+  Durable V22 corpus evidence and earlier integration logs survive in workspace
+  .tmp. V23 exact command/terminal-status record preserved in
+  .tmp/jahmm-efficiency-v23-producer-evidence/session-results.txt. Its focused
+  /tmp log was gone before copying; do not claim a captured detailed test report.
+  Use workspace .tmp for subsequent working output and logs to preserve evidence.
+- No V23 release/full regeneration for this one marker fix: batch next related
+  native-field/enum/class-token contracts before another expensive cycle. Last
+  authoritative full count remains28 at V22. Full regenerated crate compilation,
+  exact workload parity and final timing/RSS remain incomplete; goal active.
+
+V23 enum/class-token/native-view batch IN PROGRESS (2026-10-26)
+- Entry-gate fixtures: EnumNativeContractsProbe.java exercises source get and
+  toString, stateful enum storage, array getter and direct field Arrays.asList,
+  EnumSet.of/complement/allOf, constructor varargs validation, mutable String
+  identity and null Class token. ReflectionFactoryProbe uses four separately
+  emitted real source files, enum Class<? extends Work> fields and two concrete
+  reflective constructors; verifies Java through javac. New tests/enum_native_
+  contracts.rs. First reflection oracle path was invalid test metadata, corrected
+  to real repository fixture paths; no product inference drawn from that failure.
+- Baseline enum fixture reproduced9 generated compiler errors. First coherent
+  batch reduced original set to4. Expanded Java semantics tests then exposed
+  additional null/publication/class-generic metadata contracts; no full corpus
+  regenerated, authoritative full remainsV22=28.
+- Native receiver-call planner now accepts resolved declaration and rejects
+  native get/toString/etc when the resolved Java owner is parsed source. Physical
+  Optional<Source> must not turn source get into java.util.Optional.get. Real JDK
+  Optional with source payload still uses its non-source declaration.
+- Enum toString intrinsic skips actual source overrides; source methods already
+  return logical/nullable Java String and must not be interned as native names.
+  Fixture adds new String identity check to prevent content-only acceptance.
+- Nullable state assignment now recovers a live same-type source reference BEFORE
+  Some consumes it, using existing liveness/capability/slot conversion policy in
+  clone_reused_reference_before_carrier_conversion. Original constructor assigns
+  label to two fields; no unconditional clone or post-move Some(value).clone.
+  Earlier attempt at optional-present constructor path missed an early producer
+  shortcut and was removed in favor of the shared post-conversion boundary.
+- Native EnumSet.of/allOf argument lowering projects required enum/Class values,
+  retaining existing null checks. Runtime complement now separates JavaEnum E
+  from stored slot V via JavaEnumSetValue<E>, with non-overlapping E and Option<E>
+  impls; Option<E> never falsely implements JavaEnum. New Rust fixture checks both
+  ordinary and nullable stored-slot complement. Fresh complements keep enum order.
+- Retained Arrays.asList(referenceArray) now uses existing live fixed-size native
+  collection backing, rather than returning Option<Arc<array>> or Vec[arrayHandle].
+  actual-shape helper, physical_call_value_shape, collection argument planning,
+  retained-call dispatch and factory source lowering share that view contract.
+  Existing native Vec arrays keep their carrier; result is nonnull after checking
+  input array. No detached snapshot or repair of generated corpus output.
+- Runtime collection-support inventory now includes native array views even when
+  no retained List slot is stored. SignaturePlan slot traversal extracted once
+  for retained collection/array inventory; common runtime/backing tiers reused.
+- Stateful enum payload Raw emission now uses common source field naming and
+  rust_identifier_token for declarations/defaults/getter/setter bodies. Reflection
+  fixture deliberately uses Java field/method `type`; four Rust parse errors now
+  gone, without changing fixture names or duplicating keyword lists.
+- Enum field-shape inference now accepts ShapeEnv and honors local/parameter
+  shadowing; explicit this.field remains a field. New constructor allowed.length
+  reproduced the actual OpdfDiscrete/CLI varargs mismatch (Arc treated Optional).
+- Enum state setters stage/null-check a published enum receiver before calling
+  __java_set_*; formerly direct FIRST.constant().setter called through Option.
+- Existing emitted_source_method_param_shape Class token normalization now sets
+  Concrete dispatch as well as owned/native view; a JavaClass<E> body/caller
+  must not be converted to Any merely because E is generic.
+- Reflection constructor-use inventory now visits StaticInitBlock.block too.
+  Class literals may move there during enum initialization preparation. Still
+  missing factory in the batch fixture after this change, so investigate actual
+  current-program/support ownership before claiming this is the full fix.
+- TEMPORARY diagnostic behind NEW_JAVA2RUST_AUDIT_REFLECTION in source_reflective_
+  zero_arg_constructor_item_for_type MUST BE REMOVED before final validation.
+  Current batch3 command with that env enabled running (tool1031), output
+  .tmp/jahmm-efficiency-v23-producer-evidence/enum-native-batch3.log. Earlier
+  batch1/batch2 logs preserved there. Batch2 had8 errors after adding semantic
+  checks; do not claim it passed. Current source is not yet gated/released.
+- First compile caught StaticInitBlock field typo body vs block, corrected.
+  No benchmarks, staging or commits. Goal active; Statistics remains paused.
+
+V23 batch3/4 diagnosis and broad gate now running
+- Batch3 enum fixture reached2 errors: contains_by expects &Option<JavaString>
+  but argument planning provided &JavaString. All new Class<E>/allOf, null enum
+  setter, varargs length/shadowing and repeated constructor reference compile
+  errors were removed. Runtime support for live array views is now emitted.
+- Reflection debug showed Work never entered the reflective-helper function:
+  abstract_owner_is_declaration_only returned from lower_type first. Moved the
+  one common factory emission before that abstract-root branch and removed the
+  concrete-only site. Factory constructs descendants, not abstract payloads.
+- Batch4 separately_emitted_class_tokens_retain_reflective_constructor_targets
+  PASSED through real4-file package pipeline/assembly and Java oracle. Keyword
+  payload escaping is also verified by that fixture's field/method `type`.
+- Temporary NEW_JAVA2RUST_AUDIT_REFLECTION instrumentation REMOVED. Static-init
+  constructor inventory traversal retained as valid whole-program coverage.
+- Batch4 enum fixture still2 query ABI errors. Final correction now projects
+  Arrays.asList's element type using common array_storage_element_java_type,
+  preserving reference-array nullable element storage explicitly in its List
+  view. Collection arguments inherit matching stored-child nullable ABI and
+  borrow the carrier. No duplicate nullability policy or detached copy.
+- Broad gate STARTED: CARGO_NET_OFFLINE=true CARGO_BUILD_JOBS=2 cargo test
+  --test enum_native_contracts --test array_backed_collection_boundaries
+  --test retained_list_operations --test source_call_staging
+  --test shared_interface_references --test generic_producer_references.
+  Tool76702, output .tmp/jahmm-efficiency-v23-producer-evidence/enum-array-
+  integration-batch.log. Must inspect terminal result; not yet claimed passing.
+  This reuses existing stored-view alias/mutation/null/iterator/fixed-size gates
+  rather than assuming inline contains proves the whole view contract.
+- Native collection equality callbacks currently run in contains_by/list_index_of
+  under collection/backing read guards. Existing runtime limitation, relevant to
+  custom-equals reentrant array-view users and future generic live-view adapters;
+  must audit operation staging before claiming full callback correctness. No
+  change to that runtime path in this batch; actual Jahmm String queries use
+  immutable native equality. Goal parity/performance remains unproven.
+- Worktree filesystem free ~4GB at last check; target/debug/deps30GB and
+  incremental3.6GB, /tmp29GB. No cache deletion performed. Avoid concurrent
+  expensive builds and preserve frozen .tmp/jahmm-full-v122/evidence/Statistics.
+- Source still V23 development; release binary remains V22 and full count28.
+  Batch3 initially hit one unqualified TypeEnv typo after rustfmt changed the
+  replacement context; corrected to crate::types::TypeEnv before actual tests.
+
+V23 core/enum/native-array batch VERIFIED before release
+- Native factory required-nonnull-operand policy now lives on
+  NativeCollectionStaticMethod and is shared by argument lowering and the
+  existing shaped null/fallibility analysis. EnumSet.of/allOf require enum/Class
+  values; Arrays.asList only requires the single reference-array argument (a
+  primitive array is one nullable varargs element). This fixes a caught null
+  Class argument across an otherwise infallible source method without replacing
+  it with a Rust expect panic or inventing a separate exception mechanism.
+- EnumNativeContractsProbe's full Java/Rust checks now PASS: source getter and
+  overridden toString, logical String reference identity after mutation, varargs
+  parameter/field shadowing and length, repeated constructor references,
+  retained array getter and field views/contains, EnumSet.of/complement, generic
+  Class<E> allOf positive and null catch. Its extra Rust probe verifies nullable
+  enum stored-slot complement and type inference.
+- .tmp/jahmm-efficiency-v23-producer-evidence/enum-array-integration-batch2.log:
+  terminal exit0 (55148),33 integrations PASS: array_backed_collection_boundaries2,
+  enum_native_contracts2, generic_producer_references2, retained_list_operations3,
+  shared_interface_references3, source_call_staging21. This includes existing
+  live array/list aliases, late iterator reads, null writes, fixed-size policies,
+  source dispatch/constructor staging and allocation/reentry reference checks.
+- Temporary reflection diagnostics absent (rg verified); rustfmt and git diff
+  --check clean. No full V23 count yet; last complete count remainsV22=28.
+- Release V23 build STARTED, log .tmp/jahmm-efficiency-v23-producer-evidence/
+  translator-build.log. Await its authoritative handle before full95-file
+  regeneration. Use workspace output .tmp/jahmm-efficiency-v23 and /tmp cargo
+  target to preserve evidence and avoid filesystem pressure. No benchmark.
+- Callback-under-guard/native query limitation and live generic collection-view
+  architecture gap remain documented, not claimed fixed by passing String views.
+  Goal active. Commons Statistics handover preserved. No staging or commit.
+
+V23 complete full snapshot and next ABI batch (2026-10-26)
+- User explicitly directs that benchmarking should barely be needed: known
+  overhead guides implementation. No exploratory profiling/benchmark campaign.
+  Focused semantic/allocation gates, then one final saved parity/time/RSS run.
+  This supersedes the active goal text's obsolete profile-first wording.
+- Release V23 build passed. Frozen producer SHA256:
+  37c30614fe7965c1def86f7690ebac8fe9d684fec4932609f5ab659c10945d34.
+- Full95-file .tmp/jahmm-efficiency-v23 pipeline finished exit1,31 diagnostics
+  (previous V22=28), one source diagnostic. Logs in
+  .tmp/jahmm-efficiency-v23-producer-evidence/pipeline.log. No benchmark run.
+  Twelve diagnostics are repeated EnumSet.of bare-enum producer vs nullable
+  stored-element mismatches across six CLI action handlers. Previous enum
+  reflection, varargs, toString and several factory errors were removed.
+  Remaining: HmmBuilder1 invariant retarget, CommandLineArguments1 Arrays.asList
+  nested enum-array classification, Types4 (source get misclassification and
+  RelatedObjsWildcardValue From), HmmReader1 tokenizer text, OpdfGenericReader12
+  (10 erased generic-interface From proofs,2 tokenizer text).
+- Next edits reuse existing owned sequence nullable-element lifting for fresh
+  EnumSet.of results. Positively selected native factory now exposes its actual
+  nonnull element ABI to physical/preferred result and source argument lowering.
+  Shared array factory classification now uses the existing physical value-shape
+  authority, matching actual backing lowering. No live collection copy/retag.
+- Extended four-file reflective-constructor fixture with nested enum varargs
+  array Arrays.asList query and EnumSet.of crossing a mutating source parameter.
+  Focused test in progress: enum-factory-cross-file.log (session98031).
+- Tokenizer text entry gate added (tests/stream_tokenizer_chars.rs and fixture
+  StreamTokenizerTextProbe.java). Java oracle passed; generated Rust baseline9
+  diagnostics in tokenizer-text-before.log. No product fix yet. Runtime sval is
+  currently Option<String> but getter defaults null to empty String; target is
+  token-time Option<JavaString> storage and cloned optional getter, preserving
+  identity through repeated reads/pushBack, fresh identity for distinct tokens.
+  Native field facts must agree and StringReader must use existing JavaTextView.
+  This gate is intentionally red until that whole-path contract is fixed.
+- Live generic collection-view adapter architecture remains unresolved. Do not
+  relax admission into copied Vec adapters or invariant retagging. No full crate
+  or final saved-workload parity/speed/RSS claim yet. Goal remains active.
+- Reversible obsolete build-cache move completed: 269 files, 3136923136 bytes. Ledger: .tmp/jahmm-efficiency-v23-producer-evidence/obsolete-build-artifacts-move.json. Backup /tmp/jahmm-obsolete-build-artifacts-0bufi8q_. No source or frozen baseline removed.
+
+Cross-file ABI batch follow-up
+- First extended regression: original enum contract passes; fresh EnumSet source
+  argument compiles. Two remaining errors from fully-qualified java.util.Arrays
+  being excluded by a syntax-only factory prefilter. Removed redundant owner
+  syntax gate; positive native call planning still owns admission. Cheap method
+  name guards avoid planning unrelated calls in the physical-value helpers.
+- The debug executable was already current (SHA7a3786e6...). Earlier commentary
+  attributing that failure to a stale binary was incorrect; checked and corrected
+  explicitly. No redundant full corpus or benchmark was run.
+- Second cross-file regression now correctly emits live from_sync_array, but one
+  missing runtime support error remains: support inventory only accepted short
+  canonical owner Arrays. Inventory now also accepts its qualified/runtime keys,
+  retaining the existing parsed-source exclusion. Third focused gate in progress:
+  enum-factory-cross-file3.log, session67516. Last focused terminal result remains
+  1pass/1fail until this authoritative result is checked.
+
+Cross-file runtime support inventory correction
+- Third focused gate still1pass/1fail: live from_sync_array emission was correct,
+  but JavaSyncNativeCollection support absent. Root cause extends beyond owner
+  spelling: local signatures cannot inventory a backing array in a separately
+  emitted declaration. Replaced syntax-based scan with existing positive native
+  static call planner; native Arrays.asList occurrence requires support without
+  a local-only array-signature veto. Parsed-source shadows remain planner-owned.
+  This conservative support requirement does not alter generated view semantics.
+- Fourth focused enum gate in progress: enum-factory-cross-file4.log session83312.
+  No repeated full95-file translation or benchmark, no speed/parity claim yet.
+  rustfmt run; git diff --check passed. Tokenizer/generic live-view gaps remain.
+
+Cross-file enum/array batch final gate
+- enum-factory-cross-file4.log terminal exit0, both integrations PASS, including
+  full four-file Java/Rust source pipeline, enum-set source parameter mutation,
+  qualified Arrays.asList nested enum-array query and reflection targets. Existing
+  monolithic enum/native/null/identity contracts also PASS. No benchmark run.
+- Latest full95-file count remains frozen V23=31; not rerun for these individual
+  edits. Next coherent batch remains tokenizer nullable identity-preserving text
+  ABI plus remaining source-call/generic contracts as architecture allows.
+
+Tokenizer nullable reference/text ABI batch (2026-10-26)
+- Previous goal turn classified PROGRESS: enum/array cross-file gates terminal0.
+  No exploratory profiling/benchmarking; user instruction remains authoritative.
+- Runtime StreamTokenizer now stores Option<JavaString>, creates token String
+  once on token production, returns cloned optional reference on sval reads.
+  Native sval field fact now nullable Java String. Null resets, aliases and
+  pushBack retain existing state rules. Native Rust Display explicitly encodes
+  text for formatting; Java getter never defaults null or lossifies text.
+- Reader backing now UTF-16 code units; StringReader/Reader text constructor uses
+  existing JavaTextView. Reader.read_0 and tokenizer consume raw units, preserving
+  supplementary characters and isolated surrogates without scalar conversion.
+  Legacy native [char]/CharBuffer APIs retain scalar adapter; isolated surrogates
+  cannot fit those Rust buffers and report IOException rather than replacement.
+  Full Java CharBuffer/code-unit array migration is outside this batch; do not
+  claim complete UTF-16 IO across every existing native buffer surface.
+- tokenizer-enum-reference-batch2.log terminal0: seven integration tests pass
+  (enum2, shared_interface_references3, tokenizer2). The tokenizer thin runtime
+  probe checks raw Reader units, unpaired/pair token text,1000 reads retaining
+  reference identity and pushBack. Java/Rust fixture checks null, alias resets,
+  distinct same-content token identity, EOF and source String operations.
+- Existing stream_tokenizer_preserves_shared_reader_and_syntax_state PASSED.
+  Companion identity_string_reader_and_transformations_preserve_the_carrier
+  FAILED: unsupported source IdentityFileReader->Reader, missing JavaString
+  to_uppercase, stale thin JavaString::intern/static and as_str APIs. These paths
+  were not changed by this tokenizer batch; no entire-suite green claim.
+- Removed now-unused signature retained-array-only inventory helper after prior
+  cross-file support inventory fix, removing its added dead-code warning.
+- Extended four-file enum fixture into a named package with imported nested
+  enum leaf and source get(). Java oracle passed. Reproduces remaining Types
+  Optional.get misclassification in imported-enum-source-method-before.log.
+  Fixture currently red until source dispatch contract fixed. Monolithic enum
+  test still passes. All pinned Java corpus files remain untouched.
+- Narrow temporary NEW_JAVA2RUST_AUDIT_SOURCE_GET traces in call_plan/lower used
+  only for direct single-consumer generation with context, no full corpus. Must
+  REMOVE instrumentation before final gate/release. Repro1/2 show TypeEnv receiver
+  Unknown(FIRST), resolved=None, source_name=None; source enum shape later known.
+  Need trace selected lower-context plan, not assume native planner guard alone
+  solves it. Debug producer builds1/2/3 passed, no benchmark run.
+
+Imported enum dispatch batch verified / next full gate
+- Debug SOURCE_GET trace3 exposed ambient unqualified FIRST field binding as
+  Optional<Work.Mode>, while qualified Mode.FIRST inferred Unknown(FIRST), with
+  no resolved declaration. Lower-context plan incorrectly Native OptionalGet.
+  Root cause receiver_source_type_name used types.field_type(field) for ANY
+  qualified field receiver. Restricted lexical binding lookup to this/self only;
+  foreign/qualified fields use owner-aware inferred receiver type. Native Optional
+  owner admission also consults inferred type, preserving Optional<Source> fields.
+- imported-enum-source-method-after.log terminal0: both integration gates PASS,
+  named-package four-file fixture imports Work.Mode by leaf, verifies source get
+  returns correct Java String, reflective factories, EnumSet parameter mutation,
+  qualified Arrays.asList nested enum-array query. Java oracle included.
+- Added focused planner positive/negative test for real holder.choice Optional of
+  a parsed source payload and foreign enum constant with colliding ambient field
+  name. qualified-optional-dispatch-unit.log session82084 still running at this
+  note; inspect terminal result before declaring it passed.
+- All temporary NEW_JAVA2RUST_AUDIT_SOURCE_GET instrumentation REMOVED, rg checked.
+  rustfmt terminal0, git diff --check clean. No source body repairs/pinned edits.
+  Latest full corpus remains V23=31 until next substantial-batch full gate.
+
+V24 authoritative full corpus result (2026-10-26)
+- Focused qualified_optional_dispatch_uses_the_receiver_owner_not_a_leaf_binding
+  unit PASSED, terminal0. Eight focused integration/planner gates pass across
+  tokenizer2, enum2, shared references3, planner1; additional old tokenizer idiom
+  passed. Existing identity file-reader/transforms idiom remains red as above.
+- Release build passed1m53s. Frozen producer metadata:
+  .tmp/jahmm-efficiency-v24-producer-evidence/producer.json
+  SHA256 774c951899940dc1ecf444ffdc6bdf9c08a4e6271877d7fef81c566bf420a115.
+- Full95-file pipeline terminal exit1 (38699),256616ms total, translation138341ms,
+  assembly107803ms. .tmp/jahmm-efficiency-v24/compile.log authoritative:
+  30 Rust diagnostics (V23=31), not a passing crate. Pipeline diagnostic_files95
+  includes warnings; do not misreport it as95 source-error families.
+- Old Types source get misclassification removed. Old HmmReader native String
+  and OpdfGenericReader String.units errors removed. Cross-file Arrays.asList
+  backing now routes to live from_sync_array. Remaining groups:
+  12 EnumSet local initializers across six handlers still bareE->Option<E>;
+  14 generic/interface conversions (HmmBuilder1 invariant Opdf retarget,
+  Types3 RelatedObjs wildcard From, OpdfGenericReader10 erased Opdf From);
+  2 nullable tokenizer String->floating parser consumers (ObservationVectorReader,
+  OpdfReader), exposed by corrected sval nullable contract;
+  2 CommandLineArguments source enum array field indexing ownership/lifetime.
+- No benchmark run; no fresh workload parity/time/RSS claim. Goal active,
+  Statistics handover preserved, no staging/commit/pinned Java modifications.
+
+Next coherent ABI batch: concrete rewrite audit from V24
+1. EnumSet local producer adaptation: lower_exact_generic_external_call_for_slot
+   (src/lower.rs~93399) returns lower_expr raw whenever nominal external.java_ty
+   ==target.java_ty with generic detail, BEFORE ordinary physical actual-shape
+   conversion. This bypass is why the native EnumSet postcondition helper and
+   owned-sequence nullable lifting did not reach CLI local assignments. Fix
+   shortcut admission using the physical/rendered ABI, or defer when known
+   factory ABI differs; reuse lower_owned_sequence_into_nullable_element_storage.
+   Extend regression to prove destination actually renders BTreeSet<Option<E>>,
+   not merely another bare-enum parameter. Prior four-file parameter regression
+   compiled bareBTreeSet<E>, so it did not cover CLI's nullable stored child.
+2. Array access: lower_retained_array_read_with_projection (~89975) gets static/
+   current-this field shapes then nominal inference, missing foreign enum field
+   physical shape. Reuse physical_call_value_shape as fallback so existing
+   owner/index staging and guarded reference materialization run. Separately
+   array_expr_is_owned_temporary (~90360) assumes a source enum accessor with
+   OwnershipOwned is a disposable Vec, ignoring native_allocation.shared().
+   Ownership of Java reference must not consume its shared allocation. Add
+   !shared to that admission; use existing staged retained read, never Vec clone.
+   Reproduce with local Mode chosen=FIRST; chosen.allowedValues[0] in four-file
+   imported enum consumer. Actual CLI error uses arg.allowedValues[0] directly.
+3. Float parse: two consumers emit java_float_parse_text_f64(&st.sval()) with
+   Option<String>. Float parser correctly needs JavaTextView; do not implement
+   JavaTextView for Option or default null. primitive_parse_receiver_projection
+   already shares java_float_parse_null_argument_as_null_pointer, but it only
+   recognizes OptionalProjected/as_ref Rust syntax. Carry authoritative nullable
+   String shape through native field/parse argument lowering, then reuse existing
+   NPE policy. Add Java oracle parse-after-token and null-parse catch cases.
+4. Generic live views remain the substantial architecture batch: source Opdf
+   includes retained array and collection fit arguments. Existing retarget
+   conversion owns/maps/collects, so admission intentionally rejects live roots/
+   descendants. Preserve Java== identity, nulls, live storage, mutations and
+   iterator/modcounts. Existing projection vtable handles remove-only map views;
+   new wrapper pointers alone cannot preserve canonical Rc/Arc identity. Audit
+   common native reference representation plus identity token/retained-owner
+   projection before broadening adapter admission. No detached-copy or unsafe
+   invariant retag fallback. Exact feasibility still not established; not blocked
+   while local ABI batch and architectural investigation can make progress.
+
+V25 local physical ABI batch (2026-10-26)
+- Previous turn classified PROGRESS: tokenizer/reflection fixes,8 focused gates,
+  authoritative fullV24=30 diagnostics. Goal active; no exploratory benchmark.
+- lower_exact_generic_external_call_for_slot now demands physical rendered Rust
+  ABI equality in addition to nominal Java generic equality. Cheap nominal gates
+  run first to avoid re-inferring irrelevant nongeneric calls. Ordinary slot
+  conversion handles mismatched physical storage.
+- Selected native EnumSet factory result normalization/lifting now runs at the
+  common slot entry before other generic/static producer shortcuts. It reuses
+  existing owned-sequence nullable child lifting; no shared collection copy.
+  Factory element shape now comes from the actual lowered first operand's
+  physical type, preserving declaring enum identity across imported leaf aliases
+  instead of the external generic summary's Mode vs Work.Mode spelling.
+- lower_retained_array_read_with_projection falls back to physical value shape
+  for foreign enum array fields, reusing existing owner/index staging and guarded
+  reference materialization. Enum field Owned means owned Java reference; the
+  disposable Vec path now additionally requires !native_allocation.shared().
+- MemberAccess RustGetter expressions now record the existing plan's slot shape.
+  Numeric parsing recognizes a recorded optional String carrier and reuses its
+  existing null->NPE projection. No Option JavaTextView/default-empty overload.
+- Extended imported four-file fixture: local EnumSet used passed to mutating
+  Work.check, whose seen.add(Mode.SECOND) makes destination child nullable;
+  imported local Mode chosen field array read. Batch2 failure PROVED emitted
+  local BTreeSet<Option<Work_Mode>> and same declaration in Work.check, not the
+  previous bare-element fixture. Batch4 same fixture now PASSED production
+  four-file assembly and Java/Rust runtime oracle. No pinned source edits.
+- An initial diagnostic attempt used seen.contains((Mode)null) to force child
+  storage; it stayed bare and exposed existing incorrect NPE (Java returnsfalse).
+  Removed that unsuccessful forcing experiment from fixture, recorded gap here.
+  Actual CLI stored insertion is now representative. Do not claim null EnumSet
+  queries fixed; avoid losing this real semantic limitation in future view work.
+- physical-boundaries-batch1: array_backed_collection_boundaries2 PASS;
+  enum monolithicPASS, extendedfixture runtimefailed due above null-query probe.
+  Batch2/3 extendedfixture proved nullable-element local mismatch remains.
+  Batch4 after canonical operand type normalization: enum2 PASS, retained-list3
+  PASS, tokenizer syntaxPASS; text test's Java oracle returned10 because Java
+  default numeric syntax remains numeric despite wordChars (fixture bug).
+  Corrected numeric fixture using resetSyntax plus digit/dot/word/space syntax,
+  matching Jahmm explicit syntax. physical-parsing-batch5 terminal0: tokenizer2
+  PASS incl Double.parseDouble(null)->NPE, numeric positive, Float.valueOf and
+  malformed token->NumberFormatException. Nine focused gates pass in total.
+- Root disk pressure: reversible move of20 obsolete single-link compiler cache
+  files/executables older3h,3356699744bytes, to
+  /tmp/jahmm-v24-obsolete-build-artifacts-5yo2u1no. Ledger
+  .tmp/jahmm-efficiency-v24-producer-evidence/obsolete-build-artifacts-move.json.
+  Initial candidate scan hit a disappearing/dangling old executable; no moves
+  before failure. Retried skipping missing entries; complete. Root free4.9GB at
+  last check. No source/frozen baseline removal; backups rebuildable caches.
+- rustfmt --check terminal0; git diff --check clean. Product source now frozen
+  for V25. Release+full95-file pipeline STARTED via session93409, logs
+  .tmp/jahmm-efficiency-v25-producer-evidence/{translator-build.log,pipeline.log},
+  producer.json will capture final releaseSHA before pipeline. Output
+  .tmp/jahmm-efficiency-v25. Must inspect same handle, do not restart from a quiet
+  log. Last complete count remains V24=30; removal of16 local-family diagnostics
+  is expected but UNVERIFIED until V25 cargo gate. No benchmark run.
+
+Next architectural audit: canonical native references and checked live views
+- Existing generic_interface_supports_retarget_adapter deliberately rejects
+  dependent shapes with retained native roots/children. Opdf fit has both array
+  and collection inputs; copying map/collect cannot implement Java erasure.
+  From proofs across readers and RelatedObjs plus invariant HmmBuilder retarget
+  appear connected; prove against V25 before asserting one shared solution.
+- Proposed representation (NOT IMPLEMENTED): nominal local/sync native reference
+  wrapping one existing allocation. Ordinary references use allocation identity;
+  projected typed references retain original owner and forward its identity.
+  Identity lives outside mutable payload loans, so Java==/monitor/hash do not
+  borrow the collection or depend on a new view wrapper pointer. A header can
+  retain root owner for view lifetime; ordinary clone stays one Rc/Arc clone,
+  no additional identity-object allocation per getter. Consider immutable
+  identity+owner header around existing mutable payload rather than global
+  pointer registries or borrowing payload during identity checks.
+- Whole path required: native slot render/storage construction and cloning,
+  retained-array/collection producers and backing factories, source parameters/
+  returns, generic adapter checked element conversions both directions, Java
+  identity/monitor keys, erasure/casts, local/sync promotion, iterators/modcounts,
+  nulls and failed writes. Reuse JavaSharedAllocationAccess (stdlib~9906), existing
+  projection operations and checked value conversions. Rc/Arc blanket identity
+  (stdlib~8683) cannot recognize a newly allocated typed wrapper automatically;
+  do not simply allocate a projection and advertise same Java object.
+- Generic views need fixed-array and collection mutation policies; current
+  JavaNativeCollectionProjection is remove-only and is not sufficient alone.
+  Equality callbacks must be staged outside payload loans where reentry can
+  mutate aliases; documented current contains-under-guard limitation matters
+  when expanding admission. Admission remains conservative until whole-path
+  proofs/regressions pass. This is substantive framework work, not a safe
+  single From impl. User informed upfront; no approval request needed.
+
+V25 full gate COMPLETE: local ABI families removed
+- Session93409 terminal exit1, full95-file pipeline completed232655ms;
+  translation125392ms, assembly96912ms. Release build passed1m48s.
+  Producer SHA256 db6339596164ca36e134a27b872ba0fb5032cec6fe886204dd3ffdeff05be772.
+- Authoritative .tmp/jahmm-efficiency-v25/compile.log:14 diagnostics, DOWN FROM
+  V24=30. All16 targeted local diagnostics REMOVED:12EnumSet initializer storage,
+  2nullable tokenizer Float parsing,2enum array field indexing/lifetime. Emitted
+  actual CLI sets now use existing into_iter().map(Some).collect<nullableSet>();
+  floating parser gets required String via existing optional->NPE policy.
+- Remaining exactly: HmmBuilder1 unsupported ReferenceDynTrait Opdf<T> retarget;
+  Types3 RelatedObjsWildcardValue missing concrete From; OpdfGenericReader10
+  __JavaReferenceOpdf<JavaErasedValue> missing From from five canonical concrete
+  Rc<RefCell<Opdf*>> producers (five families repeated across two entry bodies).
+  Counts corroborated by pipeline.log and top-compile-errors.tsv. No claim these
+  are14 independent fixes; next coherent architectural audit is generic live
+  array/collection views and their interface/wildcard conversion admission.
+- Nine focused tests across enum2,array backing2,retained-list3,tokenizer2 PASS as
+  logged above. rustfmt--check terminal0; git diff--check clean. No temporary
+  debug tracing. Source frozen; no active own build/pipeline handles remain.
+- Goal INCOMPLETE/ACTIVE: fresh full crate still red on14 generic/interface
+  conversions. No benchmark run or fresh workload parity/time/RSS proof yet.
+  Do not mark complete or blocked merely because representation work is larger.
+  Next safe action: refine canonical native reference/live-view whole-path plan
+  from emitted14 errors, prototype general identity-retaining typed view kernel,
+  then integrate producers/storage/signatures/checked adapters/consumers in one
+  coherent batch. Preserve conservative adapter rejection until proofs pass.
+  Keep Commons Statistics paused, pinned sources and frozen baselines untouched.
+
+Canonical native view reference foundation (2026-10-26)
+- Previous turn classified PROGRESS: V25 full14 after16 local ABI fixes. This
+  turn implements the next reference/view foundation; no exploratory benchmark.
+- Added src/java_native_reference.rs, shared by emitted runtime and direct
+  tests/native_reference_views.rs. Local/sync nominal references store immutable
+  identity/root-owner header outside payload. A projected header retains original
+  allocation; projection chains reuse root lifetime, and identity checks do not
+  borrow/lock payload. Manual Clone copies one Rc/Arc without requiring T:Clone.
+  Bridge constructors preserve existing canonical Rc/Arc allocation identity.
+- Payload policy is explicit in T: immutable operation tables have no RefCell or
+  Mutex; mutable state uses RefCell<T>/Mutex<T>. Initial implicit mutable-payload
+  draft was refined before final gates to avoid adding a loan to every vtable
+  call. JavaSharedAllocationAccess implementations specialize mutable payloads;
+  JavaReferenceIdentity uses immutable header for either policy.
+- Native weak-view handle supports operation callback cycle prevention. Its
+  reachability is for that typed view allocation; it must not be mistaken for
+  Java WeakReference reachability of the canonical original object.
+- Reused existing JavaListView/JavaInterfaceProjection operations. JavaListView
+  now owns a single canonical native ref to its immutable operation table; clone
+  drops from two reference-count increments (allocation+operations) to one.
+  Java identity is forwarded from root, including generic JavaReferenceIdentity
+  comparisons. same_allocation/shares_allocation_with compare root identity
+  without borrowing or cloning an erased source Rc. Public source-operation
+  factory APIs preserved; ordinary native Rc/Arc storage signatures unchanged.
+  No blanket storage ABI migration and no generic adapter admission relaxation.
+- Core emitted through existing java_native_collection_runtime_support, covering
+  direct retained collections and native Iterable support. Existing list reentry
+  test's weak operation handle and physical table-address check were updated to
+  nominal-reference API; no generated corpus body/source modifications.
+
+Foundation verification evidence
+- native-reference-kernel.log initial4 PASS. native-reference-runtime-integration
+  initial7 top-level tests PASS before payload-policy refinement.
+- Final native-list-immutable-operations.log terminal0:5 direct kernel tests and
+  3 retained-list integrations PASS. Covers local/sync mutable loans vs identity,
+  clone without payload Clone, cross-thread alias mutation, optional aliases,
+  independent source allocations, root retention/drop, flattened identity-owner
+  chain and weak-view cleanup; generated runtime access/identity trait glue and
+  existing live cursor/list mutation checks included.
+- native-reference-owner-count.log terminal0: all5 direct tests PASS;1000 view
+  clones leave canonical original Rc strong_count unchanged. This is targeted
+  operation-count evidence, not a timing benchmark.
+- native-list-operation-reentry-final2.log terminal0: exactly1 selected stdlib
+  runtime gate PASSED. It executes existing full native Iterable/list operations,
+  alias identity, weak cycle cleanup, custom virtual operations/reentry,
+  non-Clone elements/results, iterator fail-fast/removal/null/fixed-size behavior.
+  First attempted --exact stdlib::tests namespace selected0 tests (invalid gate,
+  not a pass). Correct namespace is stdlib::external_facade_generic_carrier_tests.
+  First actual run then found one stale Rc::ptr_eq test plumbing call; changed to
+  pointer equality on immutable operation-table references, preserving test that
+  separate tables can share one Java identity. Final gate actually ran and passed.
+- source_list_projection_preserves_virtual_operations_and_mutation PASSED.
+  New canonical_list_views_survive_production_assembly uses this existing source
+  fixture through real pipeline+thin consumer. canonical-source-list-assembly.log
+  terminal0,1testPASS: source live_read47 and mutation_through_cast28. Verifies
+  header/operation support survives production root/module support assembly.
+- Broader list_projection_boundaries fixture FAILED3 existing typing errors:
+  unspecialized T in cast-return locals2 and retained Set->Iterable carrier1.
+  Verified SAME3 errors with frozen V25 release db633959... producer in
+  .tmp/canonical-list-boundaries-v25-baseline/compile.log; source source unchanged.
+  Evidence list-boundary-frozen-baseline.log. Original expanded-gate log
+  canonical-list-view-assembly.log1pass/2fail (same old fixture used in new assembly
+  attempt); final assembly test uses already passing source-operation fixture.
+  Do not claim broader generic-list boundary coverage green or silently discard
+  these baseline bugs: relevant to next generic view signature/binder batch.
+- rustfmt--check terminal0 and git diff--check clean before final comment-only
+  clarification. No temporary instrumentation, staging, commit, full corpus rerun
+  or benchmark. Latest authoritative full count remains frozenV25=14; all14
+  generic/interface bridges still unresolved/admission conservatively rejected.
+
+Refined next architectural plan / semantic audit
+- Prefer generalizing existing JavaListView/JavaInterfaceProjection operation
+  protocol and shape projection over globally replacing every native Rc/Vec.
+  Canonical header can bridge old allocations and typed operation views while
+  preserving root identity. Source/producer callbacks already retain live state.
+- Need a base collection operation view (size/iteration/membership/mutation) and
+  array/list indexed operations with correct capability flags. A Collection may
+  be a Set; JavaListView::from_native_allocation currently requires_list, so it
+  cannot stand in for every Collection parameter. Arrays are not Lists; retain
+  distinct runtime kind, fixed-size and runtime component store policy.
+- Introduce/prove affected parameter/storage view contracts through producers,
+  source interface and concrete implementation signatures, locals/fields,
+  adapters, argument coercions and consumers. Existing ViewShape::ListInterface
+  and its source operation dispatch/iterator hooks are reuse points. Arrays need
+  explicit typed operation view support before generic retained-array admission.
+- Cast timing is material in this actual corpus. OpdfGaussian/Integer/etc use
+  typed foreach reads. OpdfGaussianMixture.java:200 uses
+  co.toArray(new ObservationReal[co.size()]). A collection view must not pre-cast
+  every element to a concrete observation on entry: foreach read checks differ
+  from destination array store checks, and toArray copies can partially modify
+  the supplied array before ArrayStoreException. Raw/object-facing operations
+  must preserve underlying values until the actual typed consumer boundary.
+- Typed native Vec<T> cannot represent arbitrary Java raw-generic heap pollution
+  merely by checked reverse conversion; Collection writes and reference-array
+  runtime component checks have different semantics. Preserve nullable writes,
+  alias membership/mutations, original modcounts and Java identity. Do not widen
+  generic_interface_supports_retarget_adapter just because header identity works.
+  Need shape-aware checked operation/erasure design, not .map().collect copies,
+  blanket unsafe retagging or view-level eager casts. Keep these uncertainties
+  explicit while implementing the next coherent batch; goal remains active.
+
+USER PAUSED GOAL / handover (2026-10-26)
+- User explicitly paused goal, then questioned whether the representation design
+  minimizes Rust complexity from unified semantic facts or accumulates corpus
+  fixes. No further implementation authorized while paused. Save state and
+  answer candidly; do not restart goal or launch builds automatically.
+- Last turn made actual general erasure/capture changes, not view ABI completion:
+  JavaErasedValue now one Rc<dynAny> field (removed clone callback). Constructor
+  no longer requires payload Clone. try_downcast_clone<T:Clone+Any> returns
+  ClassCastException Result; downcast_clone uses existing uncaught Java exception
+  panic policy. java_retarget_erased_generic_value_result handles same-type
+  conversion first (idempotent erasure), then erasure/recovery, without temporary
+  Box allocation. Existing convenience helper delegates checked path. This is
+  not yet proof that Java source try/catch handles all synthetic bridge casts;
+  adapter fallibility/consumer binding still needs integration.
+- checked-erased-value-batch1.log terminal0: class_bound_fields3, new
+  erased_generic_values1, generic_producer_references2 PASS. New generated-runtime
+  test checks1000 recovery/same-type/erased-reference operations allocate0,
+  aliases/state/null preserved, wrong cast Result ClassCastException, non-Clone
+  opaque payload retention. No timing benchmark.
+- Added GenericBridgeContractProbe.java and generic_bridge_contracts.rs Java-only
+  entry-gate oracle. terminal0 java-generic-bridge-oracle.log. Proves generic
+  array synthetic bridge checks runtime array class before body (Object[] of
+  right objects still fails), Collection parameter accepts alias without checking
+  elements, later typed read throws ClassCastException, toArray throws
+  ArrayStoreException with earlier stores visible. This is a specification
+  fixture, not a passing translator test; no ignored/fake translated gate.
+- Found separate concrete source of3 RelatedObjs errors: existential carrier
+  generator emitted enum but no From implementations. Added canonical payload
+  From and bare-constructor From when source storage plan proves exactly the
+  required shared wrapper. Identity/PartialEq/Eq emitted only when all variants
+  are proven canonical shared references; delegate to contained Java identity.
+  Hierarchy-shaped payloads do not get an invented bare wrapper conversion.
+- New ExistentialReferenceCarrierProbe.java tests mutable shared implementations,
+  wildcard selection, alias identity and generic capture dispatch. Initial gate
+  found missing carrier PartialEq for Java !=; added allocation-identity equality
+  under shared-variant proof. capture-and-checked-value-batch2.log terminal0:
+  erased_generic_values1, existential_reference_carriers1, generic producers2
+  PASS, including Java oracle and generated Rust behavior. No full count yet.
+- Added production assembly test to existential_reference_carriers.rs, then
+  accidentally launched selected capture/old finite-carrier gate as pause
+  arrived. Acknowledged; stopped session23460 with Ctrl-C, terminal exit130.
+  Log captured-reference-assembly.log is incomplete, NOT a pass. Selected command
+  if user resumes: cargo test --test existential_reference_carriers --test
+  idiom_gaps -- --exact wildcard_carrier_conversions_survive_production_assembly
+  wildcard_carrier_conversions_retain_concrete_types_and_shared_identity
+  finite_source_interface_existential_dispatches_through_closed_carrier.
+  cargo fmt --check session15896 terminal0. No active own jobs remain.
+- Last complete full Jahmm snapshot V25=14 (db633959... release unchanged).
+  Three carrier From failures likely addressed by new general emission, but
+  do not claim11 until authoritative full check. Ten Opdf erased conversions and
+  HmmBuilder invariant cast remain unresolved. No adapter admission relaxation.
+- Architecture audit before resuming: storage_strategy is deliberately per type,
+  so one sharing use can promote all values of a class. Native slot allocation
+  facts are finer, but lowering has many early shortcuts and physical-shape
+  recovery helpers. Source nullability encoded as nominal Optional can be
+  confused with actual JDK Optional. These are reasons to inspect fact domains,
+  representation selection and lowering obligations before adding more views.
+  Revisit existential/capture preservation versus widening to full invariant
+  erased trait instantiations; existing finite capture call path already retains
+  concrete types for RelatedObjs. Public unsealed Opdf and generic implementors
+  prevent simply copying the finite-carrier strategy globally without proof.
+- Goal stays PAUSED. Preserve Statistics handover, dirty files, pinned Java and
+  frozen artifacts. No staging/commit/new full translation/benchmark this turn.

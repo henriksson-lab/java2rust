@@ -15031,6 +15031,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 name: "forEach".to_string(),
                 args: vec![Expr::Lambda {
                     params: vec![LambdaParam {
+                        binding: None,
                         name: "name".to_string(),
                         source_name: "name".to_string(),
                         ty: None,
@@ -15064,11 +15065,13 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 args: vec![Expr::Lambda {
                     params: vec![
                         LambdaParam {
+                            binding: None,
                             name: "name".to_string(),
                             source_name: "name".to_string(),
                             ty: None,
                         },
                         LambdaParam {
+                            binding: None,
                             name: "item".to_string(),
                             source_name: "item".to_string(),
                             ty: None,

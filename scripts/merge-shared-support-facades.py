@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import cache
 from pathlib import Path
 
-from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_target_name, top_level_macro_items
+from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_target_name, is_dyn_trait_target, rust_delimiter_scan, top_level_macro_items
 
 
 # Private helper types can be representation dependencies of a public support
@@ -46,10 +46,9 @@ FUNCTION_REFERENCE_RE = re.compile(
 )
 IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 # A `const fn` is a method, not an associated constant.  Keeping `fn` out of
-# this match matters because constants are copied as a single line while
-# methods are copied through their brace-balanced body.
+# this match matters because constants and methods have different terminators.
 CONST_RE = re.compile(
-    r"^\s*pub\s+const\s+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 STATIC_METHOD_CALL_RE_TEMPLATE = r"\b{}\s*::\s*{}\s*(?:<|\()"
 INSTANCE_METHOD_CALL_RE_TEMPLATE = r"\.\s*{}\s*(?:<|\()"
@@ -865,6 +864,17 @@ def parse_top_level_values_from_text(text: str) -> list[dict]:
             continue
         depth += brace_delta(line)
         index += 1
+    # std::thread_local! declares values as one atomic Rust item. Preserve
+    # that item when its cells are dependencies of a promoted source body.
+    for macro in top_level_macro_items(text):
+        if macro["name"] not in {"std::thread_local", "thread_local"}:
+            continue
+        raw = macro["text"]
+        opening, closing = raw.find("{"), raw.rfind("}")
+        if opening < 0 or closing <= opening:
+            continue
+        for value in parse_top_level_values_from_text(raw[opening + 1:closing]):
+            items.append({**macro, "kind": "value", "name": value["name"], "prelude": True})
     return items
 
 
@@ -1283,12 +1293,21 @@ def merge_trait_declarations(name: str, declarations: list[str]) -> str:
 
 @cache
 def extract_consts(impl_text: str) -> tuple[tuple[str, str], ...]:
-    lines = impl_text.splitlines(keepends=True)
+    body = impl_text.split("{", 1)[1].rsplit("}", 1)[0]
+    lines = body.splitlines(keepends=True)
     consts = []
-    for line in lines[1 : max(1, len(lines) - 1)]:
-        match = CONST_RE.match(line)
-        if match:
-            consts.append((match.group(1), line.strip()))
+    depths = (0, 0, 0)
+    pending = None
+    for index, line in enumerate(lines):
+        if depths == (0, 0, 0) and pending is None:
+            match = CONST_RE.match(line)
+            if match:
+                pending = (match.group(1), attached_outer_item_start(lines, index))
+        depths, ends = rust_delimiter_scan(line, depths)
+        if pending is not None and ends:
+            name, start = pending
+            consts.append((name, ("".join(lines[start:index]) + line[:ends[0] + 1]).strip()))
+            pending = None
     return tuple(consts)
 
 
@@ -1296,7 +1315,7 @@ def normalize_const_for_impl_target(
     impl_target: str, const_text: str, alias_targets: dict[str, str]
 ) -> str:
     match = re.match(
-        r"^(pub\s+const\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*)"
+        r"^((?:pub(?:\([^)]*\))?\s+)?const\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*)"
         r"([A-Za-z_][A-Za-z0-9_]*)"
         r"(\s*=\s*)"
         r"([A-Za-z_][A-Za-z0-9_]*)"
@@ -2814,7 +2833,7 @@ def main() -> int:
         for impl_header, consts_for_type in sorted(consts_by_header.items()):
             shared_chunks.append(f"\n{impl_header} {{\n")
             for const in consts_for_type:
-                shared_chunks.append(f"    {const}\n")
+                shared_chunks.append("    " + const.replace("\n", "\n    ").rstrip() + "\n")
             shared_chunks.append("}\n")
         for impl_header, methods_for_impl in sorted(methods_by_header.items()):
             shared_chunks.append(f"\n{impl_header} {{\n")
@@ -2833,9 +2852,10 @@ def main() -> int:
             belongs_to_adapter_dependency = name in boxed_conversion_dependencies.get(
                 (type_name, trait_raw), ()
             )
-            if selected_decl_is_trait and belongs_to_type:
-                # Eq/Hash/Display impls synthesized for an opaque struct are
-                # invalid once the authoritative declaration is a trait.
+            if selected_decl_is_trait and belongs_to_type and not is_dyn_trait_target(type_name):
+                # Bare targets synthesized for an opaque struct are invalid
+                # once the declaration is a trait. Explicit dyn targets are
+                # valid source interface capability implementations.
                 continue
             if not (
                 belongs_to_type
@@ -3010,6 +3030,7 @@ def main() -> int:
                 lines[item["start"]:item["end"]] = [merged_existing_functions[item["name"]]]
         shared_support_path.write_text("".join(lines))
 
+    emitted_value_texts = {item["text"].strip() for item in parse_top_level_values_from_text(existing_shared_text)}
     for value_name in sorted(selected_values):
         if value_name in existing_shared_value_names:
             continue
@@ -3027,9 +3048,11 @@ def main() -> int:
             conflict_lines.append(
                 f"{value_name}\tvalue\tkept first of {len(variants)} variants\n"
             )
-        shared_chunks.append(
-            "\n" + crate_visible_top_level_value(variants[0]).rstrip() + "\n"
-        )
+        emitted = crate_visible_top_level_value(variants[0]).strip()
+        if emitted not in emitted_value_texts:
+            shared_chunks.append("\n" + emitted + "\n")
+            emitted_value_texts.add(emitted)
+
 
     # Macro-generated impls are coherence-bearing support just like explicit
     # impl blocks. If a repeated prelude macro defines implementations for a

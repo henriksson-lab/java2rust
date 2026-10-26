@@ -417,9 +417,13 @@ fn expr_has_integer_div_rem_expr(expr: &Expr) -> bool {
                 || expr_has_integer_div_rem_expr(left)
                 || expr_has_integer_div_rem_expr(right)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::FieldAccess(expr, _) => {
-            expr_has_integer_div_rem_expr(expr)
-        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::FieldAccess(expr, _)
+        | Expr::MethodReference {
+            receiver: Some(expr),
+            ..
+        } => expr_has_integer_div_rem_expr(expr),
         Expr::ArrayAccess(array, index) => {
             expr_has_integer_div_rem_expr(array) || expr_has_integer_div_rem_expr(index)
         }
@@ -518,9 +522,13 @@ fn expr_has_throwing_integer_div_rem_expr(expr: &Expr, env: &TypeEnv) -> bool {
                 || expr_has_throwing_integer_div_rem_expr(left, env)
                 || expr_has_throwing_integer_div_rem_expr(right, env)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::FieldAccess(expr, _) => {
-            expr_has_throwing_integer_div_rem_expr(expr, env)
-        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::FieldAccess(expr, _)
+        | Expr::MethodReference {
+            receiver: Some(expr),
+            ..
+        } => expr_has_throwing_integer_div_rem_expr(expr, env),
         Expr::ArrayAccess(array, index) => {
             expr_has_throwing_integer_div_rem_expr(array, env)
                 || expr_has_throwing_integer_div_rem_expr(index, env)
@@ -815,7 +823,19 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
                 .push(FallibilityReason::CheckedNativeArithmeticThrow);
         }
     }
-    for key in nullable_receiver_throw_callables(program, signatures, facts) {
+    let nullable_array_lengths = shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
+        |expr| matches!(expr, Expr::FieldAccess(_, field) if field == "length"),
+        None,
+        block_has_unhandled_nullable_array_length,
+    );
+    for key in nullable_receiver_throw_callables(program, signatures, facts)
+        .into_iter()
+        .chain(nullable_array_lengths)
+    {
         let entry = callables.entry(key).or_default();
         if !entry.returns_result {
             entry.returns_result = true;
@@ -932,7 +952,7 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
                     if args.len() == 1 && crate::effective_facts::EffectiveFacts::new(facts)
                         .native_collection_requires_runtime_policy(ty))
                     || matches!(expr, Expr::Call { receiver: Some(_), name, .. }
-                    if matches!(name.as_str(), "get" | "getFirst" | "get_first" | "getLast" | "get_last" | "element" | "toString" | "to_string" | "valueOf" | "value_of" | "format" | "print" | "println")
+                    if matches!(name.as_str(), "get" | "getFirst" | "get_first" | "getLast" | "get_last" | "element" | "toArray" | "to_array" | "toString" | "to_string" | "valueOf" | "value_of" | "format" | "print" | "println")
                         || crate::stdlib::native_collection_method_name_mutates_receiver(name))
             },
             None,
@@ -977,9 +997,14 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         signatures,
         representations,
         |expr| {
-            matches!(expr, Expr::Call { receiver: Some(_), name, args, .. }
-            if (args.is_empty() && matches!(name.as_str(), "toString" | "to_string"))
-                || (args.len() == 1 && name == "equals") || name == "format")
+            matches!(
+                expr,
+                Expr::Call { .. }
+                    | Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+            )
         },
         None,
         block_has_unhandled_virtual_object_dispatch,
@@ -1804,6 +1829,10 @@ fn expr_has_checked_native_arithmetic_call(expr: &Expr) -> bool {
                 })
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -2247,6 +2276,21 @@ fn block_has_unhandled_virtual_object_dispatch(
             if crate::java_append_plan::plan_object_append(expr, env.type_env(), facts).is_some() {
                 found = true;
             }
+            found |=
+                crate::conversion_plan::implicit_java_display_operands(expr, env.type_env(), facts)
+                    .into_iter()
+                    .any(|operand| {
+                        let shape =
+                            crate::expr_shape::infer_expr_shape_with_context(operand, env, ctx);
+                        // Implicit display is an open Object call too. A source
+                        // interface need not declare toString for an implementation
+                        // override to mutate, reenter or throw from concatenation.
+                        matches!(
+                            shape.dispatch,
+                            crate::slot_shape::DispatchShape::DynTrait { .. }
+                                | crate::slot_shape::DispatchShape::BoxedDynTrait { .. }
+                        )
+                    });
             let Expr::Call {
                 receiver: Some(receiver),
                 name,
@@ -2460,6 +2504,42 @@ fn block_has_unhandled_semantic_set_effect(
     )
 }
 
+/// Length dereferences include fields and computed array references, not only
+/// nullable formals/locals. Reuse solved storage and lexical shape learning so
+/// a null field throws through the callable's Result ABI rather than panicking.
+fn block_has_unhandled_nullable_array_length(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            if let Expr::FieldAccess(receiver, field) = expr
+                && field == "length"
+            {
+                let shape = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
+                found |= matches!(shape.optional_element_type(), Some(JavaType::Array(_)));
+            }
+        });
+        found
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &catches_null_pointer_exception,
+            learn: Some(&learn),
+        },
+    )
+}
+
 fn block_has_unhandled_native_array_copy_effect(
     body: &Block,
     env: &crate::expr_shape::ShapeEnv,
@@ -2645,6 +2725,8 @@ fn block_has_unhandled_retained_native_effect(
                     method.is_queue_endpoint() && !method.queue_endpoint_can_be_empty()
                 } else if thrown == "NullPointerException" {
                     matches!(method, NativeCollectionMethod::QueueInsert { .. })
+                        || (matches!(method, NativeCollectionMethod::ToArray { .. })
+                            && shape.optional_element_type().is_some())
                 } else {
                     matches!(
                         method,
@@ -2740,9 +2822,45 @@ fn block_has_unhandled_shaped_call_null_check(
                             return;
                         }
                     }
+                    if receiver.as_deref().is_some_and(|receiver| {
+                        crate::expr_shape::source_enum_comparison_operand_type(
+                            receiver,
+                            name,
+                            args,
+                            resolved.as_ref(),
+                            env,
+                            ctx,
+                        )
+                        .is_some()
+                    }) && args.iter().any(|arg| {
+                        nullable(arg, env)
+                            || matches!(arg, Expr::Literal(crate::java_ir::Literal::Null))
+                    }) {
+                        found = true;
+                        return;
+                    }
                     // No nullable value means no argument null check. Avoid
                     // constructing a complete argument plan for those calls.
                     if !args.iter().any(|arg| nullable(arg, env)) {
+                        return;
+                    }
+                    let target = crate::call_plan::plan_call_target_with_external_index_and_arity(
+                        receiver.as_deref(),
+                        name,
+                        args.len(),
+                        resolved.as_ref(),
+                        facts,
+                        external_index,
+                        env.type_env(),
+                    );
+                    if let crate::call_plan::CallTargetPlan::NativeCollectionStatic { method } =
+                        target
+                        && args.iter().enumerate().any(|(index, arg)| {
+                            method.requires_nonnull_argument(index, args, env.type_env())
+                                && nullable(arg, env)
+                        })
+                    {
+                        found = true;
                         return;
                     }
                     let plan = crate::call_plan::plan_call_arguments_with_facts_and_args(
@@ -3060,17 +3178,18 @@ fn block_has_unhandled_nullable_callback_receiver(
             if found {
                 return;
             }
-            if let Expr::MethodReference { target, .. } = expr {
-                if let Some(bound) =
-                    crate::method_reference_plan::bound_method_reference_receiver(target, env)
-                {
-                    found = crate::expr_shape::infer_expr_shape_with_context(
-                        &bound.source_expr(),
-                        env,
-                        ctx,
-                    )
-                    .optional_element_type()
-                    .is_some();
+            if let Expr::MethodReference {
+                target, receiver, ..
+            } = expr
+            {
+                if let Some(bound) = crate::method_reference_plan::bound_method_reference_source(
+                    target,
+                    receiver.as_deref(),
+                    env,
+                ) {
+                    found = crate::expr_shape::infer_expr_shape_with_context(&bound, env, ctx)
+                        .optional_element_type()
+                        .is_some();
                 }
             }
             let Some(stream) =
@@ -3093,7 +3212,7 @@ fn block_has_unhandled_nullable_callback_receiver(
                     crate::stream::StreamLambdaBody::Block(block) => {
                         block_has_unhandled_nullable_receiver_deref(block, &names)
                     }
-                    crate::stream::StreamLambdaBody::MethodReference { target, method } => {
+                    crate::stream::StreamLambdaBody::MethodReference { target, method, .. } => {
                         crate::method_reference_shape::single_input_reference_has_nullable_receiver(
                             target, method, input, env, signatures, facts,
                         )
@@ -3278,6 +3397,10 @@ fn expr_has_unhandled_direct_throw(expr: &Expr, facts: &FactSet, handled: &[Java
                 })
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -3554,7 +3677,11 @@ fn switch_label_has_nullable_receiver_deref(
 
 fn expr_has_nullable_receiver_deref(expr: &Expr, names: &HashSet<String>) -> bool {
     match expr {
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             expr_is_nullable_param_ref(receiver, names)
                 || expr_has_nullable_receiver_deref(receiver, names)
         }
@@ -4811,6 +4938,53 @@ class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input,
     }
 
     #[test]
+    fn native_supplier_references_link_invocation_effects_without_executing_at_creation() {
+        let parsed = parse_java_source(
+            r#"
+            import java.util.function.DoubleSupplier;
+            interface Value extends DoubleSupplier {}
+            class Factory {
+                static Value forward(DoubleSupplier supplier) {
+                    return supplier::getAsDouble;
+                }
+                static int creation() {
+                    forward(() -> { throw new IllegalArgumentException(); });
+                    return 3;
+                }
+                static double invoke() { return forward(() -> 4.5).getAsDouble(); }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility_with_signatures(
+            &resolved.program,
+            &graph,
+            &resolved.facts,
+            None,
+        );
+        for owner in &resolved.program.types {
+            for member in &owner.members {
+                let Member::Method(method) = member else {
+                    continue;
+                };
+                assert_eq!(
+                    plan.returns_result(&CallableKey::source_method_for_type(owner, method)),
+                    owner.name == "Value" || method.name == "invoke",
+                    "{}.{}",
+                    owner.name,
+                    method.name,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_sam_bodies_share_effects_without_executing_at_creation() {
         let parsed = parse_java_source(
             r#"
@@ -4995,6 +5169,84 @@ class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input,
                 .filter(|(key, _, _)| key.is_lambda())
                 .count(),
             4
+        );
+    }
+
+    #[test]
+    fn field_source_sams_share_checked_invocation_but_not_constructor_execution() {
+        let parsed = parse_java_source(
+            r#"
+            interface Action { int apply(int value); }
+            class Factory {
+                Action reference = Factory::checked;
+                Action throwing = value -> { throw new IllegalArgumentException(); };
+                Action clean = value -> value + 1;
+                Factory() { Action local = value -> 0; }
+                static int checked(int value) {
+                    if (value < 0) throw new IllegalArgumentException();
+                    return value;
+                }
+                int invoke() { return reference.apply(-1); }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(!resolved.diagnostics.has_errors());
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let graph = crate::usage::build_call_graph_with_source_callbacks(
+            &resolved.program,
+            &resolved.facts,
+            signatures.source_callback_plan(),
+        );
+        let plan = plan_program_fallibility_with_signatures(
+            &resolved.program,
+            &graph,
+            &semantic.facts,
+            Some(&signatures),
+        );
+        for owner in &resolved.program.types {
+            for member in &owner.members {
+                match member {
+                    Member::Method(method) => assert!(
+                        plan.returns_result(&CallableKey::source_method_for_type(owner, method)),
+                        "checked invocation contract: {}::{}",
+                        owner.name,
+                        method.name
+                    ),
+                    Member::Constructor(constructor) => assert!(
+                        !plan.returns_result(&CallableKey::source_constructor_for_type(
+                            owner,
+                            constructor
+                        )),
+                        "creation must not invoke a callback"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+        let field_roots = graph
+            .synthetic_callable_bodies()
+            .filter_map(|(key, _, _)| {
+                let CallableKey::Lambda { owner, .. } = key else {
+                    return None;
+                };
+                let CallableKey::FieldInitializer { field_name, .. } = owner.as_ref() else {
+                    return None;
+                };
+                Some(field_name.as_str())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            field_roots,
+            std::collections::HashSet::from(["throwing", "clean"])
         );
     }
 

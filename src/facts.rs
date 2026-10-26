@@ -54,6 +54,9 @@ pub struct FactSet {
     pub external_crate_type_mapping_facts: Vec<ExternalCrateTypeMappingFact>,
     pub external_crate_constructor_mapping_facts: Vec<ExternalCrateConstructorMappingFact>,
     pub facade_abi_facts: Vec<FacadeAbiFact>,
+    /// Allocation qualifiers supplied by a selected native return ABI. Keep
+    /// them separate from Java nullability and from a Rust payload's spelling.
+    pub native_return_allocations: HashMap<CallableKey, NativeReturnAllocationContract>,
     pub external_rust_result_facts: Vec<ExternalRustResultFact>,
     pub external_rust_return_type_facts: Vec<ExternalRustReturnTypeFact>,
     pub external_constructor_rust_result_facts: Vec<ExternalConstructorRustResultFact>,
@@ -103,6 +106,7 @@ impl Default for FactSet {
             external_crate_type_mapping_facts: Vec::new(),
             external_crate_constructor_mapping_facts: Vec::new(),
             facade_abi_facts: Vec::new(),
+            native_return_allocations: HashMap::new(),
             external_rust_result_facts: Vec::new(),
             external_rust_return_type_facts: Vec::new(),
             external_constructor_rust_result_facts: Vec::new(),
@@ -1816,6 +1820,13 @@ pub struct FacadeAbiFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeReturnAllocationContract {
+    /// A provider override with another Rust ABI must select its own layout.
+    pub rust_path: String,
+    pub allocations: Vec<(Vec<usize>, crate::storage_strategy::StoragePlacement)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRustResultFact {
     pub receiver_type: Option<String>,
     pub method_name: String,
@@ -2536,6 +2547,8 @@ impl FactSet {
         self.external_crate_constructor_mapping_facts
             .extend(other.external_crate_constructor_mapping_facts);
         self.facade_abi_facts.extend(other.facade_abi_facts);
+        self.native_return_allocations
+            .extend(other.native_return_allocations);
         self.external_rust_result_facts
             .extend(other.external_rust_result_facts);
         self.external_rust_return_type_facts
@@ -3076,6 +3089,17 @@ impl FactSet {
             Staticness::Unknown,
             arg_count,
         ))
+    }
+
+    pub(crate) fn native_return_allocation_for(
+        &self,
+        receiver: &str,
+        method: &str,
+        arity: usize,
+    ) -> Option<&NativeReturnAllocationContract> {
+        let abi = self.facade_abi_for_external_method(receiver, method, arity)?;
+        let contract = self.native_return_allocations.get(&abi.key)?;
+        (contract.rust_path == abi.rust_path).then_some(contract)
     }
 
     pub fn facade_abi_for_call(
@@ -5615,6 +5639,42 @@ fn push_java_type_conflict(
 mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
+
+    #[test]
+    fn native_return_allocations_follow_the_selected_provider() {
+        let mut facts = crate::stdlib::rust_stdlib_signature_facts();
+        assert!(
+            facts
+                .native_return_allocation_for("java.nio.ByteBuffer", "array", 0)
+                .is_some()
+        );
+        let mut replacement = facts
+            .facade_abi_for_external_method("java.nio.ByteBuffer", "array", 0)
+            .unwrap()
+            .clone();
+        replacement.rust_path = "OtherBuffer::array".into();
+        replacement.provenance = FactProvenance::UserOverride;
+        facts.facade_abi_facts.push(replacement.clone());
+        assert!(
+            facts
+                .native_return_allocation_for("java.nio.ByteBuffer", "array", 0)
+                .is_none()
+        );
+        facts.native_return_allocations.insert(
+            replacement.key.clone(),
+            NativeReturnAllocationContract {
+                rust_path: replacement.rust_path,
+                allocations: vec![],
+            },
+        );
+        assert!(
+            facts
+                .native_return_allocation_for("java.nio.ByteBuffer", "array", 0)
+                .unwrap()
+                .allocations
+                .is_empty()
+        );
+    }
 
     #[test]
     fn constructor_pack_group_does_not_make_unrelated_types_competing_owners() {

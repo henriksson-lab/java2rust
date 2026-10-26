@@ -661,7 +661,35 @@ pub enum NativeCollectionMethod {
     MapHigherKey,
     Iterator,
     ListIterator,
-    ToArray,
+    ToArray { has_destination: bool },
+}
+
+pub(crate) fn nullable_collection_element_argument_index(
+    kind: crate::stdlib::JavaCollectionKind,
+    method_name: &str,
+    arg_count: usize,
+) -> Option<usize> {
+    use crate::stdlib::JavaCollectionKind;
+
+    match kind {
+        JavaCollectionKind::Map
+        | JavaCollectionKind::SortedMap
+        | JavaCollectionKind::InsertionOrderedMap => match (method_name, arg_count) {
+            ("put" | "putIfAbsent" | "put_if_absent", 2) => Some(1),
+            _ => None,
+        },
+        // Natural-order sorted collections generally cannot compare null. Supporting a
+        // comparator which explicitly accepts null requires preserving comparator semantics.
+        JavaCollectionKind::SortedSet => None,
+        JavaCollectionKind::List => match (method_name, arg_count) {
+            ("add", 1) | ("offer", 1) | ("put", 1) | ("push", 1) | ("insert", 1) => Some(0),
+            ("add", 2) | ("set", 2) | ("insert", 2) => Some(1),
+            _ => None,
+        },
+        JavaCollectionKind::Set | JavaCollectionKind::InsertionOrderedSet => {
+            matches!((method_name, arg_count), ("add" | "insert", 1)).then_some(0)
+        }
+    }
 }
 
 impl NativeCollectionMethod {
@@ -822,7 +850,7 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::MapHigherKey
             | NativeCollectionMethod::Iterator
             | NativeCollectionMethod::ListIterator
-            | NativeCollectionMethod::ToArray => false,
+            | NativeCollectionMethod::ToArray { .. } => false,
         }
     }
 }
@@ -865,6 +893,26 @@ pub enum NativeCollectionStaticMethod {
 }
 
 impl NativeCollectionStaticMethod {
+    /// Operand null checks implemented by native factory lowering. Keep the
+    /// exception solver and argument lowering on the same Java contract.
+    pub(crate) fn requires_nonnull_argument(
+        self,
+        index: usize,
+        args: &[Expr],
+        types: &TypeEnv,
+    ) -> bool {
+        match self {
+            Self::EnumSetOf => index < args.len(),
+            Self::EnumSetAllOf => index == 0,
+            Self::ArraysAsList if index == 0 && args.len() == 1 => {
+                let ty = infer_expr_type(&args[0], types);
+                matches!(crate::types::optional_element_type(&ty).unwrap_or(ty),
+                    JavaType::Array(element) if !matches!(element.as_ref(), JavaType::Primitive(_)))
+            }
+            _ => false,
+        }
+    }
+
     /// Selected factory operands that become owned elements of its result.
     /// Unlike a content query, this boundary cannot borrow a generic payload.
     pub(crate) fn stored_argument_children(self) -> &'static [(usize, usize)] {
@@ -1246,7 +1294,7 @@ pub fn native_collection_lowered_type(
         | NativeCollectionMethod::MapHashCode => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Int,
         ))),
-        NativeCollectionMethod::ToArray => {
+        NativeCollectionMethod::ToArray { .. } => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(JavaType::Array(Box::new(
                 element_ty.clone(),
@@ -1706,6 +1754,22 @@ pub(crate) fn external_call_lowered_type_with_external_index(
         facts,
         &return_ty,
     ) {
+        if let Some(contract) = receiver_key
+            .as_deref()
+            .and_then(|owner| facts.native_return_allocation_for(owner, name, arg_count))
+        {
+            let mut shape = crate::slot_shape::RustSlotShape::for_storage(return_ty.clone());
+            if matches!(
+                effect.return_nullability,
+                NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+            ) {
+                shape.java_ty = crate::types::optional_java_type(shape.java_ty);
+            }
+            for (path, placement) in &contract.allocations {
+                shape.require_native_allocation_at(path, *placement);
+            }
+            return Some(LoweredType::Slot(Box::new(shape)));
+        }
         return Some(facade_lowered);
     }
     let rust_return_type = facts.external_rust_return_type_for_receiver(
@@ -2038,6 +2102,14 @@ fn static_owner_result_type_candidates(
     types: &TypeEnv,
 ) -> Vec<String> {
     let mut owners = Vec::new();
+    // Field-access syntax retains the Java-qualified owner even when the
+    // target plan renders only a linked runtime alias.
+    if let Some(owner) =
+        receiver.and_then(|receiver| static_owner_expr_java_type_name(receiver, types))
+    {
+        owners.push(owner);
+    }
+
     if let Some(Expr::Var(receiver_name)) = receiver {
         if let Some(alias) = types.static_type_alias(receiver_name) {
             owners.push(alias.to_string());
@@ -2848,7 +2920,16 @@ fn receiver_source_type_name<'a>(receiver: &'a Expr, types: &'a TypeEnv) -> Opti
             }
             types.static_type_alias(name).or(Some(name.as_str()))
         }
-        Expr::FieldAccess(_, field) => java_type_name(types.field_type(field)?),
+        // Unqualified field bindings belong to the lexical `this` owner. A
+        // foreign/static receiver can share the same leaf name while having a
+        // different semantic type (including nullable enum publication slots).
+        // Its owner-aware inferred type is the caller's authority instead.
+        Expr::FieldAccess(owner, field)
+            if matches!(owner.as_ref(), Expr::This)
+                || matches!(owner.as_ref(), Expr::Var(name) if matches!(name.as_str(), "this" | "self" | "__java_self")) =>
+        {
+            java_type_name(types.field_type(field)?)
+        }
         _ => None,
     }
 }
@@ -2882,11 +2963,34 @@ pub fn plan_call_expr_with_external_index<'a>(
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> CallExprPlan<'a> {
-    if let Some(TrivialAccessorCallPlan::Getter {
+    plan_call_expr_with_accessor_policy(
         receiver,
-        field_owner,
-        field_name,
-    }) = plan_trivial_accessor_call(receiver, name, args, resolved, facts)
+        name,
+        args,
+        resolved,
+        facts,
+        external_index,
+        types,
+        true,
+    )
+}
+
+pub(crate) fn plan_call_expr_with_accessor_policy<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    args: &'a [Expr],
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    inline_accessor: bool,
+) -> CallExprPlan<'a> {
+    if inline_accessor
+        && let Some(TrivialAccessorCallPlan::Getter {
+            receiver,
+            field_owner,
+            field_name,
+        }) = plan_trivial_accessor_call(receiver, name, args, resolved, facts)
     {
         return CallExprPlan::TrivialAccessorGetter {
             receiver,
@@ -3103,7 +3207,9 @@ fn external_call_receiver_type_key_with_index(
         None => current_type.map(|type_name| Some(type_name.to_string())),
         Some(Expr::This | Expr::Super) => current_type.map(|type_name| Some(type_name.to_string())),
         Some(receiver) => imported_static_owner_for_call(receiver, types)
-            .map(crate::stdlib::canonical_external_receiver_type_key)
+            // Preserve Java identity until provider/source precedence has
+            // selected an ABI; shortening here can pick a source lookalike.
+            .map(str::to_string)
             .or_else(|| {
                 external_receiver_expr_type_key_with_index(
                     receiver,
@@ -3130,10 +3236,29 @@ fn external_receiver_expr_type_key_with_index(
     // contract. Otherwise a simple-name built-in fallback can outrank the
     // imported pack's precise return, exception and receiver ABI.
     let qualify = |key: String| types.static_type_alias(&key).unwrap_or(&key).to_string();
+    let owner_key = |ty: &JavaType| {
+        let key = crate::stdlib::external_api_method_receiver_owner_key(ty, types, method_name)?;
+        let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &ty
+            && name.contains('.')
+            && facts.model_fact_applies_to_owner(
+                name,
+                crate::facts::FactProvenance::BuiltinExternalModel,
+            )
+            && !facts.model_fact_applies_to_owner(
+                &key,
+                crate::facts::FactProvenance::BuiltinExternalModel,
+            )
+        {
+            return Some(name.clone());
+        }
+        Some(key)
+    };
     if let Expr::Call {
         receiver: inner_receiver,
         name,
         args,
+        resolved,
         ..
     } = receiver
         && let Some(lowered) = external_call_lowered_type_with_external_index(
@@ -3145,26 +3270,29 @@ fn external_receiver_expr_type_key_with_index(
             types,
             current_type,
         )
+        .or_else(|| {
+            external_call_lowered_type_from_static_owner_plan_with_external_index(
+                inner_receiver.as_deref(),
+                name,
+                args,
+                resolved.as_ref(),
+                facts,
+                external_index,
+                types,
+            )
+        })
         && let Some(java_ty) = lowered.java_ty()
-        && let Some(key) =
-            crate::stdlib::external_api_method_receiver_owner_key(java_ty, types, method_name)
+        && let Some(key) = owner_key(java_ty)
     {
         return Some(qualify(key));
     }
     let inferred = infer_expr_type(receiver, types);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
         return infer_external_field_access_type_with_index(receiver, facts, external_index, types)
-            .and_then(|external_field_ty| {
-                crate::stdlib::external_api_method_receiver_owner_key(
-                    &external_field_ty,
-                    types,
-                    method_name,
-                )
-            })
+            .and_then(|external_field_ty| owner_key(&external_field_ty))
             .map(qualify);
     }
-    crate::stdlib::external_api_method_receiver_owner_key(&inferred, types, method_name)
-        .map(qualify)
+    owner_key(&inferred).map(qualify)
 }
 
 fn infer_external_field_access_type_with_index(
@@ -3212,6 +3340,41 @@ fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> b
     }
 }
 
+/// Platform Iterable.forEach consumes one Consumer. Source lookalikes and
+/// Map's separate BiConsumer contract do not describe this value transfer.
+pub(crate) fn native_iterable_for_each<'a>(
+    expr: &'a Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<(&'a Expr, &'a Expr)> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "forEach" || args.len() != 1 {
+        return None;
+    }
+    let ty = infer_expr_type(receiver, types);
+    let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+    if let JavaType::Named { name, .. } = &ty
+        && java_type_owner_is_parsed_source(name, types, facts)
+    {
+        return None;
+    }
+    let collection =
+        crate::stdlib::java_collection_kind_for_type(&ty).is_some_and(|kind| !kind.is_map_like());
+    (collection
+        || EffectiveFacts::new(facts)
+            .native_iterable_element_type(&ty)
+            .is_some())
+    .then_some((receiver.as_ref(), &args[0]))
+}
+
 pub fn plan_call_statement<'a>(
     expr: &'a Expr,
     facts: &FactSet,
@@ -3230,7 +3393,14 @@ pub fn plan_call_statement<'a>(
     if let Some(plan) = plan_iterable_for_each_statement(receiver.as_deref(), name, args) {
         return Some(plan);
     }
-    if let Some(plan) = plan_native_arrays_statement(receiver.as_deref(), name, args) {
+    if let Some(plan) = plan_native_arrays_statement(
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        types,
+        facts,
+    ) {
         return Some(plan);
     }
     if name == "sort"
@@ -3388,14 +3558,18 @@ fn plan_native_arrays_statement<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
     args: &'a [Expr],
+    resolved: Option<&ResolvedCall>,
+    types: &TypeEnv,
+    facts: &FactSet,
 ) -> Option<CallStatementPlan<'a>> {
-    let Some(Expr::Var(receiver_name)) = receiver else {
-        return None;
-    };
-    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) != "Arrays" {
-        return None;
-    }
+    native_utility_static_owner(receiver, resolved, types, facts, "Arrays")?;
     match (name, args) {
+        ("sort" | "parallelSort" | "parallel_sort", [target, comparator]) => {
+            Some(CallStatementPlan::NativeCollectionsSort {
+                target,
+                comparator: Some(comparator),
+            })
+        }
         ("sort" | "parallelSort" | "parallel_sort", [target]) => {
             Some(CallStatementPlan::NativeArraysSort {
                 target,
@@ -3505,7 +3679,7 @@ pub(crate) fn native_ordering_consumer<'a>(
         return None;
     };
     let operation = match name.as_str() {
-        "sort" => {
+        "sort" | "parallelSort" | "parallel_sort" => {
             return match plan_call_statement(expr, facts, types)? {
                 CallStatementPlan::NativeCollectionsSort {
                     target,
@@ -3843,7 +4017,7 @@ fn plan_call_target_with_external_index_impl<'a>(
     if name != "equals"
         && let Some(receiver) = receiver
         && let Some(target) =
-            plan_native_java_receiver_call(receiver, name, arg_count, types, facts)
+            plan_native_java_receiver_call(receiver, name, arg_count, resolved, types, facts)
     {
         return target;
     }
@@ -3868,7 +4042,7 @@ fn plan_call_target_with_external_index_impl<'a>(
 
     if let Some(receiver) = receiver
         && let Some(target) =
-            plan_native_java_receiver_call(receiver, name, arg_count, types, facts)
+            plan_native_java_receiver_call(receiver, name, arg_count, resolved, types, facts)
     {
         return target;
     }
@@ -4065,7 +4239,12 @@ fn plan_java_object_to_string_fallback<'a>(
 ) -> Option<CallTargetPlan<'a>> {
     if matches!(name, "toString" | "to_string")
         && arg_count == 0
-        && types.is_unbounded_object_type_parameter(&infer_expr_type(receiver, types))
+        && (types.is_unbounded_object_type_parameter(&infer_expr_type(receiver, types))
+            || type_parameter_uses_java_enum_protocol(
+                &infer_expr_type(receiver, types),
+                types,
+                facts,
+            ))
     {
         return Some(CallTargetPlan::NativeJavaInstance {
             receiver,
@@ -4083,6 +4262,32 @@ fn plan_java_object_to_string_fallback<'a>(
     } else {
         None
     }
+}
+
+/// Reuse native bound projection at calls whose nominal receiver is a binder.
+/// Source types that shadow platform names retain their own declarations.
+pub(crate) fn type_parameter_uses_java_enum_protocol(
+    ty: &JavaType,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> bool {
+    fn has_enum(bound: &JavaType, types: &TypeEnv, facts: &FactSet) -> bool {
+        match bound {
+            JavaType::Intersection(bounds) => {
+                bounds.iter().any(|bound| has_enum(bound, types, facts))
+            }
+            JavaType::Named { name, args } => {
+                !java_type_owner_is_parsed_source(name, types, facts)
+                    && crate::item_assembly::jdk_type_param_bound_rust_bounds(name, args)
+                        .iter()
+                        .any(|bound| bound == "JavaEnum")
+            }
+            _ => false,
+        }
+    }
+    types
+        .type_parameter_receiver_bound(ty)
+        .is_some_and(|bound| has_enum(&bound, types, facts))
 }
 
 fn plan_java_source_hash_code_fallback<'a>(
@@ -4119,6 +4324,12 @@ fn plan_resolved_java_object_to_string_fallback<'a>(
         || call.return_type != JavaType::String
     {
         return None;
+    }
+    if type_parameter_uses_java_enum_protocol(&infer_expr_type(receiver, types), types, facts) {
+        return Some(CallTargetPlan::NativeJavaInstance {
+            receiver,
+            method: NativeJavaInstanceMethod::VirtualObjectToString,
+        });
     }
     let receiver_name = receiver_declared_source_object_type(receiver, facts, types)?;
     if facts.method_effect_for(receiver_name, "toString").is_some()
@@ -4391,7 +4602,7 @@ fn plan_external_facade_receiver_call<'a>(
     {
         return None;
     }
-    if plan_native_java_receiver_call(receiver, name, arg_count, types, facts).is_some() {
+    if plan_native_java_receiver_call(receiver, name, arg_count, resolved, types, facts).is_some() {
         return None;
     }
     if let Expr::Var(receiver_name) = receiver
@@ -5057,7 +5268,9 @@ pub(crate) fn plan_native_collection_receiver_call_for_type<'a>(
         (_, "size") => NativeCollectionMethod::Len,
         (_, "isEmpty") => NativeCollectionMethod::IsEmpty,
         (_, "clear") => NativeCollectionMethod::Clear,
-        (_, "toArray" | "to_array") => NativeCollectionMethod::ToArray,
+        (_, "toArray" | "to_array") => NativeCollectionMethod::ToArray {
+            has_destination: args.is_some_and(|args| !args.is_empty()),
+        },
         (crate::stdlib::JavaCollectionKind::List, "hashCode" | "hash_code") => {
             NativeCollectionMethod::ListHashCode
         }
@@ -5366,14 +5579,24 @@ fn plan_native_java_receiver_call<'a>(
     receiver: &'a Expr,
     name: &str,
     arg_count: usize,
+    resolved: Option<&ResolvedCall>,
     types: &TypeEnv,
     facts: &FactSet,
 ) -> Option<CallTargetPlan<'a>> {
+    // Nullability can render a source reference as Optional<Source>. The
+    // selected Java declaration still owns get/isPresent/toString; this
+    // physical carrier is not evidence of a java.util.Optional invocation.
+    if resolved
+        .is_some_and(|call| java_type_owner_is_parsed_source(&call.declaring_type, types, facts))
+    {
+        return None;
+    }
     let receiver_ty = infer_expr_type(receiver, types);
     // A declared JDK Optional owns its get/isPresent/orElse operations even
     // when its payload is a parsed source class. Payload emission ownership
     // must not turn Optional<T>.get into a method call on T.
     if receiver_source_type_name(receiver, types)
+        .or_else(|| java_type_name(&receiver_ty))
         .is_some_and(|owner| !java_type_owner_is_parsed_source(owner, types, facts))
         && let Some(method) =
             native_optional_receiver_method(receiver, &receiver_ty, name, arg_count, types)
@@ -6770,6 +6993,7 @@ fn builtin_facade_constructor_uses_arity_name(type_name: &str) -> bool {
             crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
             "StringBuilder"
                 | "StringBuffer"
+                | "SplittableRandom"
                 | "StringTokenizer"
                 | "BitSet"
                 | "JarEntry"
@@ -8283,7 +8507,7 @@ pub(crate) fn native_collection_method_arg_shapes(
         {
             Vec::new()
         }
-        NativeCollectionMethod::ToArray if matches!(arg_count, 0 | 1) => Vec::new(),
+        NativeCollectionMethod::ToArray { .. } if matches!(arg_count, 0 | 1) => Vec::new(),
         NativeCollectionMethod::Iterator if arg_count == 0 => Vec::new(),
         NativeCollectionMethod::ListIterator if arg_count == 0 => Vec::new(),
         NativeCollectionMethod::ListIterator if arg_count == 1 => {
@@ -8673,7 +8897,7 @@ fn facade_abi_argument_lowering_plan(
         let java_ty = arg_java_types
             .and_then(|arg_types| arg_types.get(index).cloned())
             .or_else(|| inferred_argument_java_type(args, index, types))
-            .map(|java_ty| facade_abi_effective_argument_java_type(abi, index, java_ty))
+            .map(|java_ty| facade_abi_effective_argument_java_type(abi, index, java_ty, facts))
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
         match slot {
             FacadeSlot::Index => {
@@ -8698,7 +8922,32 @@ fn facade_abi_effective_argument_java_type(
     abi: &FacadeAbiFact,
     index: usize,
     java_ty: JavaType,
+    facts: &FactSet,
 ) -> JavaType {
+    // ABI ownership/view slots do not erase a Java parameter's declared
+    // primitive type. Reuse argument metadata for ordinary invocation widening,
+    // so a byte/short/char argument reaches an int-taking runtime as i32.
+    let declared = facts
+        .external_api_argument_effect_for_receiver_with_arity(
+            Some(abi.key.owner_type()),
+            abi.key.member_name(),
+            Some(abi.key.arity()),
+            index,
+        )
+        .and_then(|effect| effect.parameter_type.as_ref());
+    if matches!(&java_ty, JavaType::Unknown(name) if name == "null")
+        && let Some(declared) = declared
+        && !matches!(declared, JavaType::Primitive(_) | JavaType::Void)
+    {
+        // Null has no independent carrier type. Ownership/view metadata must
+        // preserve the selected Java formal instead of producing Option<Any>.
+        return declared.clone();
+    }
+    if let (JavaType::Primitive(actual), Some(JavaType::Primitive(target))) = (&java_ty, declared)
+        && crate::types::primitive_widens_to(*actual, *target)
+    {
+        return JavaType::Primitive(*target);
+    }
     if index == 0
         && abi.rust_path.rsplit("::").next().unwrap_or(&abi.rust_path) == "write_int"
         && matches!(
@@ -8712,7 +8961,7 @@ fn facade_abi_effective_argument_java_type(
     }
 }
 
-pub(crate) fn native_list_cursor_returned_child(
+pub(crate) fn native_cursor_returned_child(
     receiver_ty: &JavaType,
     name: &str,
     arg_count: usize,
@@ -8729,7 +8978,12 @@ pub(crate) fn native_list_cursor_returned_child(
     if java_type_owner_is_parsed_source(owner, types, facts) {
         return None;
     }
-    EffectiveFacts::new(facts).native_list_cursor_element_type(&ty)
+    let effective = EffectiveFacts::new(facts);
+    if name == "previous" {
+        effective.native_list_cursor_element_type(&ty)
+    } else {
+        effective.native_cursor_element_type(&ty)
+    }
 }
 
 pub(crate) fn native_list_cursor_written_child(
@@ -8970,11 +9224,13 @@ fn facade_abi_native_collection_arg_java_types(
         {
             Some(Vec::new())
         }
-        NativeCollectionMethod::ToArray if matches!(arg_count, 0 | 1) => Some(if arg_count == 0 {
-            Vec::new()
-        } else {
-            vec![receiver_ty]
-        }),
+        NativeCollectionMethod::ToArray { .. } if matches!(arg_count, 0 | 1) => {
+            Some(if arg_count == 0 {
+                Vec::new()
+            } else {
+                vec![receiver_ty]
+            })
+        }
         NativeCollectionMethod::Iterator if arg_count == 0 => Some(Vec::new()),
         NativeCollectionMethod::ListIterator if arg_count == 0 => Some(Vec::new()),
         NativeCollectionMethod::ListIterator if arg_count == 1 => {
@@ -9729,6 +9985,87 @@ pub fn plan_constructor_arguments(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn qualified_optional_dispatch_uses_the_receiver_owner_not_a_leaf_binding() {
+        use super::*;
+        let facts = FactSet::default();
+        let payload = JavaType::Named {
+            name: "Payload".into(),
+            args: vec![],
+        };
+        let optional = crate::types::optional_java_type(payload);
+        let mut types = TypeEnv::new();
+        let mut emission = crate::source_emission::SourceEmissionPlan::default();
+        emission.add_program(
+            &crate::parser::parse_java_source("class Payload {} class Holder {}").program,
+        );
+        types.set_source_emission(std::sync::Arc::new(emission));
+        types.insert_local(
+            "holder",
+            JavaType::Named {
+                name: "Holder".into(),
+                args: vec![],
+            },
+        );
+        types.insert_type_field("Holder", "choice", optional.clone());
+        types.insert_field("choice", JavaType::String);
+        let real_optional =
+            Expr::FieldAccess(Box::new(Expr::Var("holder".into())), "choice".into());
+        assert!(matches!(
+            plan_native_java_receiver_call(&real_optional, "get", 0, None, &types, &facts),
+            Some(CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::OptionalGet,
+                ..
+            })
+        ));
+        types.insert_field("FIRST", optional);
+        let foreign_constant =
+            Expr::FieldAccess(Box::new(Expr::Var("Mode".into())), "FIRST".into());
+        assert!(
+            plan_native_java_receiver_call(&foreign_constant, "get", 0, None, &types, &facts)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_cursor_reads_preserve_elements_and_restrict_reverse_traversal() {
+        use super::*;
+        let facts = FactSet::default();
+        let types = TypeEnv::default();
+        let element = crate::types::optional_java_type(JavaType::String);
+        for owner in [
+            "Iterator",
+            "java.util.Iterator",
+            "ListIterator",
+            "java.util.ListIterator",
+        ] {
+            let ty = JavaType::Named {
+                name: owner.into(),
+                args: vec![element.clone()],
+            };
+            assert_eq!(
+                native_cursor_returned_child(&ty, "next", 0, &types, &facts),
+                Some(element.clone())
+            );
+            assert_eq!(
+                native_cursor_returned_child(&ty, "next", 1, &types, &facts),
+                None
+            );
+            assert_eq!(
+                native_cursor_returned_child(&ty, "previous", 0, &types, &facts),
+                owner.ends_with("ListIterator").then(|| element.clone())
+            );
+        }
+        let source = JavaType::Named {
+            name: "example.Iterator".into(),
+            args: vec![element],
+        };
+        assert_eq!(
+            native_cursor_returned_child(&source, "next", 0, &types, &facts),
+            None
+        );
+    }
+
+    #[test]
     fn selected_argument_targets_precede_formal_varargs_arrays() {
         use crate::java_ir::*;
         let row = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)));
@@ -10165,6 +10502,89 @@ mod tests {
         assert_eq!(shapes[0].java_ty, JavaType::String);
         assert_eq!(shapes[0].ownership, OwnershipShape::Owned);
         assert_eq!(shapes[0].view, ViewShape::Native);
+    }
+
+    #[test]
+    fn facade_null_argument_uses_the_declared_reference_carrier() {
+        let facts = crate::stdlib::rust_stdlib_signature_facts();
+        let types = TypeEnv::new();
+        let args = vec![Expr::Literal(Literal::Null)];
+        let plan = facade_abi_argument_plan_for_rust_path(
+            "DoubleConsumer::and_then_result",
+            1,
+            Some(&args),
+            &types,
+            &facts,
+        )
+        .expect("composition has a selected ABI");
+        let ArgumentLoweringPlan::Shaped(shapes) = plan else {
+            panic!("shaped callback argument");
+        };
+        let ty =
+            crate::types::optional_element_type(&shapes[0].java_ty).expect("nullable callback");
+        assert!(
+            matches!(ty, JavaType::Named { name, args } if name.ends_with("DoubleConsumer") && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn facade_primitive_argument_widening_uses_declared_metadata_without_narrowing() {
+        let mut facts = FactSet::default();
+        facts
+            .external_api_argument_effect_facts
+            .push(ExternalApiArgumentEffectFact {
+                null_message_function: None,
+                method_name: "take".into(),
+                receiver_type: Some("NumericFacade".into()),
+                arg_count: Some(1),
+                parameter_index: 0,
+                parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                provenance: FactProvenance::UserOverride,
+            });
+        let abi = FacadeAbiFact {
+            key: CallableKey::method("NumericFacade", "take", Staticness::Unknown, 1),
+            rust_path: "runtime::NumericFacade::take".into(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: vec![FacadeSlot::Owned],
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        };
+        for actual in [
+            PrimitiveType::Byte,
+            PrimitiveType::Short,
+            PrimitiveType::Char,
+        ] {
+            assert_eq!(
+                facade_abi_effective_argument_java_type(
+                    &abi,
+                    0,
+                    JavaType::Primitive(actual),
+                    &facts
+                ),
+                JavaType::Primitive(PrimitiveType::Int)
+            );
+        }
+        for actual in [
+            PrimitiveType::Long,
+            PrimitiveType::Boolean,
+            PrimitiveType::Double,
+        ] {
+            assert_eq!(
+                facade_abi_effective_argument_java_type(
+                    &abi,
+                    0,
+                    JavaType::Primitive(actual),
+                    &facts
+                ),
+                JavaType::Primitive(actual)
+            );
+        }
     }
 
     fn resolved_instance_call(owner: &str, rust_name: &str) -> ResolvedCall {

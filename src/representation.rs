@@ -38,6 +38,14 @@ pub(crate) fn take_simple_name_catalog_scan_count() -> usize {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationPlan {
+    /// Admitted canonical source-reference interfaces; bool selects Arc vs Rc.
+    shared_source_interfaces: HashMap<String, bool>,
+    pub(crate) hierarchy_products:
+        Option<std::sync::Arc<crate::hierarchy_products::HierarchyProductPlan>>,
+    /// Solved signature qualifiers, projected into this rendering context.
+    /// This is a read-only view of the signature plan, not another solver.
+    pub(crate) source_generic_allocations:
+        crate::source_generic_allocations::SourceGenericAllocationPlan,
     /// Proven stateless abstract declarations whose instance bodies are
     /// materialized on concrete descendants, without any base-value demand.
     declaration_only_abstract_owners: HashSet<String>,
@@ -339,6 +347,7 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
         crate::abstract_declaration::declaration_only_abstract_owners(program, &facts.captures);
     plan.construction_only_abstract_owners =
         crate::abstract_declaration::construction_only_abstract_owners(program, &facts.captures);
+    plan.shared_source_interfaces = crate::source_interface_refs::plan(program, facts, &plan);
     plan
 }
 
@@ -961,6 +970,10 @@ fn expr_has_escaping_inline_native_map_entry(expr: &Expr) -> bool {
                 })
         }
         Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
         | Expr::Unary { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::InstanceOf { expr: inner, .. } => nested(inner),
@@ -1235,6 +1248,10 @@ fn expr_mutates_map_entry_local(expr: &Expr, local: &str) -> bool {
                     .any(|expr| expr_mutates_map_entry_local(expr, local))
         }
         Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
         | Expr::Unary { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::InstanceOf { expr: inner, .. } => expr_mutates_map_entry_local(inner, local),
@@ -1340,6 +1357,10 @@ fn expr_passes_map_entry_local_as_argument(expr: &Expr, local: &str) -> bool {
                 || args.iter().any(nested)
         }
         Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
         | Expr::Unary { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::InstanceOf { expr: inner, .. } => nested(inner),
@@ -1623,6 +1644,10 @@ fn expr_nullable_map_field_put_slots(
             }
         }
         Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
         | Expr::Unary { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::InstanceOf { expr: inner, .. } => {
@@ -1764,6 +1789,10 @@ fn expr_uses_native_map_entry_next_on_field(
                 })
         }
         Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
         | Expr::Unary { expr: inner, .. }
         | Expr::Cast { expr: inner, .. }
         | Expr::InstanceOf { expr: inner, .. } => nested(inner),
@@ -2031,6 +2060,24 @@ fn external_final_facade_should_keep_concrete_dispatch(
 }
 
 impl RepresentationPlan {
+    pub(crate) fn install_hierarchy_products(
+        &mut self,
+        program: &Program,
+        signatures: &crate::signature::SignaturePlan,
+    ) {
+        self.hierarchy_products = Some(std::sync::Arc::new(
+            crate::hierarchy_products::HierarchyProductPlan::from_signatures(
+                program, self, signatures,
+            ),
+        ));
+    }
+    pub(crate) fn hierarchy_product_root(
+        &self,
+        name: &str,
+    ) -> Option<&crate::hierarchy_products::HierarchyProductRoot> {
+        self.hierarchy_products.as_ref()?.roots.get(name)
+    }
+
     pub(crate) fn abstract_owner_is_construction_only(&self, owner: &str) -> bool {
         self.construction_only_abstract_owners.contains(owner)
             || self.type_representation(owner).is_some_and(|entry| {
@@ -2421,8 +2468,35 @@ impl RepresentationPlan {
             .unwrap_or(&[])
     }
 
+    pub(crate) fn source_interface_reference_sync(&self, name: &str) -> Option<bool> {
+        self.shared_source_interfaces
+            .get(name)
+            .copied()
+            .or_else(|| {
+                let mut found = self
+                    .shared_source_interfaces
+                    .iter()
+                    .filter(|(candidate, _)| {
+                        crate::facts::external_type_name_matches(candidate, name)
+                            || crate::java_naming::rust_name_for_java_named_type(candidate) == name
+                    });
+                let (_, sync) = found.next()?;
+                found.next().is_none().then_some(*sync)
+            })
+    }
+
     pub fn dispatch_for(&self, java_ty: &JavaType) -> DispatchShape {
-        representation_dispatch_policy(self.representation_for(java_ty)).into_dispatch()
+        let dispatch =
+            representation_dispatch_policy(self.representation_for(java_ty)).into_dispatch();
+        if let DispatchShape::DynTrait { trait_name } = &dispatch
+            && let Some(sync) = self.source_interface_reference_sync(trait_name)
+        {
+            return DispatchShape::ReferenceDynTrait {
+                trait_name: trait_name.clone(),
+                sync,
+            };
+        }
+        dispatch
     }
 
     pub fn anonymous_class_base_requires_virtual_carrier(&self, type_name: &str) -> bool {
@@ -3126,7 +3200,11 @@ fn collect_anonymous_class_diagnostics_for_expr(
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     match expr {
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_anonymous_class_diagnostics_for_expr(
                 receiver,
                 anonymous_context,
@@ -5246,11 +5324,15 @@ fn stateful_anonymous_return_expr_has_super(expr: &Expr) -> bool {
         Expr::This
         | Expr::Literal(_)
         | Expr::Var(_)
-        | Expr::MethodReference { .. }
+        | Expr::MethodReference { receiver: None, .. }
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => false,
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
@@ -5619,7 +5701,11 @@ fn collect_anonymous_erased_boundary_type_names_for_expr(
                 }
             }
         }
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_anonymous_erased_boundary_type_names_for_expr(receiver, facts, type_names);
         }
         Expr::ArrayAccess(array, index) => {

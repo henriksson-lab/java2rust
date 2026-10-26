@@ -270,9 +270,11 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
             RustExpr::Grouped(Box::new(RustExpr::Raw(rust_value.clone())))
         }
         MemberAccessOp::RustField { rust_name } => field_projection(receiver, rust_name),
-        MemberAccessOp::RustGetter { rust_name } => {
-            crate::coercion::receiver_method_call_projection_exact(receiver, rust_name, Vec::new())
-        }
+        MemberAccessOp::RustGetter { rust_name } => RustExpr::shaped_as(
+            crate::rust_ir::RustExprShape::PlainValue,
+            Some(plan.shape().clone()),
+            crate::coercion::receiver_method_call_projection_exact(receiver, rust_name, Vec::new()),
+        ),
     }
 }
 

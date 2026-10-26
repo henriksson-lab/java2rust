@@ -1,0 +1,187 @@
+COMMONS STATISTICS GOAL HANDOVER — PAUSED DURING V473
+
+Status
+User paused the goal to do other work. Goal API confirms status=paused.
+Do not resume automatically or recreate/shrink the goal. No module is accepted.
+No build/test/translation process remains running from this turn. The last
+formatter (session47739) completed with exit0. No commits or staging performed.
+Latest source changes are UNVERIFIED: only formatting has completed on paused R5.
+
+Repo: /data/henriksson/github/claude/new_java2rust
+Preserve the large preexisting dirty/staged tree. Do not restore whole files from
+git or rerun scratch editing scripts over subsequent user work.
+
+Full objective and established scope
+All Commons Statistics1.3 production modules and their complete dependency
+closures: Ranking5files; Descriptive80; Distribution172; Interval178; Inference273.
+Union279 =135 Statistics +71 Numbers +73 RNG. No GUI/examples/benchmarks/docs/BOM
+or test-framework sources counted as production. No module accepted, even Ranking.
+Pins: Statistics2937eb2e711483d8ea9dc216af45c16fd0066b77;
+Numbers ae8abefb51c2c4d1a05882d61cefc8015e493a8f;
+RNG618490cf3f072ddc327de90109fac04f404831cb.
+See docs/commons-statistics-corpus.md, AGENTS.md and the existing goal objective.
+General translator/runtime fixes only. Pinned Java stays untouched. Generated
+code corrections are diagnostic experiments, never deliverables or acceptance.
+
+Last fully verified batch: V472
+.tmp/statistics-v472-final-batch-evidence.json
+Frozen release .tmp/new-java2rust-statistics-v472-native-class-ancestry-r2-release
+SHA256 48babe67ed69a6c4664bff7438d98df12e53e86605a98f3f1852d6d1051fc8b8
+119 source /1177 test /9 pipeline inputs, all hashes verified at that boundary.
+Preservation:1792unit+16Fraction+5lossless-text+30Numbers+62Statistics =1905pass.
+Ranking complete closure compiles,207exact independent JVM behavior rows pass.
+Complete Descriptive80sources: zero parse/translation failures,2 compiler
+observations,1invalid-pattern file. Both remaining errors are source-interface
+capability instanceof/cast in DoubleStatistics.getResult.
+Native functional Class ancestry fixed using existing SAM/parent-edge authority.
+Do not infer current worktree passes from V472; source changed during V473.
+
+Architecture audit already completed
+.tmp/statistics-v472-audit/interface-capability-protocol.md
+.tmp/statistics-v472-audit/implementation-plan.md
+Three feasibility Java callers under
+.tmp/statistics-v472-audit/capability-feasibility-primary all return0 on JVM.
+Frozen V472 baseline:25 compiler observations, no generation/parse failures.
+Named/anonymous/generic/native-facet aliasing, membership/casts/null/failed casts
+and retained bound references are included. Counts alone are not the plan.
+
+Actual generated-code rewrite experiments (DIAGNOSTIC ONLY):
+.tmp/statistics-v472-audit/current-capability-rewrite-experiment.json
+.tmp/statistics-v472-audit/capability-rewrite-experiment.py
+Scratch crates under /tmp/new-java2rust-statistics-v472-*-capability-rewrite.
+Replacing ONLY the two unsupported expressions with retained projections over
+12existing named shared implementations compiles full generated Descriptive.
+Independent Java/Rust Mean result reads2.0, then3.0 after mutation, then3.0 after
+original handle release. Existing consumer can retain an owned Box<dyn child>
+backed by the same Arc<Mutex<implementor>>; payload copying is incorrect.
+The unchanged generated Statistics.checkCombineAssignable also matches25exact
+Java null/root/second/third/fourth moment class-pair success/exception-type rows
+in the diagnostic crate. Class metadata and operation were not patched.
+Finite named registries cannot support anonymous/generic implementors: NEVER
+copy this experiment into translator runtime as the capability solution.
+
+V473 current prerequisite batch
+Main source edits this turn:
+- src/lower.rs: source_callback_adapter_generics (~85588) collects free local
+  callback ABI parameters and transitive bound dependencies, using existing
+  item_assembly bound/Clone rendering and java_type_contains_type_param.
+- functional_adapter_item_source (~77559) declares generic local items/impls,
+  manually clones callback Rc/Arc without adding T:Clone, and uses
+  PhantomData<fn()->(...)> for bound-only parameters. Explicit constructor
+  instantiation remains in the enclosing generic callable. Nongeneric path
+  keeps its existing emitted layout. Free parameters carry structural 'static
+  because Any/clone_any/owned interface objects require it.
+- Anonymous interface implementation parameters now use implementation-local
+  source names via java_naming::source_binding_rust_names and shared body
+  seeding through expr_shape::insert_param_shapes (now pub(crate),~3007).
+  Solved parameter TYPES still come from the selected trait contract.
+- specialize_source_generic_wildcard_argument_shape (~48027) examines nominal
+  types through optional wrappers, retaining target nullability/ownership.
+  This prevents fresh callee __JavaWildcard binders leaking into callers.
+- src/stdlib.rs:add_declared_external_types_from_type (~23896) visits inherited
+  native functional facets and reuses native_functional_owner as carrier key.
+  FQ java.util.function.DoubleConsumer must emit the validated DoubleConsumer
+  facade/protocol, not opaque JavaUtilFunctionDoubleConsumer. Existing namespace
+  recognition/source exclusions retained; unrelated exception parents skipped.
+
+New maintained oracle (uncommitted, like prior corpus fixtures):
+tests/corpus/statistics/descriptive-acceptance/InterfaceViewPrerequisitesAudit.java
+Test prefix tests/statistics_lowering_contracts.rs:
+interface_view_prerequisites_preserve_generic_callbacks_wildcards_and_native_bindings
+It covers generic retained callback state, nullable wildcard calls, FQ native
+facets, anonymous parameter names/live aliases, one-store and two-store generic
+constructors. All preexisting tests/fixtures remain unchanged.
+Exact strengthened fixture baseline from frozen V472:
+.tmp/statistics-v473-audit/prerequisites-before-r2 (terminal1,9compiler errors)
+.tmp/statistics-v473-audit/baseline-primary-r2 holds identical Java.
+Baseline errors:4E0401 free generic binders,2missing incoming_value,
+2missing __JavaWildcard0,1missing __JavaBoundDoubleConsumer.
+Original baseline-r1 preceded adding the two-store constructor check.
+
+Verification so far (NOT green)
+R1: product compilation typo param.varargs; corrected to param.is_varargs.
+R2: only missing native protocol remained; FQ facade owner corrected.
+R3: native protocol/binders/names resolved, revealing3T:'static and1constructor
+T:Clone errors previously masked by earlier errors. Adapter lifetime corrected.
+R4: last executed focused test FAILED,1remaining generated T:Clone error in
+CellValue<T>::new(value:T): unnecessary clone when storing sole value occurrence.
+Log .tmp/statistics-v473-focused-r4.log, terminal101.
+Generated failed crate:
+/tmp/new-java2rust-statistics-v467-tmp/new_java2rust_batch_interface_view_prerequisites_1792954811397168972/out
+No full preservation/release/corpus run was started during V473.
+
+Decisive remaining constructor finding and LATEST UNTESTED EDIT
+Public diagnostic trace proves constructor parameter is Owned T, field Option<T>
+is Owned, and one RHS occurrence is recorded as StoredInField+ContentRead.
+TwinValue's parameter has two store+read pairs and correctly emits T:Clone.
+Trace .tmp/statistics-v473-audit/constructor-signatures-r4.log
+Trace source /tmp/new-java2rust-statistics-v473-constructor-trace.rs.
+
+Earlier this turn an extra constructor single-store workaround/refactor was
+attempted, but did not reach the actual path. It has been ROLLED BACK, preserving
+pre-turn constructor helpers (including the existing legacy text recovery).
+An unused duplicate lowering block from that attempt is also removed.
+
+Actual path: ordered constructor replay calls lower_stmt directly through
+lower_delegated_constructor_trailing_plain_stmt, bypassing lower_block's
+current_stmt setup. Thus existing liveness was not consulted; coarse semantic
+use counts treated store+read as reuse and introduced Clone. At ~14614 the
+LATEST edit passes:
+  LowerCtx {
+    current_stmt: ctx.liveness.live_out_for(stmt).map(|_| stmt),
+    ..constructor_self_temporary_lower_ctx(ctx)
+  }
+to lower_stmt. Only analysis-covered source statements gain current_stmt;
+uncovered synthetic initializers retain conservative fallback. This reuses
+existing liveness and preserves clones for genuinely later reads.
+THIS EDIT IS NOT TESTED. cargo fmt completed0 after it; user paused immediately.
+If it still fails, inspect whether replay statement keys are covered. Generalize
+existing liveness_covering_block for replay sequences/future reads if needed,
+rather than adding T:Clone, weakening the test, or stripping rendered clones.
+
+Paused current input snapshots (119source/1178test/9pipeline):
+.tmp/statistics-v473-source-inputs-paused-r5.json
+.tmp/statistics-v473-test-inputs-paused-r5.json
+.tmp/statistics-v473-pipeline-inputs-paused-r5.json
+They record the latest source state AFTER the untested replay edit. Revalidate
+against subsequent user work before continuing. R4 manifests are stale.
+Implementation plan .tmp/statistics-v473-audit/implementation-plan.md needs its
+constructor discussion updated on resume; this handover is newer/authoritative.
+
+Next commands on EXPLICIT RESUME
+First inspect current worktree/hashes and re-read this handover. Do not overwrite
+changes from other work. Run the focused oracle against a newly frozen revision:
+
+CARGO_BUILD_JOBS=8 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/tmp/new-java2rust-statistics-v467-cargo-target TMPDIR=/tmp/new-java2rust-statistics-v467-tmp cargo test --test statistics_lowering_contracts  interface_view_prerequisites_preserve_generic_callbacks_wildcards_and_native_bindings  -- --exact --nocapture
+
+Use a fresh log name and retain/poll its process handle. No source edits while
+build/test/translation inputs are being consumed.
+If focused passes, batch verification once:
+ cargo test --lib --test fraction_lowering_contracts --test numbers_contracts  --test statistics_lowering_contracts --test lossless_string_contracts
+Expected counts if no tests added:1792/16/5/30/63 =1906pass.
+Build release once with CARGO_TARGET_DIR=.tmp/statistics-release-target,
+CARGO_BUILD_JOBS=8,CARGO_INCREMENTAL=0,CARGO_NET_OFFLINE=true,same TMPDIR:
+ cargo build --release --bin new-java2rust
+Copy uniquely named frozen producer before running corpora. At batch boundary,
+rerun capability-feasibility3source baseline and complete Descriptive/Ranking;
+use scripts/run-commons-statistics-1.3.sh and verify-commons-statistics-ranking.py.
+Do not claim exact frontier counts until measured. Complete V473 evidence/docs
+following prior .tmp/statistics-v472-finalize-r2.py, including current pins,
+original/staged source hashes and preserved preexisting test text.
+
+After prerequisites, implement the object-safe retained capability protocol
+across named/anonymous/generic producers, ancestor/Box/handle/retarget forwarders,
+and physical cast-result metadata. Separate erased nominal membership from an
+instantiated Rust view; a borrowed consumer cannot make the runtime producer a
+borrowed temporary. The audit lists scope/uncertainties and needed regressions.
+Native-facet feasibility caller is local unless an actual Sync demand exists;
+prior .tmp/statistics-v466-audit/anonymous-sync-r13 remains a stronger outstanding
+mutable anonymous Sync-state gap. Reuse named outer-handle method lowering
+rather than cloning Cell state or imposing Sync on every weaker parent.
+Previously measured bounded reflective enum construction gap remains open:
+PhantomData propagating Rc Send requirements and handler vs handler_ accessor;
+recorded V471 baseline proves it predates current work. No passing claim.
+
+Disk at pause: /data about2.1GB free; /tmp about35GB free. Release target244MB.
+No cleanup authorized/performed. Keep new heavy build targets in /tmp where
+appropriate. Do not mark goal complete/blocked; it is paused by user request.

@@ -1,3 +1,5 @@
+pub(crate) mod visit_mut;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RustFile {
     pub items: Vec<RustItem>,

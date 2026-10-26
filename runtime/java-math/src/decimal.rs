@@ -368,6 +368,11 @@ pub(super) fn format(value: &BigDecimal) -> String {
     )
 }
 
+pub(super) fn to_big_integer(value: &BigDecimal) -> Result<BigInteger, ArithmeticException> {
+    let integral = set_scale(value, 0, RoundingMode::DOWN)?;
+    BigInteger::checked(integral.coefficient.clone())
+}
+
 pub(super) fn double_value(value: &BigDecimal) -> f64 {
     format!("{}e{}", value.coefficient, -i64::from(value.scale))
         .parse()
@@ -382,6 +387,32 @@ pub(super) fn float_value(value: &BigDecimal) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn integer_conversion_reuses_decimal_truncation_and_range_checks() {
+        for (source, expected) in [
+            ("123.999", "123"),
+            ("-123.999", "-123"),
+            ("0.99", "0"),
+            ("-0.99", "0"),
+            ("1.23E+5", "123000"),
+            ("1E-324", "0"),
+            ("0E+2147483648", "0"),
+            ("9223372036854775808.1", "9223372036854775808"),
+        ] {
+            assert_eq!(
+                to_big_integer(&parse(source).unwrap()).unwrap().to_string(),
+                expected,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            to_big_integer(&parse("1E-2147483647").unwrap())
+                .unwrap_err()
+                .to_string(),
+            "BigInteger would overflow supported range"
+        );
+    }
+
     #[test]
     fn division_reuses_exact_rounding_and_preferred_scale() {
         let p = |s| parse(s).unwrap();

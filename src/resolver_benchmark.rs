@@ -1563,7 +1563,11 @@ fn collect_anonymous_constructor_target_names_for_expr(
                 }
             }
         }
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_anonymous_constructor_target_names_for_expr(receiver, target_names);
         }
         Expr::ArrayAccess(array, index) => {
@@ -7374,7 +7378,12 @@ fn collect_source_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
 
 fn collect_source_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
+        | Expr::Unary { expr: receiver, .. } => {
             collect_source_expr_type_names(receiver, names);
         }
         Expr::ArrayAccess(array, index)

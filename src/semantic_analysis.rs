@@ -937,7 +937,12 @@ fn collect_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
 
 fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
+        | Expr::Unary { expr: receiver, .. } => {
             collect_expr_type_names(receiver, names);
         }
         Expr::ArrayAccess(array, index)
@@ -1951,9 +1956,24 @@ fn collect_external_api_effects_from_expr_with_env(
         current_type,
     );
     walk_expr_outside_lambdas(expr, &mut |expr| {
-        if let Expr::MethodReference { target, method } = expr {
+        if let Expr::MethodReference {
+            target,
+            method,
+            receiver,
+        } = expr
+        {
             if !is_non_external_method_reference(target, method) {
-                let receiver = method_reference_receiver(target, method, env);
+                let receiver = receiver
+                    .as_deref()
+                    .filter(|receiver| !matches!(receiver, Expr::Var(_) | Expr::This | Expr::Super))
+                    .map(|receiver| MethodReferenceReceiver {
+                        type_key: crate::stdlib::external_api_receiver_owner_key(
+                            &infer_expr_type(receiver, env),
+                            env,
+                        ),
+                        bound_receiver: true,
+                    })
+                    .unwrap_or_else(|| method_reference_receiver(target, method, env));
                 let arg_count = usize::from(receiver.bound_receiver);
                 push_external_api_effect_guess(
                     facts,
@@ -2744,7 +2764,11 @@ fn external_api_role_can_be_fluent_from_context(
 pub(crate) fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
-        Expr::FieldAccess(receiver, _) => walk_expr_outside_lambdas(receiver, visit),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => walk_expr_outside_lambdas(receiver, visit),
         Expr::ArrayAccess(array, index) => {
             walk_expr_outside_lambdas(array, visit);
             walk_expr_outside_lambdas(index, visit);
@@ -2844,20 +2868,9 @@ struct MethodReferenceReceiver {
 }
 
 fn method_reference_receiver(target: &str, method: &str, env: &TypeEnv) -> MethodReferenceReceiver {
-    if let Some(java_ty) = env.local_type(target).or_else(|| env.field_type(target)) {
+    if let Some(binding) = env.method_reference_value_binding(target, false) {
         return MethodReferenceReceiver {
-            type_key: crate::stdlib::external_api_receiver_owner_key(java_ty, env),
-            bound_receiver: true,
-        };
-    }
-    let normalized = crate::parser::to_snake_case(target);
-    if normalized != target
-        && let Some(java_ty) = env
-            .local_type(&normalized)
-            .or_else(|| env.field_type(&normalized))
-    {
-        return MethodReferenceReceiver {
-            type_key: crate::stdlib::external_api_receiver_owner_key(java_ty, env),
+            type_key: crate::stdlib::external_api_receiver_owner_key(binding.java_type(), env),
             bound_receiver: true,
         };
     }
@@ -4112,7 +4125,11 @@ fn collect_thrown_exception_types_from_expr(
     thrown: &mut Vec<JavaType>,
 ) {
     match expr {
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_thrown_exception_types_from_expr(receiver, exception_env, facts, thrown);
         }
         Expr::ArrayAccess(array, index) => {
@@ -4793,7 +4810,11 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
             push_dispatch_requirement_fact(facts, ty, DispatchRequirementKind::NeedsInstanceof);
             collect_dispatch_requirement_facts_from_expr(expr, facts);
         }
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_dispatch_requirement_facts_from_expr(receiver, facts);
         }
         Expr::ArrayAccess(array, index) => {
@@ -6475,7 +6496,11 @@ fn collect_field_assignments_from_expr(
                 assignments,
             );
         }
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_field_assignments_from_expr(
                 receiver,
                 ty,
@@ -7526,7 +7551,11 @@ fn walk_stmts(statements: &[Stmt], visit: &mut impl FnMut(&Stmt)) {
 pub(crate) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
-        Expr::FieldAccess(receiver, _) => walk_expr(receiver, visit),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => walk_expr(receiver, visit),
         Expr::ArrayAccess(array, index) => {
             walk_expr(array, visit);
             walk_expr(index, visit);

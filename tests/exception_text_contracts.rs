@@ -2,6 +2,38 @@
 mod common;
 
 #[test]
+fn interface_append_reuses_checked_virtual_display_and_releases_owner_guards() {
+    common::verify_java_fixture_zero_contract(
+        "interface_append_text",
+        "InterfaceAppendProbe",
+        "tests/fixtures/InterfaceAppendProbe.java",
+        include_str!("fixtures/InterfaceAppendProbe.java"),
+        r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn text() { assert_eq!(InterfaceAppendProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
+fn throwable_append_uses_runtime_carrier_and_lossless_logical_text() {
+    common::verify_java_fixture_zero_contract(
+        "throwable_append_text",
+        "ThrowableAppendProbe",
+        "tests/fixtures/ThrowableAppendProbe.java",
+        include_str!("fixtures/ThrowableAppendProbe.java"),
+        r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn text() { assert_eq!(ThrowableAppendProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
 fn nullable_sam_messages_preserve_source_invocation_laziness_and_user_errors() {
     common::verify_java_fixture_zero_contract(
         "nullable_sam_null_messages",

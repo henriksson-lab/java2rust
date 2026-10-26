@@ -1,0 +1,249 @@
+Constraint-based Rust generation: architectural review
+Date: 2026-10-26
+Scope: parallel read-only source audits, followed by synthesis. No translator
+changes or new corpus runs. This document proposes work; it does not claim that
+an optimizing planner is implemented or that current output is universally sound.
+
+Recommendation
+
+Keep and consolidate the existing semantic analyses, shape model, conversion
+plans and finite-saturation machinery. Separate three questions explicitly:
+
+  What behavior must be preserved?
+  Which implementations can this translator actually emit correctly?
+  Among those implementations, which combination is cheapest?
+
+A high cost may motivate a new proof or representation implementation. It must
+never compensate for a violated semantic constraint. Start with a bounded native
+allocation/signature slice, rather than replacing the whole compiler with a
+black-box optimizer.
+
+What exists today
+
+1. Real facts and constraints, not only ad hoc emission.
+   StoragePlacement has shared/interior_mutable/sync bits and componentwise join
+   (src/storage_strategy.rs:525-568). RustSlotShape separates native allocation,
+   nested allocation paths, ownership, borrow target, view and dispatch
+   (src/slot_shape.rs:5-86). SignatureConstraint separates ApiOwnedFallback from
+   actual requirements and supports structural nested paths
+   (src/signature.rs:477-505). SlotConversionPlan is an existing typed conversion
+   vocabulary with unsupported diagnostics (src/conversion_plan.rs:4579-4610).
+   Reuse these; do not invent parallel enums for the same concepts.
+
+2. Decisions still have multiple authorities.
+   The batch pipeline computes storage, representations and signatures, then
+   copies generic allocation and hierarchy product information back to the
+   representation plan (src/lib.rs:1092-1155). Representation planning computes
+   usage/storage again (src/representation.rs:283-287). Signature construction
+   reconciles inherited fields and projects generic allocations and interface
+   references after saturation (src/signature.rs:12199-12216).
+   Some of these are deterministic projections, not intrinsically wrong repairs.
+   The architectural requirement is to declare their dependencies and validate
+   the resulting contracts, rather than assume every late projection is a bug.
+
+3. Several joins are preference orders, not proofs of feasibility.
+   Owned > CopyValue > MutableBorrow > SharedBorrow; Native and Concrete also
+   have high priority (src/lattice.rs:41-73). Rejected requirements are recorded,
+   which is useful, but selecting the winner does not itself show that both
+   requirements were satisfied. Some apparent conflicts can be discharged by a
+   legal adapter; others cannot. Model that distinction explicitly.
+
+4. Indexed dependency infrastructure exists but is not yet an executable rule
+   graph. Production signature solving deliberately runs global sweeps and
+   clones state per sweep (src/signature.rs:4676-4705). The SCC executor is test
+   only: its propagation arms scan global usage even when mutations are scoped,
+   historically multiplying work by component count. Do not simply enable it.
+   src/fact_saturation.rs already has reusable finite/worklist primitives.
+
+5. Representation granularity limits what optimization can achieve.
+   Nominal storage is currently per source type; native storage has per-slot
+   paths. A static/threaded instance can promote unrelated local instances of
+   the same nominal class. This cannot be undone by lowering Arc's weight.
+   There is also a concrete identity gap: JavaType does not identify type
+   variables separately, and nominal storage planning removes any class name
+   that coincides with a generic parameter anywhere
+   (src/storage_strategy.rs:791-805). Its comment acknowledges known incorrect
+   by-value behavior. Stable scoped type identities are required before finer
+   nominal allocation distinctions can be trusted.
+
+6. Recent whole-path solutions are worth generalizing.
+   source_interface_refs.rs:28-172 admits canonical shared-reference dispatch
+   only for supported interfaces/implementations. hierarchy_products.rs:107+
+   proves a restricted output-only fixed-product contract; representation
+   lowering emits typed converter fields and dispatch. These mechanisms already
+   exist; historical handover proposals must not be mistaken for missing work.
+   Their admission proofs are a good pattern for candidate eligibility.
+
+Proposed model
+
+Use stable declaration/binding/slot identities already available, adding scoped
+TypeParameterId/TypeId and allocation-family identity only where precision needs
+it. A slot is a use position, not the heap object itself. Keep the distinction
+between a canonical identity-bearing allocation, an owned handle to it, and a
+borrowed view/loan of it. A single mutable object can require Rc<RefCell<T>>
+storage while a nonescaping argument merely borrows its handle; those decisions
+are not alternatives on one flat ladder.
+
+A. Semantic facts
+   Examples: observable reference identity; overlapping aliases and writes;
+   escape through a field/return/capture; actual cross-thread reachability;
+   nullable; callback reentry; source/foreign ABI; generic variance and required
+   operations. Store reasons with rule identity, source site, and premise facts.
+   Unknown is not evidence of absence. Inferred API defaults are not hard facts.
+
+B. Admitted representation candidates
+   Finite domains drawn from implementations we have: value, loans of payload
+   or carrier, Rc<T>, Rc<RefCell<T>>, Arc<T>, Arc<Mutex<T>>, admitted interface
+   references, closed carriers, typed adapters, existing native collection views.
+   Their combinations must satisfy both semantic facts and emitter capability.
+   Do not make arbitrary combinations legal just because enums can describe them.
+   Alias-preserving reference copying is different from cloning a payload.
+   Monitor/reentry behavior, drop behavior and callback lifetime restrictions
+   belong in admissibility, not in a finite cost penalty.
+   Keep semantic evidence immutable during search. Candidate-dependent
+   obligations and domain pruning belong in disposable trial state: a failed
+   Arc candidate must not permanently promote the facts used by a later trial.
+
+C. Relations and explicit conversions
+   Describe assignments, parameters/results, storage, captures, overrides,
+   generic substitution, container paths and hierarchy projections. Relations
+   may demand equal ABI, compatible views, identity-preserving conversions or
+   a directional effect implication. Reuse SlotConversionPlan and extend missing
+   cases there. Union only proven equalities: assignment connectivity and SCC
+   membership do not imply that all slots must have the same representation.
+   Override adapters can intentionally have different receiver types
+   (src/signature.rs:5456+).
+
+D. Selection and objective
+   First prune infeasible candidates/relations. Then minimize an additive cost:
+
+     sum(storage/allocation-family representation costs)
+       + sum(slot passing/borrowing costs)
+       + sum(explicit conversion and operation costs)
+       + optional generated helper/code-size costs.
+
+   Charge each modeled entity consistently; do not make spelling, alias use,
+   helper extraction or repeated signature declarations determine the objective.
+   Keep Arc/mutex penalties high, but charge surrounding adapters too: eliminating
+   one lock by adding deep copies or per-call boxes need not be an improvement.
+   Keep the emitted-source cost report as an independent observation layer. Its
+   unresolved syntax and declaration counts make it unsuitable as the planner's
+   sole authoritative objective. Initially use static sites, with loop/call
+   context reported separately; workload frequencies are optional evidence.
+
+E. Frozen plan and independent checking
+   Final storage, signatures, dispatch and boundary conversions are one immutable
+   contract for lowering. Lowering can choose syntax/temporary names but cannot
+   independently rediscover layout. Freeze operation/loan scheduling obligations
+   as well as types: the chosen type alone cannot establish borrow safety.
+   Validate every producer-storage-consumer edge
+   against the selected shapes and conversion preconditions. A missing case is
+   an explicit unsupported edge, not permission for a guessed clone or wrapper.
+   A plan checker only establishes consistency with modeled constraints; parity
+   and regression tests still catch missing/wrong semantic facts.
+
+Practical solving strategy
+
+Do not assume this entire problem requires exponential search. Many effects and
+allocation requirements have a monotone least fixed point; compute that closure
+with no cost search. Separate remaining incomparable representation choices.
+
+Compile immutable transfer rules once with their complete read/write sets and
+reverse indexes. Queue rules when a read changes; use dense IDs/bitsets and
+precomputed structural path projections where this reduces repeated work. Apply
+SCC scheduling only to this real dependency graph, iterating genuine cycles.
+No speedup factor is claimed without measurements.
+
+Watch every prerequisite, including conditional reads. For example,
+propagate_assigned_call_native_allocation (src/signature.rs:7848+) uses the view
+of either endpoint to decide whether other requirements transfer. A watcher on
+only the apparent source fact misses enabling changes at the other endpoint.
+Native callback/environment projections also have directional restrictions
+(src/signature.rs:8330+). These cannot be replaced by unconditional union-find.
+
+For discrete alternatives, start from the existing admitted plan as incumbent,
+try cheaper changes to coupled groups (caller/result/field/override family),
+recompute affected constraints and edge conversions, and accept only validated
+improvements. A single-slot hill climb can miss changes that pay off only when
+several contracts change together. Bound group search; retain the validated
+incumbent on search exhaustion. Do not call an unvalidated old translation a
+correct fallback.
+
+Use exhaustive search only on small components as an optimality oracle or cheap
+production case. Graph-cut, SAT/SMT or integer formulations are optional later
+experiments for residual subproblems whose actual constraints fit the method;
+no blanket reduction or global optimality claim is justified today. New
+representation families may matter more than a more powerful optimizer.
+
+First coherent implementation batch
+
+1. Build a narrow resolved plan view and consistency checker for native
+   allocation/signature paths. Retain existing choices. Add reason chains for
+   expensive requirements. Use current IDs; do not block this on an IR-wide ID
+   rewrite. Record missing/ambiguous identity as a scope limitation.
+2. Use generic_allocation_edges (src/signature.rs:8281+) as the first indexed
+   worklist pilot: immutable source/target path mappings and argument guards are
+   already available. Reuse the exact existing transfer semantics. Keep other
+   propagation arms on global sweeps initially and iterate the combined system
+   to saturation; an isolated fast closure is not a replacement for interactions.
+3. Check complete closure equality with the sweep implementation on focused
+   constructor/forwarding/nested collection/callback/alias cases, including
+   cyclic and late-enabled constraints. Compare plans/diagnostics, not timings
+   or diagnostic counts alone. Track rule firings and touched nodes as cheap
+   complexity evidence, plus one representative wall-clock measurement.
+4. Add one candidate optimization family: transport already-admitted canonical
+   references through parameters/results, keeping object storage and dispatch
+   fixed. Compare owned handle/move, borrowed handle (BorrowTarget::Carrier),
+   and explicit canonical-reference copy. Reuse ApiOwnedFallback, existing
+   call specialization (src/call_plan.rs:7838+) and conversion capabilities.
+   A retaining callee can take &Rc/&Arc and copy the handle where retained;
+   retention does not categorically require an owned input ABI. Conversely a
+   dead actual may move more cheaply than borrow-then-copy. Use liveness and
+   escape facts and charge copies on every affected edge. Do not substitute
+   payload &T for a canonical-handle borrow when aliases can mutate/reenter.
+   Optimize the coupled path, retaining shared identity whenever required. If
+   already optimal in the selected case, report that rather than manufacture
+   a new rewrite. This optimization pilot and the scheduling pilot are separate
+   deliverables; neither requires a full global optimizer first.
+5. Migrate existing post-saturation projections into declared relations or
+   proven pure finalization steps and enforce freeze boundaries progressively.
+   Expand graph execution only after each migrated rule's read set is complete.
+
+Later, separate allocation contexts for nominal classes once scoped type identity
+and escape/flow relations are adequate. Avoid starting with blanket Rc-to-Arc
+or Mutex-to-RefCell demotion; that is exactly where incomplete thread/alias facts
+make cost-driven changes unsound.
+
+Guard effects and transformations that need new implementations
+
+MethodEffectFact currently lacks reusable alias-sensitive reentry/loan summaries
+(src/facts.rs:2022). SourceCallbackPlan already propagates inline/invoked/retained
+contracts through reverse edges (src/source_callbacks.rs:33+); build on it for
+Retains, ReturnsAlias, MayInvokeCallback, MayReenter(region) and read/write effects.
+Unknown effects must preclude holding payload loans over arbitrary calls.
+
+There are narrow existing proofs (src/lower.rs:15751) and argument staging that
+copies canonical handles before reentry (src/lower.rs:50145). These should become
+reusable effect/operation contracts, not new syntax predicates per corpus. The
+native allocation runtime explicitly requires guards to end before callbacks
+(src/stdlib.rs:9904+). JavaMonitor is separately reentrant via owner/depth
+(src/stdlib.rs:21486+); that does not make a payload std::sync::Mutex reentrant.
+Do not begin by coalescing locks over method calls without these effect proofs.
+
+Retained generic collection retargeting is explicitly rejected where a consuming
+map would detach a live shared allocation (src/representation_lowering.rs:6926+).
+An optimizer cannot select a live view until its read/write/exception/array-kind
+contracts and emitter implementation exist. Reuse the root-identity/operation
+projection protocol in src/java_native_reference.rs:64+, rather than admit a
+payload-copy conversion that happens to satisfy Rust's types.
+
+Validation and workflow
+
+Batch these changes by one complete contract family; no full corpus after each
+small edit. Use existing focused tests for alias visibility, non-Clone values,
+mutation, retained captures, generic nesting, virtual dispatch, nulls and reentry.
+Add targeted regressions only for new modeled behavior. Test schedule/order
+independence of closure and incremental edits, plus negative cases where cheap
+candidates must be rejected. Test candidate optimum against tiny enumeration.
+Then perform one suitable existing corpus run; never patch generated output as
+the deliverable. The current task is analysis only, so no such run was performed.

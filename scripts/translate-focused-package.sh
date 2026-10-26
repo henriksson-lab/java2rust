@@ -1783,7 +1783,7 @@ from pathlib import Path
 if not sys.argv[5]:
     raise SystemExit("restore_missing_source_type_items requires the shared Rust item utility directory")
 sys.path.insert(0, sys.argv[5])
-from rust_item_utils import impl_header_parts, impl_target_name, inherent_impl_target_name
+from rust_item_utils import impl_header_parts, impl_target_name, inherent_impl_target_name, retained_carrier_target_name as source_carrier_target_name
 
 rust_path = Path(sys.argv[1])
 raw_path = Path(sys.argv[2])
@@ -2025,30 +2025,6 @@ def boxed_dyn_trait_target_name(target: str):
     )
     return match.group(1) if match else None
 
-
-def source_carrier_target_name(target: str):
-    """Return the source nominal wrapped by a transparent shared carrier.
-
-    Generated dispatch impls commonly target `Rc<Source>` or `Arc<Source>`;
-    synchronization/interior-mutability carriers can add another transparent
-    layer.  Peel only wrappers that preserve object identity so unrelated
-    generic support impls do not become source-owned accidentally.
-    """
-    target = target.strip()
-    target = target.removeprefix("&mut ").removeprefix("&").strip()
-    plain = re.fullmatch(
-        r"(?:(?:[A-Za-z_][A-Za-z0-9_]*)::)*([A-Za-z_][A-Za-z0-9_]*)",
-        target,
-    )
-    if plain:
-        return plain.group(1)
-    wrapped = re.fullmatch(r"(.+?)\s*<\s*(.+)\s*>", target)
-    if not wrapped:
-        return None
-    wrapper = wrapped.group(1).strip().rsplit("::", 1)[-1]
-    if wrapper not in {"Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock"}:
-        return impl_target_name(target)
-    return source_carrier_target_name(wrapped.group(2))
 
 
 def source_owned_trait_impl(
@@ -2460,86 +2436,11 @@ RUST
   printf "JavaException\n" >> "$shared_support_types_path"
 fi
 
+# Class tokens and their reflection helpers are producer-owned runtime types.
+# Seed shared ownership even for a single emitting unit; the merger restores
+# complete declarations and impls from raw producer output. A second facade
+# here can silently replace storage contracts and canonical-name behavior.
 if grep -R -q -E '^pub struct JavaClass|JavaClass(::|<)' "$generated_dir"; then
-  cat >> "$shared_support_path" <<'RUST'
-#[derive(Debug, Clone)]
-pub struct JavaClass<T> {
-    name: String,
-    _marker: std::marker::PhantomData<T>,
-}
-
-impl<T> JavaClass<T> {
-    pub fn literal(name: &'static str) -> JavaClass<T> {
-        JavaClass { name: name.to_string(), _marker: std::marker::PhantomData }
-    }
-
-    pub fn for_name<S: Into<String>>(name: S) -> JavaClass<T> {
-        JavaClass { name: name.into(), _marker: std::marker::PhantomData }
-    }
-
-    pub fn get_name(&self) -> String {
-        self.name.clone()
-    }
-
-    pub fn get_simple_name(&self) -> String {
-        self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
-    }
-
-    pub fn is_array(&self) -> bool {
-        false
-    }
-
-    pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream::default())
-    }
-
-    pub fn get_class_loader(&self) -> ClassLoader {
-        ClassLoader
-    }
-
-    pub fn get_protection_domain(&self) -> ProtectionDomain {
-        ProtectionDomain::for_runtime_class(&self.name)
-    }
-
-    pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
-        self.name == other.name
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct ProtectionDomain {
-    code_source: Option<CodeSource>,
-}
-
-impl ProtectionDomain {
-    fn for_runtime_class(_class_name: &str) -> ProtectionDomain {
-        let location = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-            .map(|path| format!("file:{}", path.to_string_lossy()))
-            .unwrap_or_else(|| "file:.".to_string());
-        ProtectionDomain {
-            code_source: Some(CodeSource { location: URL::new(location) }),
-        }
-    }
-
-    pub fn get_code_source(&self) -> Option<CodeSource> {
-        self.code_source.clone()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct CodeSource {
-    location: URL,
-}
-
-impl CodeSource {
-    pub fn get_location(&self) -> URL {
-        self.location.clone()
-    }
-}
-
-RUST
   printf "JavaClass\nProtectionDomain\nCodeSource\n" >> "$shared_support_types_path"
 fi
 

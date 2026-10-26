@@ -57,9 +57,21 @@ pub enum ViewShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchShape {
     Concrete,
-    DynTrait { trait_name: String },
-    BoxedDynTrait { trait_name: String },
-    ClosedEnum { enum_name: String },
+    DynTrait {
+        trait_name: String,
+    },
+    BoxedDynTrait {
+        trait_name: String,
+    },
+    /// A canonical Java reference. All virtual receivers are shared; mutation
+    /// occurs inside the admitted source handle, never behind a wrapper guard.
+    ReferenceDynTrait {
+        trait_name: String,
+        sync: bool,
+    },
+    ClosedEnum {
+        enum_name: String,
+    },
     ErasedObject,
 }
 
@@ -109,6 +121,10 @@ impl RustSlotShape {
     pub(crate) fn native_child_type_at_path(ty: &JavaType, path: &[usize]) -> Option<JavaType> {
         let mut ty = ty.clone();
         for index in path {
+            // A covariant bound qualifies this native storage position; it
+            // is not an extra child or an erased allocation. Reuse the read
+            // projection, which deliberately leaves super bounds opaque.
+            ty = crate::types::generic_read_type_preserving_optional(&ty);
             ty = optional_element_type(&ty).unwrap_or(ty);
             ty = match ty {
                 JavaType::Array(element) if *index == 0 => *element,
@@ -116,7 +132,7 @@ impl RustSlotShape {
                 _ => return None,
             };
         }
-        Some(ty)
+        Some(crate::types::generic_read_type_preserving_optional(&ty))
     }
 
     pub(crate) fn require_native_allocation_at(
@@ -458,6 +474,36 @@ mod tests {
             name: name.to_string(),
             args,
         }
+    }
+
+    #[test]
+    fn native_storage_paths_project_covariant_bounds_and_keep_nullable_values() {
+        let text = crate::types::optional_java_type(JavaType::String);
+        let row = named("List", vec![text.clone()]);
+        let covariant_row = JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(row.clone()))));
+        let nullable_row = crate::types::optional_java_type(covariant_row);
+        let rows = named("List", vec![nullable_row]);
+        assert_eq!(
+            RustSlotShape::native_child_type_at_path(&rows, &[0]),
+            Some(crate::types::optional_java_type(row))
+        );
+        assert_eq!(
+            RustSlotShape::native_child_type_at_path(&rows, &[0, 0]),
+            Some(text)
+        );
+        let super_row = JavaType::Wildcard(Some(WildcardBound::Super(Box::new(named(
+            "List",
+            vec![JavaType::String],
+        )))));
+        let rows = named("List", vec![super_row.clone()]);
+        assert_eq!(
+            RustSlotShape::native_child_type_at_path(&rows, &[0]),
+            Some(super_row)
+        );
+        assert_eq!(
+            RustSlotShape::native_child_type_at_path(&rows, &[0, 0]),
+            None
+        );
     }
 
     #[test]

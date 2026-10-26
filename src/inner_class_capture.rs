@@ -394,6 +394,10 @@ fn collect_unsupported_outer_this_constructed_type_names_from_expr(
             }
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
@@ -648,6 +652,10 @@ fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<Str
             }
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {

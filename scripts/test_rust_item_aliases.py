@@ -7,10 +7,19 @@ import sys
 import tempfile
 import unittest
 
-from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_header_parts
+from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_header_parts, impl_target_name, retained_carrier_target_name
 
 
 class AliasImplTests(unittest.TestCase):
+    def test_dyn_target_bounds_preserve_nominal_owner(self):
+        for target in ["dyn View + '_", "dyn api::View + Send + Sync + 'static", "&'a mut dyn api::View<T> + Send + 'a"]:
+            self.assertEqual(impl_target_name(target), "View")
+        self.assertEqual(impl_header_parts("impl Identity for dyn View + '_ {"), ("Identity", "dyn View + '_"))
+        for target in ["dyn View + '_", "&'a dyn api::View<T> + Send + 'a", "std::sync::Arc<std::sync::Mutex<dyn api::View + Send + '_>>"]:
+            self.assertEqual(retained_carrier_target_name(target), "View")
+        self.assertEqual(retained_carrier_target_name("std::rc::Rc<std::cell::RefCell<Payload<T>>>"), "Payload")
+        self.assertEqual(retained_carrier_target_name("Other<Payload>"), "Other")
+
     def test_trait_only_aliases_and_private_contracts_follow_nominal_owner(self):
         kernel = r"""
 pub struct Store<T>(pub T);
@@ -51,6 +60,47 @@ fn main() {
     assert_eq!(Units::units(&&value), &[0xd800, 65, 0xdc00]);
 }
 ''')
+            binary = root / "probe"
+            result = subprocess.run(["rustc", "--edition=2024", str(source), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            subprocess.run([str(binary)], check=True)
+
+    def test_promoted_trait_keeps_dyn_capability_and_rejects_bare_opaque_impl(self):
+        kernel = r"""
+pub trait Identity { fn token(&self) -> i32; }
+pub trait View { fn read(&self) -> i32; }
+impl Identity for View {
+    fn token(&self) -> i32 { 0 }
+}
+impl Identity for dyn View + '_ {
+    fn token(&self) -> i32 { self.read() }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="new-java2rust-dyn-capability-", dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            generated = root / "generated"
+            generated.mkdir()
+            for name in ["First", "Second"]:
+                (generated / f"{name}.rs").write_text(kernel + f"\npub struct {name};\n")
+            shared = root / "shared.rs"
+            result = subprocess.run([
+                sys.executable, str(Path(__file__).with_name("merge-shared-support-facades.py")),
+                "--generated-dir", str(generated), "--shared-support", str(shared),
+                "--shared-types", str(root / "types.tsv"), "--conflicts", str(root / "conflicts.tsv"),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            text = shared.read_text()
+            self.assertEqual(text.count("impl Identity for dyn View + '_"), 1, text)
+            self.assertNotIn("impl Identity for View {", text)
+            source = root / "probe.rs"
+            source.write_text(text + """
+struct Item(i32);
+impl View for Item { fn read(&self) -> i32 { self.0 } }
+fn main() {
+    let value: Box<dyn View> = Box::new(Item(17));
+    assert_eq!(Identity::token(&*value), 17);
+}
+""")
             binary = root / "probe"
             result = subprocess.run(["rustc", "--edition=2024", str(source), "-o", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

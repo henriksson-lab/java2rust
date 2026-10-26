@@ -678,6 +678,17 @@ impl<'a> EffectiveFacts<'a> {
         ) && self.allows_platform_hierarchy_fallback(name)
     }
 
+    /// These native values own their reference-counted Java state internally.
+    /// An owned Rust Clone retains identity rather than copying the payload.
+    pub(crate) fn native_shared_reference_carrier(&self, java_ty: &JavaType) -> bool {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        capability_type_name(&ty).is_some_and(|name| {
+            crate::stdlib::NATIVE_SHARED_REFERENCE_TYPES
+                .contains(&crate::stdlib::canonical_external_receiver_type_key(name).as_str())
+                && self.allows_platform_hierarchy_fallback(name)
+        })
+    }
+
     /// Cursor element domains flow independently of the cursor's own handle.
     pub(crate) fn native_cursor_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
         self.native_cursor_element_type_for_names(
@@ -1100,6 +1111,32 @@ mod type_fact_lookup_session_tests {
             provenance: FactProvenance::UserOverride,
         });
         assert!(!query("CharSequence", &facts));
+        assert!(query("StringBuffer", &facts));
+    }
+
+    #[test]
+    fn native_shared_reference_carriers_require_the_selected_platform_representation() {
+        let mut facts = facts_for(false);
+        let query = |name: &str, facts: &FactSet| {
+            EffectiveFacts::new(facts)
+                .native_shared_reference_carrier(&crate::parser::parse_hierarchy_type(name))
+        };
+        for name in [
+            "SplittableRandom",
+            "java.util.SplittableRandom",
+            "StringBuffer",
+        ] {
+            assert!(query(name, &facts), "{name}");
+        }
+        assert!(!query("Random", &facts));
+        let mut source = facts.type_capability_overrides[0].clone();
+        source.type_name = "SplittableRandom".into();
+        source.provenance = FactProvenance::ParsedSource;
+        facts.type_capability_overrides.push(source);
+        assert!(!query("SplittableRandom", &facts));
+        // A lexical source name does not replace an explicitly qualified JDK
+        // owner. The mixed source/native regression exercises both together.
+        assert!(query("java.util.SplittableRandom", &facts));
         assert!(query("StringBuffer", &facts));
     }
 

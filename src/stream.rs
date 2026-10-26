@@ -252,7 +252,11 @@ impl<'a> LambdaPlan<'a> {
         Some(Self {
             param_name: self.param_name.clone(),
             rust_param_name: self.rust_param_name.clone(),
-            body: StreamLambdaBody::MethodReference { target, method },
+            body: StreamLambdaBody::MethodReference {
+                target,
+                method,
+                receiver: None,
+            },
         })
     }
 }
@@ -291,7 +295,11 @@ impl<'a> ReduceLambdaPlan<'a> {
 pub enum StreamLambdaBody<'a> {
     Expr(&'a Expr),
     Block(&'a Block),
-    MethodReference { target: &'a str, method: &'a str },
+    MethodReference {
+        target: &'a str,
+        method: &'a str,
+        receiver: Option<&'a Expr>,
+    },
 }
 
 impl<'a> StreamLambdaBody<'a> {
@@ -477,7 +485,7 @@ fn build_stream_plan_core<'a>(
     let collection_empty_add_changes = if matches!(terminal, StreamTerminal::Collect(_)) {
         match args.first() {
             Some(Expr::Call { args: factory, .. }) => match factory.as_slice() {
-                [Expr::MethodReference { target, method }] if method == "new" => {
+                [Expr::MethodReference { target, method, .. }] if method == "new" => {
                     crate::stdlib::native_list_empty_add_changes(
                         env.static_type_alias(target).unwrap_or(target),
                     )
@@ -581,7 +589,7 @@ fn stream_collect_terminal<'a>(
     match (name.as_str(), args.as_slice()) {
         ("toList" | "to_list", []) => Some(StreamTerminal::Collect(JavaCollectionKind::List)),
         ("toSet" | "to_set", []) => Some(StreamTerminal::Collect(JavaCollectionKind::Set)),
-        ("toCollection" | "to_collection", [Expr::MethodReference { target, method }])
+        ("toCollection" | "to_collection", [Expr::MethodReference { target, method, .. }])
             if method == "new" =>
         {
             let owner = env.static_type_alias(target).unwrap_or(target);
@@ -883,13 +891,21 @@ fn unary_lambda_plan(lambda: &Expr, allows_void_block: bool) -> Option<LambdaPla
                 body,
             })
         }
-        Expr::MethodReference { target, method } => {
+        Expr::MethodReference {
+            target,
+            method,
+            receiver,
+        } => {
             let occupied = std::collections::HashSet::from([crate::parser::to_snake_case(target)]);
             let param = crate::java_naming::allocate_rust_ident("value", &occupied);
             Some(LambdaPlan {
                 param_name: param.clone(),
                 rust_param_name: param,
-                body: StreamLambdaBody::MethodReference { target, method },
+                body: StreamLambdaBody::MethodReference {
+                    target,
+                    method,
+                    receiver: receiver.as_deref(),
+                },
             })
         }
         _ => None,
@@ -957,7 +973,7 @@ fn infer_stream_lambda_output_shape(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> RustSlotShape {
-    if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
+    if let StreamLambdaBody::MethodReference { target, method, .. } = lambda.body {
         return infer_single_input_method_reference_output_shape_with_context(
             target,
             method,
@@ -1006,7 +1022,7 @@ fn stmt_has_null_return(stmt: &Stmt) -> bool {
 
 fn is_non_null_filter_arg(expr: &Expr) -> bool {
     match expr {
-        Expr::MethodReference { target, method } => {
+        Expr::MethodReference { target, method, .. } => {
             crate::stdlib::canonical_external_receiver_type_key(target) == "Objects"
                 && matches!(method.as_str(), "nonNull" | "non_null")
         }
@@ -1068,7 +1084,7 @@ fn flat_map_plan<'a>(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<FlatMapPlan<'a>> {
-    if let Expr::MethodReference { target, method } = expr {
+    if let Expr::MethodReference { target, method, .. } = expr {
         if method != "stream" || !matches!(target.as_str(), "Collection" | "Iterable") {
             return None;
         }
@@ -1297,7 +1313,7 @@ fn infer_terminal_lambda_output_shape(
     _env: &TypeEnv,
     _facts: &FactSet,
 ) -> RustSlotShape {
-    if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
+    if let StreamLambdaBody::MethodReference { target, method, .. } = lambda.body {
         return infer_single_input_method_reference_output_shape_with_context(
             target,
             method,
@@ -1365,6 +1381,7 @@ mod collector_tests {
             vec![Expr::MethodReference {
                 target: "String".to_string(),
                 method: "trim".to_string(),
+                receiver: None,
             }],
         );
         let expr = call(mapped, "iterator", Vec::new());

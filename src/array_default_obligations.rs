@@ -217,7 +217,11 @@ fn collect_in_expr(expr: &Expr, names: &mut BTreeSet<String>) {
         Expr::Unary { expr, .. }
         | Expr::Cast { expr, .. }
         | Expr::InstanceOf { expr, .. }
-        | Expr::FieldAccess(expr, _) => collect_in_expr(expr, names),
+        | Expr::FieldAccess(expr, _)
+        | Expr::MethodReference {
+            receiver: Some(expr),
+            ..
+        } => collect_in_expr(expr, names),
         Expr::ArrayAccess(receiver, index) => {
             collect_in_expr(receiver, names);
             collect_in_expr(index, names);

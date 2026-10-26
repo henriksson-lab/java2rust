@@ -139,6 +139,8 @@ fn assertion_error_primitive_details_use_java_string_conversion() {
         "assertion_error_primitive_details",
         r#"
 class Probe {
+    static int calls;
+    static int detail() { calls++; return 17; }
     static int run() {
         try { throw new AssertionError(17); }
         catch (AssertionError error) { if (!"17".equals(error.getMessage())) return 1; }
@@ -152,6 +154,12 @@ class Probe {
         catch (AssertionError error) { if (!"-0.0".equals(error.getMessage())) return 5; }
         try { throw new AssertionError(1.25f); }
         catch (AssertionError error) { if (!"1.25".equals(error.getMessage())) return 6; }
+        try { throw new AssertionError('\uD800'); }
+        catch (AssertionError error) {
+            if (error.getMessage().length() != 1 || error.getMessage().charAt(0) != '\uD800') return 7;
+        }
+        try { throw new AssertionError(detail()); }
+        catch (AssertionError error) { if (!"17".equals(error.getMessage()) || calls != 1) return 8; }
         return 0;
     }
 }

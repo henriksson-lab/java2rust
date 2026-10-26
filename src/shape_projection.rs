@@ -5,8 +5,45 @@ use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
 
+/// Carry a solved interface argument domain into one SAM invocation value.
+/// For Iterator<T>-style values the interface's T belongs below the result's
+/// outer carrier; it must not turn that carrier into an unrelated allocation.
+pub(crate) fn inherit_native_functional_value_domain(
+    value: &mut RustSlotShape,
+    parent: &RustSlotShape,
+    source: crate::stdlib::FunctionalTypeSource,
+) {
+    let Some((index, projection)) = source.type_argument_projection() else {
+        return;
+    };
+    value.inherit_nested_collection_views(parent);
+    for (path, placement) in &parent.nested_native_allocations {
+        if let Some(suffix) = path.strip_prefix(&[index]) {
+            let mut path = projection.to_vec();
+            path.extend_from_slice(suffix);
+            value.require_native_allocation_at(&path, *placement);
+        }
+    }
+}
+
 /// Storage projection shared by insertions, reads, display callbacks and
 /// capability proofs. It must not replace an owned interface with a loan.
+pub(crate) fn apply_source_interface_reference_dispatch(
+    shape: &mut RustSlotShape,
+    representations: &RepresentationPlan,
+) {
+    let java_ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    if let DispatchShape::ReferenceDynTrait { trait_name, sync } =
+        representations.dispatch_for(&java_ty)
+    {
+        shape.dispatch = DispatchShape::ReferenceDynTrait { trait_name, sync };
+        shape.view = ViewShape::DynTraitView;
+        shape.borrow_target = crate::slot_shape::BorrowTarget::Carrier;
+    }
+}
+
 pub(crate) fn native_collection_storage_value_shape(
     shape: RustSlotShape,
     facts: &FactSet,
@@ -19,7 +56,9 @@ pub(crate) fn native_collection_storage_value_shape(
     projected.view = shape.view;
     projected.mutability = shape.mutability;
     projected.nested_collection_views = shape.nested_collection_views;
-    if matches!(&shape.dispatch, DispatchShape::BoxedDynTrait { .. }) {
+    if matches!(&shape.dispatch, DispatchShape::BoxedDynTrait { .. })
+        && !matches!(projected.dispatch, DispatchShape::ReferenceDynTrait { .. })
+    {
         projected.dispatch = shape.dispatch;
     }
     normalize_native_collection_storage_shape(projected, facts, representations)
@@ -75,15 +114,22 @@ pub(crate) fn native_collection_stored_child_shape(
     Some(shape)
 }
 
-/// A retained queue transfers an owned Java reference out of its short loan.
-/// Missing and stored-null values share one nullable carrier for peek/poll.
-pub(crate) fn retained_native_queue_result_shape(
+/// Retained element operations transfer an owned Java reference out of their
+/// short storage loan. Successful indexed reads return exactly the stored
+/// carrier; missing and stored-null queue values share one nullable carrier.
+pub(crate) fn retained_native_collection_result_shape(
     parent: &RustSlotShape,
     method: crate::call_plan::NativeCollectionMethod,
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> Option<RustSlotShape> {
-    if !method.is_queue_endpoint()
+    if !(method.is_queue_endpoint()
+        || matches!(
+            method,
+            crate::call_plan::NativeCollectionMethod::ListGet
+                | crate::call_plan::NativeCollectionMethod::ListSet
+                | crate::call_plan::NativeCollectionMethod::ListRemoveIndex
+        ))
         || !parent.native_allocation.shared()
         || EffectiveFacts::new(facts)
             .retained_native_collection_kind(&parent.java_ty)
@@ -408,6 +454,18 @@ pub(crate) fn specialize_resolved_return_shape(
     specialized: &JavaType,
 ) -> RustSlotShape {
     let specialized_shape = specialize_slot_shape_java_type(shape, specialized);
+    let preserve_allocation = |mut projected: RustSlotShape| {
+        projected.native_allocation = projected
+            .native_allocation
+            .join(specialized_shape.native_allocation);
+        for (path, placement) in &specialized_shape.nested_native_allocations {
+            projected.require_native_allocation_at(path, *placement);
+        }
+        representations
+            .source_generic_allocations
+            .project(&mut projected);
+        projected
+    };
     if let Some(projected) = return_shape_for_java_type(representations, &specialized_shape.java_ty)
         && projected.dispatch != specialized_shape.dispatch
         && matches!(
@@ -421,7 +479,7 @@ pub(crate) fn specialize_resolved_return_shape(
         // not two values requiring a wrap; they are two descriptions of the
         // same carrier. Make the call-site shape agree with that ABI before
         // assignment coercion plans another carrier construction.
-        return projected;
+        return preserve_allocation(projected);
     }
     if shape.java_ty == specialized_shape.java_ty
         || !matches!(shape.dispatch, DispatchShape::ErasedObject)
@@ -431,6 +489,7 @@ pub(crate) fn specialize_resolved_return_shape(
     }
 
     return_shape_for_java_type(representations, &specialized_shape.java_ty)
+        .map(preserve_allocation)
         .unwrap_or(specialized_shape)
 }
 
@@ -780,6 +839,7 @@ pub fn storage_arg_shape_with_effective_facts(
     java_ty: JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustSlotShape {
+    let java_ty = crate::types::generic_read_type_preserving_optional(&java_ty);
     let mut shape = RustSlotShape::for_storage(java_ty.clone());
     if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty) {
         apply_required_dispatch(&mut shape, DispatchShape::Concrete);
@@ -992,11 +1052,13 @@ pub(crate) fn dispatch_projection_policy(dispatch: DispatchShape) -> DispatchPro
             Some(OwnershipShape::SharedBorrow),
             Some(ViewShape::DynTraitView),
         ),
-        DispatchShape::BoxedDynTrait { .. } => DispatchProjectionPolicy::new(
-            dispatch,
-            Some(OwnershipShape::Owned),
-            Some(ViewShape::DynTraitView),
-        ),
+        DispatchShape::BoxedDynTrait { .. } | DispatchShape::ReferenceDynTrait { .. } => {
+            DispatchProjectionPolicy::new(
+                dispatch,
+                Some(OwnershipShape::Owned),
+                Some(ViewShape::DynTraitView),
+            )
+        }
         DispatchShape::ClosedEnum { .. } => {
             DispatchProjectionPolicy::new(dispatch, None, Some(ViewShape::EnumView))
         }
@@ -1143,6 +1205,16 @@ pub fn indexed_read_shape_with_facts(
 ) -> RustSlotShape {
     let effective_facts = EffectiveFacts::new(facts);
     indexed_read_shape_with_effective_facts(array_shape, &effective_facts)
+}
+
+pub(crate) fn indexed_read_shape_for_access_with_representations(
+    array: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<RustSlotShape> {
+    let mut shape = indexed_read_shape_for_access_with_facts(array, facts)?;
+    apply_source_interface_reference_dispatch(&mut shape, representations);
+    Some(shape)
 }
 
 pub fn indexed_read_shape_for_access_with_facts(

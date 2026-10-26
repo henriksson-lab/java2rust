@@ -2,6 +2,123 @@
 mod common;
 
 #[test]
+fn mapped_numeric_conversions_keep_exact_values_rounding_and_errors() {
+    let source = include_str!("corpus/numbers/fraction-lowering/NumericConversionsProbe.java");
+    common::verify_java_sources_zero_contract(
+        "numericconversions.NumericConversionsProbe",
+        &[(
+            "tests/corpus/numbers/fraction-lowering/NumericConversionsProbe.java",
+            source,
+        )],
+    );
+    let pack = new_java2rust::external_packs::parse_external_pack_manifest(include_str!(
+        "../runtime/java-math/manifests/big-integer.facts"
+    ));
+    assert!(!pack.diagnostics().has_errors(), "{:?}", pack.diagnostics());
+    let translation = new_java2rust::translate_source_with_facts(source, pack.facts());
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/java-math");
+    common::cargo_verify_generated_modules_with_dependencies(
+        "mapped_numeric_conversions",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn conversions() { assert_eq!(NumericConversionsProbe::run().value(),0); }
+"#,
+        }],
+        "test",
+        "2021",
+        &[("java-math-runtime", runtime.as_path())],
+    );
+}
+
+#[test]
+fn mapped_sign_magnitude_constructor_preserves_octets_snapshot_and_errors() {
+    let source = include_str!("corpus/numbers/fraction-lowering/SignMagnitudeProbe.java");
+    common::verify_java_sources_zero_contract(
+        "signmagnitude.SignMagnitudeProbe",
+        &[(
+            "tests/corpus/numbers/fraction-lowering/SignMagnitudeProbe.java",
+            source,
+        )],
+    );
+    let pack = new_java2rust::external_packs::parse_external_pack_manifest(include_str!(
+        "../runtime/java-math/manifests/big-integer.facts"
+    ));
+    assert!(!pack.diagnostics().has_errors(), "{:?}", pack.diagnostics());
+    let translation = new_java2rust::translate_source_with_facts(source, pack.facts());
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/java-math");
+    common::cargo_verify_generated_modules_with_dependencies(
+        "mapped_sign_magnitude",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32, E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn magnitude() { assert_eq!(SignMagnitudeProbe::run().value(), 0); }
+"#,
+        }],
+        "test",
+        "2021",
+        &[("java-math-runtime", runtime.as_path())],
+    );
+}
+
+#[test]
+fn mapped_bytebuffer_magnitudes_use_the_backing_array_abi() {
+    let source = include_str!("corpus/numbers/fraction-lowering/ByteBufferMagnitudeProbe.java");
+    common::verify_java_sources_zero_contract(
+        "signmagnitude.ByteBufferMagnitudeProbe",
+        &[(
+            "tests/corpus/numbers/fraction-lowering/ByteBufferMagnitudeProbe.java",
+            source,
+        )],
+    );
+    let pack = new_java2rust::external_packs::parse_external_pack_manifest(include_str!(
+        "../runtime/java-math/manifests/big-integer.facts"
+    ));
+    assert!(!pack.diagnostics().has_errors(), "{:?}", pack.diagnostics());
+    let translation = new_java2rust::translate_source_with_facts(source, pack.facts());
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/java-math");
+    common::cargo_verify_generated_modules_with_dependencies(
+        "mapped_bytebuffer_magnitude",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32, E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn magnitude() { assert_eq!(ByteBufferMagnitudeProbe::run().value(), 0); }
+"#,
+        }],
+        "test",
+        "2021",
+        &[("java-math-runtime", runtime.as_path())],
+    );
+}
+
+#[test]
 fn native_comparable_views_share_source_state_identity_and_ordering_contracts() {
     common::verify_java_fixture_zero_contract(
         "native_comparable",
@@ -93,8 +210,8 @@ fn canonical_mapped_numeric_fields_retain_the_selected_provider_abi() {
     use java_math_runtime::BigInteger as Integer;
     use std::sync::Arc;
     let huge = Integer::value_of(2).pow(100).unwrap();
-    let left = Arc::new(CanonicalMappedFieldsProbe::new(huge.clone(), Integer::value_of(3)));
-    let right = Arc::new(CanonicalMappedFieldsProbe::new(Integer::value_of(5), Integer::value_of(7)));
+    let left = Arc::new(CanonicalMappedFieldsProbe::new(huge.clone(), Some(Integer::value_of(3))));
+    let right = Arc::new(CanonicalMappedFieldsProbe::new(Integer::value_of(5), Some(Integer::value_of(7))));
     for _ in 0..3 {
         let product = left.multiply_canonical_mapped_fields_probe(Arc::clone(&right)).unwrap();
         assert_eq!(product.numerator.as_ref().unwrap(), &huge.multiply(Integer::value_of(5)).unwrap());
@@ -108,6 +225,8 @@ fn canonical_mapped_numeric_fields_retain_the_selected_provider_abi() {
     assert_eq!(zero.multiply_canonical_mapped_fields_probe(right).unwrap().numerator.as_ref().unwrap().signum(), 0);
     assert_eq!(left.numerator.as_ref().unwrap(), &huge);
     assert_eq!(left.denominator.as_ref().unwrap().int_value(), 3);
+    let nullable = CanonicalMappedFieldsProbe::new(Integer::value_of(1), None);
+    assert!(nullable.denominator.is_none());
 }
 "#,
         }],

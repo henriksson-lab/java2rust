@@ -197,22 +197,24 @@ pub(super) fn support(ty: &TypeDecl, ctx: LowerCtx) -> Option<String> {
     let mut methods = Vec::new();
     for field in &plan.instance_fields {
         let field_name = crate::parser::to_snake_case(&field.name);
+        let storage_name = crate::java_naming::source_instance_field_rust_name(ty, &field.name);
+        let field_token = crate::representation_lowering::rust_identifier_token(&storage_name);
         let shape = ctx.signatures.required_declared_field_shape(ty, field);
         let rust_ty = emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
             &shape,
             ctx.facts,
             ctx.representations,
         ));
-        declarations.push(format!("{field_name}: {rust_ty}"));
+        declarations.push(format!("{field_token}: {rust_ty}"));
         defaults.push(format!(
-            "{field_name}: {}",
+            "{field_token}: {}",
             emit::emit_expr(&default_expr_for_slot_with_facts(&shape, ctx.facts))
         ));
         let mut borrowed = shape.clone();
         borrowed.ownership = OwnershipShape::SharedBorrow;
         let value = RustExpr::Field(
             Box::new(RustExpr::Var("__java_payload_guard".into())),
-            field_name.clone(),
+            storage_name.clone(),
         );
         // Project the optional element, not its Option shell. Slot conversion
         // then copies values or clones retained identities without moving state.
@@ -236,8 +238,10 @@ pub(super) fn support(ty: &TypeDecl, ctx: LowerCtx) -> Option<String> {
                 ctx.facts,
             )
         };
-        let accessor = crate::java_naming::source_enum_field_accessor_name(ty, &field_name);
-        methods.push(format!("pub fn {accessor}(&self) -> {rust_ty} {{ Self::__java_class_init(); let __java_payload_guard = Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\"); {} }}\npub fn __java_set_{field_name}(&self, value: {rust_ty}) {{ Self::__java_class_init(); Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\").{field_name} = value; }}", emit::emit_expr(&copied)));
+        let accessor = crate::representation_lowering::rust_identifier_token(
+            &crate::java_naming::source_enum_field_accessor_name(ty, &field_name),
+        );
+        methods.push(format!("pub fn {accessor}(&self) -> {rust_ty} {{ Self::__java_class_init(); let __java_payload_guard = Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\"); {} }}\npub fn __java_set_{field_name}(&self, value: {rust_ty}) {{ Self::__java_class_init(); Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\").{field_token} = value; }}", emit::emit_expr(&copied)));
     }
     Some(format!(
         "struct {payload} {{ {} }}\nimpl {name} {{\nfn __java_payloads() -> &'static Vec<std::sync::Mutex<{payload}>> {{ static STATE: std::sync::OnceLock<Vec<std::sync::Mutex<{payload}>>> = std::sync::OnceLock::new(); STATE.get_or_init(|| (0..{}).map(|_| std::sync::Mutex::new({payload} {{ {} }})).collect()) }}\npub fn __java_enum_constant(&self) -> Option<Self> {{ Self::__java_class_init(); if Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\").__published {{ Some(*self) }} else {{ None }} }}\nfn __java_publish(&self) {{ Self::__java_payloads()[self.ordinal() as usize].lock().expect(\"Java enum payload mutex poisoned\").__published = true; }}\nfn __java_values_ready() -> bool {{ Self::__java_payloads().iter().all(|value| value.lock().expect(\"Java enum payload mutex poisoned\").__published) }}\n{}\n}}",
@@ -334,12 +338,17 @@ pub(super) fn constructors(ty: &TypeDecl, ctx: LowerCtx) -> Vec<RustFunction> {
                     .as_ref()
                     .expect("resolved enum delegation required");
                 let mut arguments = vec![RustExpr::Var(instance.clone())];
-                arguments.extend(lower_constructor_args_with_plan(
-                    args,
-                    &env,
-                    plan_constructor_arguments(Some(call), args.len(), ctx.signatures),
-                    ctor_ctx,
-                ));
+                arguments.extend(
+                    lower_resolved_constructor_varargs_args(args, &env, call, ctor_ctx)
+                        .unwrap_or_else(|| {
+                            lower_constructor_args_with_plan(
+                                args,
+                                &env,
+                                plan_constructor_arguments(Some(call), args.len(), ctx.signatures),
+                                ctor_ctx,
+                            )
+                        }),
+                );
                 let selected = ty
                     .members
                     .iter()
@@ -486,12 +495,19 @@ pub(super) fn initialize_constant(stmt: &Stmt, env: &ShapeEnv, ctx: LowerCtx) ->
         &crate::object_model::rust_enum_variant_name_from_parsed_constant(name),
     );
     let mut arguments = vec![identity.clone()];
-    arguments.extend(lower_constructor_args_with_plan(
-        args,
-        env,
-        plan_constructor_arguments(resolved.as_ref(), args.len(), ctx.signatures),
-        ctx,
-    ));
+    arguments.extend(
+        resolved
+            .as_ref()
+            .and_then(|call| lower_resolved_constructor_varargs_args(args, env, call, ctx))
+            .unwrap_or_else(|| {
+                lower_constructor_args_with_plan(
+                    args,
+                    env,
+                    plan_constructor_arguments(resolved.as_ref(), args.len(), ctx.signatures),
+                    ctx,
+                )
+            }),
+    );
     let call = function_call_projection(
         self_associated_path_projection(&format!("__java_enum_{method}")),
         arguments,

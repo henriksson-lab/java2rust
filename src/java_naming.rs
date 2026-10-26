@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::java_ir::{FieldDecl, Member, Modifier, Program, TypeDecl};
+use crate::java_ir::{Expr, FieldDecl, Member, MethodDecl, Modifier, Program, Stmt, TypeDecl};
 
 /// Checked implementation of the compiler-provided source enum lookup method.
 /// Resolver identity and exception propagation must refer to the same body.
@@ -255,7 +255,20 @@ pub(crate) fn source_enum_field_accessor_name(ty: &TypeDecl, field_name: &str) -
     .map(str::to_string)
     .collect::<HashSet<_>>();
     occupied.extend(ty.members.iter().filter_map(|member| match member {
-        Member::Method(method) => Some(crate::java_signature::source_method_rust_name(method)),
+        Member::Method(method) => {
+            let name = crate::java_signature::source_method_rust_name(method);
+            // An exact field-only getter can be the synthetic accessor itself.
+            // Keep its public Java spelling and its owned publication result;
+            // a second forwarding method could borrow from a temporary token.
+            let reuses_field = name == base
+                && method.params.is_empty()
+                && method.type_params.is_empty()
+                && !method.modifiers.contains(&Modifier::Static)
+                && trivial_returned_instance_field_name(method).as_deref() == Some(base.as_str())
+                && source_instance_field_decl(ty, field_name)
+                    .is_some_and(|field| field.ty == method.return_type);
+            (!reuses_field).then_some(name)
+        }
         _ => None,
     }));
     if !occupied.contains(&base) && !rust_keyword_needs_rename(&base) {
@@ -268,6 +281,25 @@ pub(crate) fn source_enum_field_accessor_name(ty: &TypeDecl, field_name: &str) -
         _ => None,
     }));
     allocate_rust_ident(&base, &occupied)
+}
+
+pub(crate) fn trivial_returned_instance_field_name(method: &MethodDecl) -> Option<String> {
+    let body = method.body.as_ref()?;
+    let [Stmt::Return(Some(expr))] = body.statements.as_slice() else {
+        return None;
+    };
+    match expr {
+        Expr::Var(name) => Some(crate::parser::to_snake_case(
+            name.strip_prefix("this.").unwrap_or(name),
+        )),
+        Expr::FieldAccess(receiver, field)
+            if matches!(receiver.as_ref(), Expr::This)
+                || matches!(receiver.as_ref(), Expr::Var(name) if name == "this") =>
+        {
+            Some(crate::parser::to_snake_case(field))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {

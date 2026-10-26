@@ -2,9 +2,33 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::facts::FactSet;
-use crate::java_ir::{Block, Expr, JavaType, Member, MethodDecl, Program, Stmt, TypeDecl};
+use crate::java_ir::{
+    Block, Expr, JavaType, Member, MethodDecl, Modifier, Program, Stmt, TypeDecl, TypeKind,
+};
 use crate::java_signature::{resolved_source_method_decl, source_method_rust_name};
 use crate::signature::MethodKey;
+
+/// The sole abstract method declared here, excluding concrete/default helpers.
+/// This is deliberately a declaration query: inherited source/native contracts
+/// are materialized on normalized surfaces before naming and analysis. Raw
+/// parsed declarations still require that shared normalization first.
+pub(crate) fn declared_single_abstract_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+    if ty.kind != TypeKind::Interface {
+        return None;
+    }
+    let mut methods = ty.members.iter().filter_map(|member| match member {
+        Member::Method(method)
+            if method.body.is_none()
+                && !method.modifiers.contains(&Modifier::Static)
+                && !method.modifiers.contains(&Modifier::Private) =>
+        {
+            Some(method)
+        }
+        _ => None,
+    });
+    let method = methods.next()?;
+    methods.next().is_none().then_some(method)
+}
 
 /// Declaration-scoped callback representation, including source forwarding.
 /// Escape evidence propagates backwards over forwarding edges once; no method
@@ -746,6 +770,19 @@ fn scan_stmt_for_callback_param(
     }
 }
 
+fn method_reference_target_is_callback_param(target: &str, param_name: &str) -> bool {
+    // The parser leaves a single ambiguous expression/type name as a target.
+    // Use the normal bound-receiver classifier with the known formal binding;
+    // this also shares source-to-Rust identifier normalization with lowering.
+    let mut env = crate::expr_shape::ShapeEnv::new();
+    env.insert_local(param_name, JavaType::Unknown(param_name.into()));
+    matches!(
+        crate::method_reference_plan::bound_method_reference_receiver(target, &env),
+        Some(crate::method_reference_plan::BoundMethodReferenceReceiver::Local(name))
+            if name == param_name
+    )
+}
+
 fn scan_expr_for_callback_param(
     expr: &Expr,
     param_name: &str,
@@ -756,6 +793,13 @@ fn scan_expr_for_callback_param(
 ) {
     match expr {
         Expr::Var(name) if name == param_name => *escaped = true,
+        Expr::MethodReference {
+            target,
+            method,
+            receiver: None,
+        } if method != "new" && method_reference_target_is_callback_param(target, param_name) => {
+            *escaped = true;
+        }
         Expr::Call {
             receiver: Some(receiver),
             name,
@@ -816,6 +860,10 @@ fn scan_expr_for_callback_param(
             }
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -1170,7 +1218,18 @@ fn stmt_references_callback_param(stmt: &crate::java_ir::Stmt, param_name: &str)
 pub(crate) fn expr_references_callback_param(expr: &Expr, param_name: &str) -> bool {
     match expr {
         Expr::Var(name) => name == param_name,
+        Expr::MethodReference {
+            target,
+            method,
+            receiver: None,
+        } if method != "new" && method_reference_target_is_callback_param(target, param_name) => {
+            true
+        }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -1394,6 +1453,10 @@ pub(crate) fn expr_stores_priority_queue_comparator_callback(
                 || expr_stores_priority_queue_comparator_callback(else_expr, param_name)
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -1424,6 +1487,37 @@ pub(crate) fn expr_stores_priority_queue_comparator_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_callback_references_retain_the_normalized_formal_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.function.DoubleSupplier;
+            class Capture {
+                static DoubleSupplier save(DoubleSupplier supplierValue) {
+                    return supplierValue::getAsDouble;
+                }
+            }
+        "#,
+        );
+        let method = parsed.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let param = &method.params[0];
+        assert_eq!(
+            callback_parameter_use(method, &param.name, None),
+            Some((false, false))
+        );
+        let Stmt::Return(Some(reference)) = &method.body.as_ref().unwrap().statements[0] else {
+            panic!("method reference return")
+        };
+        assert!(expr_references_callback_param(reference, &param.name));
+    }
 
     #[test]
     fn ordering_policy_keeps_nullable_comparator_values_without_retention() {

@@ -1558,7 +1558,10 @@ fn apply_native_collection_method(
     if matches!(method, NativeCollectionMethod::MapPutIfAbsent) {
         return apply_map_put_if_absent(receiver, args);
     }
-    if matches!(method, NativeCollectionMethod::ToArray) {
+    if let NativeCollectionMethod::ToArray { has_destination } = method {
+        if has_destination {
+            return crate::unsupported::collection_array_destination_expr();
+        }
         return owned_collection_to_vec_projection_for_receiver_type(receiver, receiver_ty);
     }
     if matches!(method, NativeCollectionMethod::Iterator) {
@@ -1723,7 +1726,9 @@ fn apply_native_collection_method(
         NativeCollectionMethod::ListIterator => {
             unreachable!("ListIterator is rendered as JavaListIterator")
         }
-        NativeCollectionMethod::ToArray => unreachable!("ToArray is rendered as an owned Vec"),
+        NativeCollectionMethod::ToArray { .. } => {
+            unreachable!("ToArray is rendered as an owned Vec")
+        }
     };
     receiver_method_call_projection_exact(receiver, rust_name, args)
 }
@@ -1895,10 +1900,11 @@ fn native_collection_iterator_needs_erased_object_clone(receiver_ty: Option<&Jav
             })
         })
         .is_some_and(|element_ty| {
+            let element_ty = crate::types::generic_read_type_ref(&element_ty);
             matches!(element_ty, JavaType::Wildcard(_))
                 || matches!(
                     element_ty,
-                    JavaType::Named { ref name, .. } | JavaType::Unknown(ref name)
+                    JavaType::Named { name, .. } | JavaType::Unknown(name)
                         if matches!(name.as_str(), "Object" | "java.lang.Object")
                 )
         })
@@ -3422,7 +3428,7 @@ pub(crate) fn apply_class_literal_token_with_rust_type(
     apply_planned_class_literal_token(&crate::stdlib::class_literal_java_name(ty), rust_type)
 }
 
-fn apply_planned_class_literal_token(java_name: &str, rust_type: RustType) -> RustExpr {
+pub(crate) fn apply_planned_class_literal_token(java_name: &str, rust_type: RustType) -> RustExpr {
     function_call_projection(
         java_class_literal_path_projection(rust_type),
         vec![rust_string_literal_projection(java_name)],
@@ -3487,7 +3493,9 @@ fn apply_new_target_with_optional_representations(
         &target.owner_shape().java_ty,
         JavaType::Named { name, .. } | JavaType::Unknown(name)
             if name == "Object" || name == "java.lang.Object"
-    ) {
+    ) && !crate::effective_facts::EffectiveFacts::new(facts)
+        .parsed_source_controls_native_carrier(&target.owner_shape().java_ty)
+    {
         return java_plain_object_constructor_projection();
     }
     if shape_is_erased_object_boundary(target.owner_shape()) {
@@ -4266,6 +4274,23 @@ fn native_collection_new_target_kind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iterator_reads_erase_only_the_effective_object_domain() {
+        for (ty, erased) in [
+            ("List<O>", false),
+            ("List<? extends O>", false),
+            ("List<? extends Object>", true),
+            ("List<? super O>", true),
+            ("List<?>", true),
+        ] {
+            let ty = crate::parser::parse_hierarchy_type(ty);
+            assert_eq!(
+                native_collection_iterator_needs_erased_object_clone(Some(&ty)),
+                erased
+            );
+        }
+    }
     use crate::emit;
 
     #[test]

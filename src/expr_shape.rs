@@ -1597,6 +1597,11 @@ fn infer_expr_shape_with_context_and_external_index(
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
+    if matches!(expr, Expr::This)
+        && let Some(shape) = env.local_shape("this")
+    {
+        return shape.clone();
+    }
     // Native append returns the same non-null builder allocation. Prove this
     // contract from the declared receiver before trying generic call planners:
     // those otherwise repeatedly infer every prefix of a fluent chain. Keep
@@ -2169,12 +2174,13 @@ fn native_java_call_expr_shape(
                 external_index,
             );
             if let Some(representations) = ctx.representations()
-                && let Some(result) = crate::shape_projection::retained_native_queue_result_shape(
-                    &parent,
-                    *method,
-                    facts,
-                    representations,
-                )
+                && let Some(result) =
+                    crate::shape_projection::retained_native_collection_result_shape(
+                        &parent,
+                        *method,
+                        facts,
+                        representations,
+                    )
             {
                 return Some(result);
             }
@@ -2247,8 +2253,85 @@ pub(crate) fn native_functional_call_result_shape(
     // recursive inference in the normal call planner below.
     effective.native_functional_carrier(&infer_expr_type(receiver, env.type_env()))?;
     let receiver = infer_expr_shape_with_context(receiver, env, ctx);
-    let ty = receiver.optional_element_type().unwrap_or(receiver.java_ty);
+    let ty = receiver
+        .optional_element_type()
+        .unwrap_or_else(|| receiver.java_ty.clone());
     let sam = effective.native_functional_carrier(&ty)?;
+    if let Some(contract) =
+        crate::stdlib::NativeGenericCompositionContract::for_call(&ty, name, args.len())
+    {
+        let argument = infer_expr_shape_with_context(&args[0], env, ctx);
+        let argument_ty = argument
+            .optional_element_type()
+            .unwrap_or_else(|| argument.java_ty.clone());
+        let result_ty = contract.result_type_for_argument(&argument_ty)?;
+        let argument_sam = effective.native_functional_carrier(&argument_ty)?;
+        let operation = crate::stdlib::NativeFunctionalComposition::generic_for_call(
+            match &ty {
+                JavaType::Named { name, .. } => name,
+                _ => return None,
+            },
+            name,
+            args.len(),
+        )?;
+        let mut result =
+            crate::shape_projection::storage_arg_shape_with_effective_facts(result_ty, &effective);
+        result.ownership = crate::slot_shape::OwnershipShape::Owned;
+        result.dispatch = crate::slot_shape::DispatchShape::Concrete;
+        let (inputs_parent, inputs_sam, output_parent, output_sam) =
+            if operation == crate::stdlib::NativeFunctionalComposition::After {
+                (&receiver, &sam, &argument, &argument_sam)
+            } else {
+                (&argument, &argument_sam, &receiver, &sam)
+            };
+        for (index, value) in inputs_sam
+            .inputs()
+            .iter()
+            .copied()
+            .chain(output_sam.returns())
+            .enumerate()
+        {
+            let parent = if index < inputs_sam.inputs().len() {
+                inputs_parent
+            } else {
+                output_parent
+            };
+            let (child_index, _) = value.type_argument_projection()?;
+            let java_ty = crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                &parent.java_ty,
+                &[child_index],
+            )?;
+            let mut child = crate::shape_projection::storage_arg_shape_with_effective_facts(
+                java_ty, &effective,
+            );
+            crate::shape_projection::inherit_native_functional_value_domain(
+                &mut child, parent, value,
+            );
+            result.inherit_nested_collection_views(&child);
+            result.require_native_allocation_at(&[index], child.native_allocation);
+            for (path, placement) in child.nested_native_allocations {
+                let mut target = vec![index];
+                target.extend(path);
+                result.require_native_allocation_at(&target, placement);
+            }
+        }
+        return Some(result);
+    }
+    if let JavaType::Named { name: owner, .. } = &ty
+        && crate::stdlib::NativeFunctionalComposition::fixed_for_call(owner, name, args.len())
+            .is_some()
+    {
+        // A factory method returns a new callback with the receiver's carrier
+        // ABI, including synchronization. Source overrides may return null or
+        // an existing operand, so keep the nullable value contract separate
+        // from allocation identity.
+        let mut result = receiver;
+        result.java_ty = crate::types::optional_java_type(ty);
+        result.ownership = crate::slot_shape::OwnershipShape::Owned;
+        result.view = crate::slot_shape::ViewShape::Native;
+        result.dispatch = crate::slot_shape::DispatchShape::Concrete;
+        return Some(result);
+    }
     if (name != sam.method() && *name != crate::parser::to_snake_case(sam.method()))
         || args.len() != sam.inputs().len()
     {
@@ -2257,12 +2340,16 @@ pub(crate) fn native_functional_call_result_shape(
     let JavaType::Named { args, .. } = ty else {
         return None;
     };
-    Some(
-        crate::shape_projection::storage_arg_shape_with_effective_facts(
-            sam.return_type(&args)?,
-            &effective,
-        ),
-    )
+    let mut result = crate::shape_projection::storage_arg_shape_with_effective_facts(
+        sam.return_type(&args)?,
+        &effective,
+    );
+    crate::shape_projection::inherit_native_functional_value_domain(
+        &mut result,
+        &receiver,
+        sam.returns()?,
+    );
+    Some(result)
 }
 
 fn inherited_native_throwable_accessor_shape(
@@ -2556,6 +2643,18 @@ pub fn shape_env_for_method(
     } else {
         shape_env_for_type(ty, signatures)
     };
+    if ty.kind == crate::java_ir::TypeKind::Enum && !method.modifiers.contains(&Modifier::Static) {
+        env.bind_this_type(ty);
+        // `this` cannot be shadowed by a Java local. Its physical method
+        // receiver is a loan of the canonical singleton token, while enum
+        // initialization frames still own their current-instance value.
+        let mut receiver = RustSlotShape::for_storage(JavaType::Named {
+            name: ty.name.clone(),
+            args: Vec::new(),
+        });
+        receiver.ownership = crate::slot_shape::OwnershipShape::SharedBorrow;
+        env.insert_local_shape("this", receiver);
+    }
     seed_type_param_bounds(&mut env, &method.type_params, &method.type_param_bounds);
     insert_param_shapes(&mut env, &method.params, &method_signature.params());
     env
@@ -2923,7 +3022,11 @@ fn local_shape_for_declared_type<'a>(
     unique_local_plan_for_declared_type(locals, name, declared_ty).map(|local| local.shape())
 }
 
-fn insert_param_shapes(env: &mut ShapeEnv, source_params: &[Param], params: &[ParamPlan]) {
+pub(crate) fn insert_param_shapes(
+    env: &mut ShapeEnv,
+    source_params: &[Param],
+    params: &[ParamPlan],
+) {
     let access_names = crate::java_naming::source_binding_rust_names(
         source_params.iter().map(|param| param.source_name.as_str()),
     );
@@ -3012,7 +3115,10 @@ fn infer_field_access_shape(
             );
         }
     }
-    let receiver_ty = infer_expr_type(receiver, env.type_env());
+    // The physical receiver may reify a Java wildcard as a captured binder.
+    // Its stored fields use that binder too; substituting the nominal `?`
+    // here invents an invariant Field<Object> instead of Field<Capture>.
+    let receiver_ty = infer_expr_shape_with_context(receiver, env, ctx).java_ty;
     let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
     // A bounded parameter's fields use the declaring class's solved ABI, not
     // a fresh value shape inferred from the field's Java spelling. Retain the
@@ -3155,6 +3261,60 @@ fn planned_member_access_shape(
     .map(|plan| plan.shape().clone())
 }
 
+/// Select the inherited comparison of a concrete source enum, rather than a
+/// similarly named source overload. The enum representation supplies canonical
+/// declaration identity across imported and nested spellings. Shared by effect
+/// planning and lowering so the null-check boundary cannot drift between them.
+pub(crate) fn source_enum_comparison_operand_type(
+    receiver: &Expr,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&crate::java_ir::ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<JavaType> {
+    if !matches!(name, "compareTo" | "compare_to") {
+        return None;
+    }
+    let [argument] = args else { return None };
+    let representations = ctx.representations()?;
+    let enum_identity = |ty: &JavaType| {
+        let payload = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        let JavaType::Named { name, .. } = payload else {
+            return None;
+        };
+        let entry = representations.type_representation(&name)?;
+        matches!(
+            entry.representation(),
+            crate::representation::ObjectRepresentation::JavaEnum { .. }
+        )
+        .then(|| entry.java_name().to_string())
+    };
+    let owner = enum_identity(&infer_expr_shape_with_context(receiver, env, ctx).java_ty)?;
+    if let Some(call) = resolved
+        && enum_identity(&JavaType::Named {
+            name: call.declaring_type.clone(),
+            args: vec![],
+        })
+        .as_deref()
+            == Some(&owner)
+        && let [formal] = call.arg_target_types.as_slice()
+        && enum_identity(formal).as_deref() != Some(&owner)
+    {
+        return None;
+    }
+    if !matches!(argument, Expr::Literal(crate::java_ir::Literal::Null))
+        && enum_identity(&infer_expr_shape_with_context(argument, env, ctx).java_ty).as_deref()
+            != Some(&owner)
+    {
+        return None;
+    }
+    Some(JavaType::Named {
+        name: owner,
+        args: vec![],
+    })
+}
+
 fn infer_indexed_expr_shape(
     array: &Expr,
     env: &ShapeEnv,
@@ -3163,13 +3323,23 @@ fn infer_indexed_expr_shape(
 ) -> RustSlotShape {
     let array_shape =
         infer_expr_shape_with_context_and_external_index(array, env, ctx, external_index);
-    indexed_read_shape_for_access_with_facts(&array_shape, ctx.facts.unwrap_or(&FactSet::default()))
-        .unwrap_or_else(|| {
-            crate::shape_projection::indexed_read_shape_with_facts(
-                &array_shape,
-                ctx.facts.unwrap_or(&FactSet::default()),
-            )
-        })
+    let mut shape = indexed_read_shape_for_access_with_facts(
+        &array_shape,
+        ctx.facts.unwrap_or(&FactSet::default()),
+    )
+    .unwrap_or_else(|| {
+        crate::shape_projection::indexed_read_shape_with_facts(
+            &array_shape,
+            ctx.facts.unwrap_or(&FactSet::default()),
+        )
+    });
+    if let Some(representations) = ctx.representations {
+        crate::shape_projection::apply_source_interface_reference_dispatch(
+            &mut shape,
+            representations,
+        );
+    }
+    shape
 }
 
 fn infer_indexed_assignment_target_shape(
@@ -3301,6 +3471,28 @@ class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
             assert_eq!(
                 infer_assignment_target_shape_with_context(&access, &env, ctx),
                 Some(expected),
+            );
+        }
+
+        let captured = crate::parser::parse_hierarchy_type("BoundFieldHolder<Capture>");
+        env.insert_type_param_bound(
+            "Capture",
+            crate::parser::parse_hierarchy_type("BoundFieldVertex"),
+        );
+        env.insert_local_shape_with_java_type(
+            "captured",
+            RustSlotShape::for_storage(captured.clone()),
+            crate::parser::parse_hierarchy_type("BoundFieldHolder<?>"),
+        );
+        for field in ["item", "items"] {
+            let access = Expr::FieldAccess(Box::new(Expr::Var("captured".into())), field.into());
+            let expected = signatures
+                .field_shape_for_receiver_type(&captured, field)
+                .unwrap();
+            assert_eq!(infer_expr_shape_with_context(&access, &env, ctx), expected);
+            assert_eq!(
+                infer_assignment_target_shape_with_context(&access, &env, ctx),
+                Some(expected)
             );
         }
     }

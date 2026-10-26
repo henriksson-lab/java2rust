@@ -443,7 +443,7 @@ fn emit_expr_prec(
             )
         }
         RustExpr::Cast { expr, ty } => {
-            let rendered = emit_expr_prec(expr, 11, None, ExprChildSide::None);
+            let rendered = emit_expr_prec(expr, 11, Some("as"), ExprChildSide::Left);
             // A Rust integer literal takes its type from the cast target, so
             // `(byte) 200` rendered as `200 as i8` is rejected as out of range
             // and `(-1) as u32` negates an unsigned value. Java always casts a
@@ -672,7 +672,7 @@ fn emit_pattern(pattern: &RustPattern) -> String {
             enum_name,
             variant_name,
         } => {
-            format!("{enum_name}::{variant_name}(_)")
+            format!("{enum_name}::{variant_name}(..)")
         }
     }
 }
@@ -876,11 +876,12 @@ fn expr_needs_parentheses(
     child_side: ExprChildSide,
 ) -> bool {
     // A leading bare block in a statement-capable position is parsed as a
-    // completed statement, not the left operand of a following binary op.
+    // completed statement, not the operand of a following binary op or cast.
     // Shape/comment wrappers must not hide this grammar boundary.
     if parent_op.is_some() && matches!(child_side, ExprChildSide::Left) {
         match expr {
             RustExpr::Block { .. } | RustExpr::MarkedBlock { .. } => return true,
+            RustExpr::Raw(raw) if raw.trim_start().starts_with('{') => return true,
             RustExpr::Shaped { expr, .. } | RustExpr::PostfixComment { expr, .. } => {
                 return expr_needs_parentheses(expr, parent_prec, parent_op, child_side);
             }
@@ -1239,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_blocks_as_binary_left_operands_preserve_expression_grammar() {
+    fn staged_blocks_as_operator_operands_preserve_expression_grammar() {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let mut source = "pub fn check(ready: bool, value: i32) {".to_string();
@@ -1250,16 +1251,28 @@ mod tests {
         for left in [
             block.clone(),
             RustExpr::shaped(RustExprShape::PlainValue, block.clone()),
+            RustExpr::MarkedBlock {
+                marker: "/* staged */".into(),
+                expr: Box::new(block.clone()),
+            },
+            RustExpr::Raw("{ let staged = value; staged }".into()),
             RustExpr::PostfixComment {
                 expr: Box::new(block),
                 comment: " /* staged */".into(),
             },
         ] {
-            let emitted = emit_expr(&binary("+", left, RustExpr::Literal("1".into())));
+            let emitted = emit_expr(&binary("+", left.clone(), RustExpr::Literal("1".into())));
             assert!(emitted.starts_with("({"), "{emitted}");
             assert!(emitted.ends_with(") + 1"), "{emitted}");
             source.push_str(&format!(
                 "let _: i32 = if ready {{ 0 }} else {{ {emitted} }};"
+            ));
+            let cast = emit_expr(&RustExpr::Cast {
+                expr: Box::new(left),
+                ty: "f64".into(),
+            });
+            source.push_str(&format!(
+                "let _: f64 = if ready {{ 0.0 }} else {{ {cast} }};"
             ));
         }
         source.push('}');

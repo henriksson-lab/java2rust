@@ -680,9 +680,11 @@ fn expr_assigns_to_binding(expr: &Expr, binding_name: &str, binding_shadowed: bo
                         .any(|expr| expr_assigns_to_binding(expr, binding_name, binding_shadowed))
                 })
         }
-        Expr::FieldAccess(receiver, _) => {
-            expr_assigns_to_binding(receiver, binding_name, binding_shadowed)
-        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_assigns_to_binding(receiver, binding_name, binding_shadowed),
         Expr::ArrayAccess(array, index) => {
             expr_assigns_to_binding(array, binding_name, binding_shadowed)
                 || expr_assigns_to_binding(index, binding_name, binding_shadowed)
@@ -2676,6 +2678,7 @@ mod tests {
         let method = private_static_idless_method_with_body(vec![
             Stmt::Expr(Expr::Lambda {
                 params: vec![crate::java_ir::LambdaParam {
+                    binding: None,
                     name: "value".to_string(),
                     source_name: "value".to_string(),
                     ty: Some(JavaType::String),

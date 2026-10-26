@@ -958,7 +958,11 @@ fn collect_expr_reference_identity_equality_diagnostics(
         ));
     }
     match expr {
-        Expr::FieldAccess(receiver, _) => collect_expr_reference_identity_equality_diagnostics(
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => collect_expr_reference_identity_equality_diagnostics(
             receiver,
             env,
             facts,
@@ -1321,7 +1325,11 @@ fn stmt_reads_name(stmt: &Stmt, name: &str) -> bool {
 fn expr_reads_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Var(candidate) => candidate == name,
-        Expr::FieldAccess(receiver, _) => expr_reads_name(receiver, name),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_reads_name(receiver, name),
         Expr::ArrayAccess(array, index) => {
             expr_reads_name(array, name) || expr_reads_name(index, name)
         }

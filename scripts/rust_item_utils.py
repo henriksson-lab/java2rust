@@ -12,8 +12,15 @@ _MACRO_DEFINITION_RE = re.compile(
     r"^\s*macro_rules!\s*([A-Za-z_][A-Za-z0-9_]*)\s*[({[]"
 )
 _MACRO_INVOCATION_RE = re.compile(
-    r"^\s*([A-Za-z_][A-Za-z0-9_]*)!\s*[({[]"
+    r"^\s*((?:::)?[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)!\s*[({[]"
 )
+
+
+def _without_reference_prefixes(raw_type: str) -> str:
+    target = raw_type.strip()
+    while target.startswith("&"):
+        target = re.sub(r"^&\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?", "", target).lstrip()
+    return target
 
 
 def impl_target_name(raw_target: str) -> str:
@@ -23,12 +30,36 @@ def impl_target_name(raw_target: str) -> str:
     nominal owner: ``Comparator<T>`` and ``Comparator`` both belong to
     ``Comparator``.
     """
-    target = raw_target.strip()
-    while target.startswith("&"):
-        target = re.sub(r"^&\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?", "", target).lstrip()
-    target = target.removeprefix("dyn ")
-    outer_type = target.split("<", 1)[0].strip()
+    target = _without_reference_prefixes(raw_target).removeprefix("dyn ")
+    # Object lifetime and auto-trait bounds do not change a dyn target's
+    # nominal owner. Project them here for all stripping/reconciliation passes.
+    outer_type = target.split("<", 1)[0].split("+", 1)[0].strip()
     return outer_type.rsplit("::", 1)[-1]
+
+
+def is_dyn_trait_target(raw_target: str) -> bool:
+    return _without_reference_prefixes(raw_target).startswith("dyn ")
+
+
+def retained_carrier_target_name(raw_target: str):
+    """Project the nominal owner through identity-preserving shared wrappers.
+
+    A dyn object's lifetime/auto-trait bounds belong to its view, while the
+    underlying source trait still owns its coherence implementations.
+    """
+    target = _without_reference_prefixes(raw_target)
+    if target.startswith("dyn "):
+        return impl_target_name(target)
+    plain = re.fullmatch(r"(?:(?:[A-Za-z_][A-Za-z0-9_]*)::)*([A-Za-z_][A-Za-z0-9_]*)", target)
+    if plain:
+        return plain.group(1)
+    wrapped = re.fullmatch(r"(.+?)\s*<\s*(.+)\s*>", target)
+    if not wrapped:
+        return None
+    wrapper = wrapped.group(1).strip().rsplit("::", 1)[-1]
+    if wrapper not in {"Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock"}:
+        return impl_target_name(target)
+    return retained_carrier_target_name(wrapped.group(2))
 
 
 def _impl_header_layout(line: str):
@@ -162,9 +193,10 @@ def inherent_impl_target_name(line: str):
 
 
 @cache
-def _rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
+def rust_delimiter_scan(line: str, depths: tuple[int, int, int]):
     """Advance Rust (), [] and {} depths while ignoring literals/comments."""
     paren, bracket, brace = depths
+    statement_ends = []
     index = 0
     state = "code"
     while index < len(line):
@@ -204,6 +236,8 @@ def _rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
                 brace += 1
             elif ch == "}":
                 brace -= 1
+            elif ch == ";" and (paren, bracket, brace) == (0, 0, 0):
+                statement_ends.append(index)
             index += 1
             continue
         if state in {"string", "char"}:
@@ -219,7 +253,11 @@ def _rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
             index += 2
             continue
         index += 1
-    return paren, bracket, brace
+    return (paren, bracket, brace), tuple(statement_ends)
+
+
+def rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
+    return rust_delimiter_scan(line, depths)[0]
 
 
 @cache
@@ -240,7 +278,7 @@ def has_associated_definitions(impl_text: str) -> bool:
             line,
         ):
             return True
-        depths = _rust_delimiter_depths(line, depths)
+        depths = rust_delimiter_depths(line, depths)
     return False
 
 
@@ -262,7 +300,7 @@ def attached_outer_item_start(lines: list[str], start: int) -> int:
         candidate = index
         while candidate > 0:
             candidate -= 1
-            delta = _rust_delimiter_depths(lines[candidate], (0, 0, 0))
+            delta = rust_delimiter_depths(lines[candidate], (0, 0, 0))
             depths = tuple(left + right for left, right in zip(depths, delta))
             if depths == (0, 0, 0):
                 if lines[candidate].lstrip().startswith("#["):
@@ -294,7 +332,7 @@ def top_level_macro_items(text: str) -> list[dict]:
             depths = (0, 0, 0)
             end = index
             while end < len(lines):
-                depths = _rust_delimiter_depths(lines[end], depths)
+                depths = rust_delimiter_depths(lines[end], depths)
                 end += 1
                 if depths == (0, 0, 0):
                     break
@@ -309,6 +347,6 @@ def top_level_macro_items(text: str) -> list[dict]:
             )
             index = end
             continue
-        outer_depths = _rust_delimiter_depths(line, outer_depths)
+        outer_depths = rust_delimiter_depths(line, outer_depths)
         index += 1
     return items

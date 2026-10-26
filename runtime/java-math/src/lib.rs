@@ -17,8 +17,8 @@ pub fn rounding_mode_null_message() -> &'static str {
 }
 use immutable_reference::JavaImmutableReference;
 pub use integer::{
-    abs, add, bit_length, divide, flip_bit, gcd, get_lowest_set_bit, hash_code, negate, signum,
-    subtract,
+    abs, add, bit_length, divide, double_value, flip_bit, gcd, get_lowest_set_bit, hash_code,
+    int_value_exact, long_value_exact, negate, signum, subtract,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -181,6 +181,9 @@ impl BigDecimal {
     pub fn float_value(&self) -> f32 {
         decimal::float_value(self)
     }
+    pub fn to_big_integer(&self) -> Result<BigInteger, ArithmeticException> {
+        decimal::to_big_integer(self)
+    }
     pub fn scale(&self) -> i32 {
         self.scale
     }
@@ -230,6 +233,11 @@ pub fn decimal_divide_scaled(
     mode: RoundingMode,
 ) -> Result<BigDecimal, ArithmeticException> {
     value.borrow().divide_scaled(other, scale, mode)
+}
+pub fn decimal_to_big_integer(
+    value: impl Borrow<BigDecimal>,
+) -> Result<BigInteger, ArithmeticException> {
+    value.borrow().to_big_integer()
 }
 pub fn decimal_double_value(value: impl Borrow<BigDecimal>) -> f64 {
     value.borrow().double_value()
@@ -378,21 +386,29 @@ impl BigInteger {
     }
 
     pub fn shift_right(&self, distance: i32) -> Result<Self, ArithmeticException> {
-        if distance >= 0 {
-            Ok(Self::from_value(self.0.payload() >> distance as u32))
-        } else {
-            // unsigned_abs handles MIN_VALUE without an overflowing negation.
-            let distance = distance.unsigned_abs();
-            if self.0.bits() == 0 {
-                return Ok(Self::value_of(0));
-            }
-            if self.0.bits() + distance as u64 > Self::MAX_MAGNITUDE_BITS {
-                return Err(ArithmeticException(
-                    "BigInteger would overflow supported range",
-                ));
-            }
-            Self::checked(self.0.payload() << distance)
+        self.shift_magnitude(distance.unsigned_abs(), distance < 0)
+    }
+
+    pub fn shift_left(&self, distance: i32) -> Result<Self, ArithmeticException> {
+        self.shift_magnitude(distance.unsigned_abs(), distance >= 0)
+    }
+
+    fn shift_magnitude(&self, distance: u32, left: bool) -> Result<Self, ArithmeticException> {
+        if distance == 0 {
+            return Ok(self.clone());
         }
+        if !left {
+            return Ok(Self::from_value(self.0.payload() >> distance));
+        }
+        if self.0.bits() == 0 {
+            return Ok(Self::value_of(0));
+        }
+        if self.0.bits() + u64::from(distance) > Self::MAX_MAGNITUDE_BITS {
+            return Err(ArithmeticException(
+                "BigInteger would overflow supported range",
+            ));
+        }
+        Self::checked(self.0.payload() << distance)
     }
 
     pub fn mod_pow(
@@ -488,6 +504,13 @@ pub fn test_bit(value: impl Borrow<BigInteger>, index: i32) -> Result<bool, Arit
     value.borrow().test_bit(index)
 }
 
+pub fn shift_left(
+    value: impl Borrow<BigInteger>,
+    distance: i32,
+) -> Result<BigInteger, ArithmeticException> {
+    value.borrow().shift_left(distance)
+}
+
 pub fn shift_right(
     value: impl Borrow<BigInteger>,
     distance: i32,
@@ -508,6 +531,32 @@ mod tests {
 
     fn integer(value: &str) -> BigInteger {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn directional_shifts_share_sign_range_and_reference_contracts() {
+        for text in ["0", "3", "-9", "18446744073709551617"] {
+            let value = integer(text);
+            assert!(value.java_identity_eq(&value.shift_left(0).unwrap()));
+            assert!(value.java_identity_eq(&value.shift_right(0).unwrap()));
+            for distance in [-65, -4, -1, 0, 1, 4, 65] {
+                assert_eq!(
+                    value.shift_left(distance).unwrap(),
+                    value.shift_right(-distance).unwrap()
+                );
+            }
+        }
+        assert_eq!(integer("-9").shift_left(-1).unwrap(), integer("-5"));
+        assert_eq!(
+            integer("3").shift_left(64).unwrap(),
+            integer("55340232221128654848")
+        );
+        assert_eq!(integer("-9").shift_left(i32::MIN).unwrap(), integer("-1"));
+        assert_eq!(integer("0").shift_left(i32::MAX).unwrap(), integer("0"));
+        assert_eq!(
+            integer("2").shift_left(i32::MAX).unwrap_err().to_string(),
+            "BigInteger would overflow supported range"
+        );
     }
 
     #[test]

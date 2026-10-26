@@ -2,6 +2,26 @@
 mod common;
 
 #[test]
+fn canonical_list_views_survive_production_assembly() {
+    common::cargo_run_translated_batch_sources(
+        "canonical_list_view_assembly",
+        &[new_java2rust::BatchSource::new(
+            "SourceListProjection.java",
+            include_str!("fixtures/source_list_projection.java"),
+        )],
+        r#"
+trait Value { fn value(self) -> i32; }
+impl Value for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Value for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+fn main() {
+    assert_eq!(translated::SourceListProjection::live_read().value(), 47);
+    assert_eq!(translated::SourceListProjection::mutation_through_cast().value(), 28);
+}
+"#,
+    );
+}
+
+#[test]
 fn list_projection_crosses_generic_calls_without_losing_aliases() {
     let translation =
         new_java2rust::translate_source(include_str!("fixtures/list_projection_boundaries.java"));

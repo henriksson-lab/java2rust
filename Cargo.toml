@@ -14,3 +14,4 @@ path = "src/main.rs"
 [dependencies]
 tree-sitter = "=0.26.9"
 tree-sitter-java = "0.23.5"
+tree-sitter-rust = "=0.24.2"

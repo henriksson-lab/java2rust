@@ -30709,6 +30709,30 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             provenance: FactProvenance::BuiltinExternalModel,
         })
         .collect::<Vec<_>>();
+    for receiver in [
+        "SplittableRandom",
+        "java.util.SplittableRandom",
+        "JavaUtilSplittableRandom",
+    ] {
+        for method in ["nextInt", "next_int"] {
+            for arity in 1..=2 {
+                for index in 0..arity {
+                    facts.push(ExternalApiArgumentEffectFact {
+                        null_message_function: None,
+                        method_name: method.to_string(),
+                        receiver_type: Some(receiver.to_string()),
+                        arg_count: Some(arity),
+                        parameter_index: index,
+                        parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+                        parameter_nullability: NullabilityState::DefinitelyNonNull,
+                        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                        provenance: FactProvenance::BuiltinExternalModel,
+                    });
+                }
+            }
+        }
+    }
     for receiver_type in ["Comparator", "java.util.Comparator", "JavaUtilComparator"] {
         for method_name in [
             "comparingInt",
@@ -30798,6 +30822,31 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
                 alias_policy: ExternalArgumentAliasPolicy::Unknown,
                 provenance: FactProvenance::BuiltinExternalModel,
             });
+        }
+    }
+    for receiver_type in ["Arrays", "java.util.Arrays"] {
+        for (method_name, arities) in [
+            ("sort", &[1, 2, 3, 4][..]),
+            ("parallelSort", &[1, 2, 3, 4][..]),
+            ("parallel_sort", &[1, 2, 3, 4][..]),
+            ("fill", &[2, 4][..]),
+            ("setAll", &[2][..]),
+            ("set_all", &[2][..]),
+        ] {
+            for &arg_count in arities {
+                facts.push(ExternalApiArgumentEffectFact {
+                    null_message_function: None,
+                    method_name: method_name.into(),
+                    receiver_type: Some(receiver_type.into()),
+                    arg_count: Some(arg_count),
+                    parameter_index: 0,
+                    parameter_type: None,
+                    parameter_nullability: NullabilityState::DefinitelyNonNull,
+                    argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+                    alias_policy: ExternalArgumentAliasPolicy::Unknown,
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
+            }
         }
     }
     for receiver_type in [
@@ -32091,6 +32140,36 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    if matches!(
+        simple_receiver,
+        "SplittableRandom" | "JavaUtilSplittableRandom"
+    ) {
+        let (arity, (_, return_type, throws)) = (0..=2)
+            .filter(|arity| matches_arg_count(*arity))
+            .find_map(|arity| {
+            crate::stdlib::splittable_random_method(method_name, arity)
+                .map(|descriptor| (arity, descriptor))
+        })?;
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(arity),
+            parameter_patterns: None,
+            role: ExternalApiRole::Mutator,
+            receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: if throws {
+                vec![JavaType::Named {
+                    name: "IllegalArgumentException".to_string(),
+                    args: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            },
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if simple_receiver == "Properties" {
         let (expected_args, role, return_type, receiver_mutability, nullability) = match method_name
         {
@@ -33324,6 +33403,21 @@ pub fn java_platform_constructor_argument_effect_for(
     arg_count: usize,
     parameter_index: usize,
 ) -> Option<ExternalConstructorArgumentEffectFact> {
+    if crate::facts::external_type_name_matches(type_name, "java.util.SplittableRandom")
+        && arg_count == 1
+        && parameter_index == 0
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::Primitive(PrimitiveType::Long)),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if crate::facts::external_type_name_matches(type_name, "java.io.BufferedReader")
         && arg_count == 2
     {

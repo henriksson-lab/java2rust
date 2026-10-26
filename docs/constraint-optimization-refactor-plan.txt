@@ -1,0 +1,291 @@
+Constraint and optimization refactoring plan
+Date: 2026-10-26
+Status: proposed implementation plan; no implementation or new test runs in
+this planning task. Incorporates four parallel source reviews and user steering.
+Background: docs/constraint-optimization-review.txt.
+
+Objective
+
+Make general Java-to-Rust translation decisions explainable, consistent and
+cheap to compute. Repair translation problems caused by duplicated or conflicting
+policies while consolidating those policies. Add bounded heuristic CSP selection
+among supported Rust implementations, with hard semantic constraints and an
+additive cost objective. Preserve pinned Java sources; generated-code edits are
+diagnostic experiments only.
+
+Success means both better decisions and removal of superseded policy branches.
+Moving old exceptions into a new module is not sufficient. Each behavior change
+must name its semantic justification and cover its complete producer/storage/
+signature/consumer path. No claim of global optimality or universal correctness.
+
+Implementation principles
+
+- Reuse RustSlotShape, StoragePlacement, SignatureConstraint, SlotConversionPlan,
+  CloneRecoveryDecision, existing callable/binding keys and structural paths.
+- Semantic evidence, candidate eligibility, and selected implementation are
+  different state. Trial-dependent requirements never mutate base facts.
+- Hard constraints cannot be traded for a lower cost, regardless of weights.
+- Canonical heap allocation, handle ownership and borrowed view are distinct.
+  A handle copy preserves identity; payload cloning or allocating a new wrapper
+  need not. Java clone() is a separate operation from Rust reference copying.
+- Migrate one covered family end to end. Expose unsupported and ambiguous cases;
+  do not pretend a scoped validator proves the complete generated program.
+- Preserve public translation APIs and default output during instrumentation.
+  Enable semantic changes only after focused acceptance gates pass.
+
+Batch 1: establish concrete witnesses and a repair register
+
+Inspect representative generated output for existing focused fixtures. Add small
+source witnesses only where the current suite does not cover the discrepancy.
+Use existing saved corpus output for context; do not regenerate a large corpus
+just to begin this refactor.
+
+Investigate these source-confirmed inconsistencies; failures remain hypotheses
+until the witness reproduces them:
+
+1. reused_owned_value_needs_clone falls back to whole-callable use counts after
+   checking current liveness, while reused_owned_argument_needs_clone can trust
+   authoritative final-use information (src/lower.rs:65904, 65978, 66268).
+   Witness: earlier read followed by final return/store of a canonical handle.
+2. Subtype conversion and optional-argument paths duplicate related copy logic
+   (src/lower.rs:64313, 64339). Witness: reused source consumed by an upcast,
+   erasure, nullable construction or closed carrier conversion.
+3. Generic constructor/local movement accepts unknown use evidence in places
+   where other movement paths reject it (src/lower.rs:10245, 10293, 48759).
+4. recover_single_use_constructor_optional_move matches emitted Rust text and
+   removes a clone without checking single/final use (src/lower.rs:10265).
+   Witness: one generic constructor input assigned to two nullable fields;
+   follow with branch/loop reuse if needed to expose the reachable boundary.
+5. Native allocation facts can be added after signature saturation by generic
+   projection (src/signature.rs:12269; src/source_generic_allocations.rs:341).
+   Witness: generic declaration/instantiation/field/return chain with a retained
+   nested collection, using existing generic allocation regressions first.
+
+For each witness record actual source facts, required Rust rewrite, producer and
+consumer contracts, current decisions, shared root cause, and expected removals.
+If a witness does not fail or improve, document that and do not manufacture a fix.
+
+Gate: distinguish reproduced defects, proven redundant machinery, and untested
+suspicions. No broad diagnostic-count target replaces this audit.
+
+Batch 2: one value-transport policy, with concrete repairs
+
+Extract a shared need-copy-before-consume query, reusing MoveUseContext and
+LivenessAnalysis::binding_is_live_after (src/liveness.rs:270). Preserve three
+states: proven live, proven dead, unknown. Whole-callable use counts are fallback
+evidence only; earlier reads must not override a proved final use. Unknown alone
+is not permission to move. Include repeated reads in the same expression,
+materialized argument reuse, loops, catch/finally paths and lexical binding IDs.
+Statement presence by itself does not establish that the statement was analyzed.
+
+Consolidate the mapped value/argument/optional/subtype paths around existing
+CloneRecoveryDecision and conversion plans. Keep distinct outcomes for move,
+borrow carrier, canonical-reference copy, justified value clone and unsupported.
+Add a new enum only if the existing typed decisions cannot express the needed
+information; do not build another competing ownership vocabulary.
+
+Plan reference copying before any consuming conversion. Construction/wrapping
+and argument staging consume the selected action rather than independently
+adding/removing clones. Keep staging responsible for exactly-once evaluation,
+Java argument order and temporary lifetimes. Qualified Rust Clone must copy the
+canonical handle without invoking a source Java clone method.
+
+Replace constructor text-based clone removal with the typed transport decision.
+Remove superseded branches as their cases migrate. If a shared rule uncovers a
+translation defect in the same mechanism, fix it in this batch with its witness.
+Keep object storage, dispatch and emitted function ABI unchanged initially.
+
+Acceptance: reproduced failures fixed or unnecessary copies removed; required
+copies remain for later/repeated reads; unknown evidence never silently permits
+an invalid move. Generated compilation and Java/Rust behavior agree for the
+changed cases, including non-Clone payloads and shared alias mutation.
+
+Batch 3: canonical boundary contract view and scoped checker
+
+In parallel with batch 2, add a small internal plan-contract module. Suggested
+shape: a borrowed resolved view of finalized signatures, representations and
+facts, with read-only accessors and explicit coverage. Do not clone all plans or
+expose mutable maps. Reuse SignatureDependencyNode plus structural child path;
+pair local BindingId with its callable owner. Canonicalize owner aliases once.
+
+A boundary contract contains BOTH resolved endpoint shapes and generic
+instantiation/substitution context. Do not canonicalize a shape in isolation:
+concrete-native versus symbolic-generic conversion can depend on both endpoints
+(src/conversion_plan.rs:3590). Preserve implicit SAM versus explicit outer
+collection allocation distinctions.
+
+Initially check the explicitly modeled generic/initializer allocation edges and
+a bounded set of assignment/call/return boundaries:
+
+- Paths exist and address the intended native child position.
+- Selected placement meets shared/interior-mutability/sync obligations.
+- Collection family/view, nullable structure and directional projections agree.
+- An admitted SlotConversionPlan connects the instantiated endpoints.
+- Required reference identity is not discharged by a detached payload copy.
+
+Record checked, unsupported, and ambiguous identities. Store compact reason
+links for expensive or conflicting decisions: original slot/site, requirement,
+transfer rule and premises. Existing provenance categories alone are too coarse.
+
+Begin in an opt-in audit/test path. Conversion-plan consistency is not independent
+proof of its Java semantics; the negative and behavior tests remain necessary.
+
+Acceptance: checker catches deliberately mismatched endpoints and nested paths,
+handles shadowing/overloads/support aliases, and explains both originating
+choices. Existing valid checked paths pass; instrumentation does not change Rust.
+
+Batch 4: make finalization explicit and freeze the covered contracts
+
+Classify each late pass instead of moving every projection into a solver:
+
+- Hierarchy products: admitted derived artifacts; retain after signatures.
+- Inherited fields: declaration/substitution projection; tied or ambiguous
+  declaring-field identity must be visible as incomplete coverage.
+- Interface-reference projection: deterministic for fixed admission, but changes
+  dispatch/receivers. Check caller, trait and adapter contracts before freezing.
+- Generic allocation projection: adds requirements today and has an ancestor
+  fixed point. Represent those obligations using existing allocation edges;
+  after closure, the old projection must add nothing to covered contracts.
+
+Where the checker finds producer/consumer disagreement, replace the duplicated
+precedence/projection rule with a common resolved query and fix the regression.
+Retain context-specific rules only where they have different documented semantics.
+A pass being idempotent is not sufficient proof that it adds no new obligation.
+
+Introduce a private-constructor validated view for the covered native/boundary
+slice. Rendering/construction/conversion helpers consume it. Legacy entry points
+remain adapters during migration. Freeze access is enforced by API boundaries,
+not an immutable wrapper around independently recomputed decisions.
+
+Acceptance: generic obligations saturate before consumers finalize; no new
+allocation requirement appears afterward; mismatched consumers fail explicitly.
+Mapped legacy repair branches are removed. Unmodeled loan/reentry scheduling is
+not falsely certified by the type-contract checker.
+
+Batch 5: indexed allocation propagation without a semantic rewrite
+
+Can be prepared after batch 3, but switch production scheduling only after the
+consolidated contracts and reference comparisons are trustworthy.
+
+Start with propagate_source_generic_allocations (src/signature.rs:8281), reusing
+GenericAllocationEdge. Extract one pure path/argument-guard transfer used by both
+reference and indexed execution. Build dense IDs only for relevant slots, stable
+edge order, source-to-edge adjacency, watched allocation facts, dirty bits and
+work counters. No new whole-program graph is required.
+
+First call the indexed arm at its existing position in each global sweep. Read
+the pre-arm state, collect pending outputs in existing order and use existing
+insertion gates. Snapshot watched allocation facts at the arm boundary so writes
+from unmigrated global rules cannot be missed. Then consider local recursive
+closure only after equivalence holds. Remaining global arms still run until the
+combined system stabilizes; an empty local queue is not global convergence.
+
+Important constraints:
+
+- The existing signature state removes/rejects normalized constraints. It is not
+  a universally append-only fact database (src/signature.rs:11126). Do not add a
+  global insertion-only event bus until evidence and selection are separated or
+  changed revisions/removals are represented.
+- A rule queue needs pending-only deduplication, or revisioned events. Existing
+  saturate_worklist_with_seen deduplicates forever and cannot refire plain RuleId.
+- Future conditional transfers must watch every dynamic prerequisite, including
+  either endpoint's ListInterface view. Callback projections retain direction.
+- Do not enable the old SCC executor: it still rescans global usage per SCC.
+
+Acceptance: compare normalized facts, carrier/type state, final plans and
+sorted diagnostic content with the reference sweep. Include late enabling facts,
+cycles, guard rejection and distinct nested paths. Demonstrate less work through
+rule/slot counters and one representative timing, not repeated full corpora.
+Only remove state clones after actual mutation reporting covers every writer.
+
+Batch 6: bounded heuristic CSP selection
+
+Depends on batches 2-4. Indexed scheduling helps speed but is not a semantic
+prerequisite for this pilot. Keep allocation backend, heap layout and dispatch
+fixed. Initially admit internal resolved nonvirtual, nongeneric methods and
+supported canonical-handle boundaries. Keep public/foreign/virtual ABI pinned,
+returns owned, and exclude parameter rebinding or lifetime changes unless an
+existing explicit lowering recipe covers them.
+
+Model finite domains using existing shapes/transport actions, hard relational
+compatibility and explicit conversion recipes. Choices include owned-handle
+transport, borrowed carrier transport, move where final use is proved, and
+canonical-reference copy where ownership is required. Do not conflate &Rc/&Arc
+with a payload &T. A retaining callee may borrow its input and copy exactly where
+retained; a dead actual may be cheaper to move. Charge both sides.
+
+Use a backend-neutral problem interface with:
+
+- Fixed semantic evidence and eligibility/admission reasons.
+- Candidate variables, hard constraints and additive cost terms.
+- A selected assignment plus boundary action plan and validation result.
+- Explicit search budget, deterministic ordering and optimization statistics.
+
+Initial solver: prune unsupported candidates, validate a feasible incumbent,
+rank coupled groups by removable cost, and try cheaper assignments with bounded
+backtracking and constraint propagation. Check all incident boundaries before
+accepting a strict improvement. Trials are disposable and cannot contaminate
+base evidence or the incumbent. On budget exhaustion keep the validated plan;
+if no feasible plan exists, return an unsupported result rather than invalid code.
+
+Score resolved allocations, transport operations and adapters once at their
+modeled origin, reusing the existing weights where applicable. For fixed storage
+its cost cancels; count moves/copies/borrows and boundary conversions. Keep syntax
+cost auditing as a cross-check, not the optimizer's authority.
+
+Acceptance: a real audited simplification improves without changing parity,
+identity or ordering. Tiny exhaustive cases check heuristic solution quality;
+negative cases reject cheap invalid assignments. Search termination and
+repeatability are tested. If existing deterministic policy already solves the
+witness, report that and choose another evidenced decision rather than force CSP.
+
+ILP/CSP library integration is optional after this interface works. Small exact
+subproblems can be solved exhaustively first. Consider beam or neighborhood
+search only if bounded backtracking demonstrably misses useful improvements.
+Hard constraints remain exact even when optimization is heuristic.
+
+Later architectural repair batches, driven by reproduced cases
+
+- Scoped nominal/type-parameter identity: remove the global spelling-based
+  exclusion in storage_strategy.rs:791-805. Resolve declarations and binders in
+  lexical context, reusing JavaOwnerKey and existing scoped binder inventories.
+  This is an acknowledged correctness gap, not a weight-tuning opportunity.
+  Audit the smallest complete storage/resolution/rendering change before choosing
+  a new JavaType variant or an auxiliary resolved identity representation.
+  Ambiguous cases stay outside initial optimization coverage until repaired.
+- Callback/reentry effects: generalize SourceCallbackPlan and existing narrow
+  guard proofs into reusable effect contracts before coalescing guards or loans
+  across calls. Preserve separate reentrant JavaMonitor semantics.
+- Retained generic live views: generalize native reference projection only with
+  read/write, alias, runtime array-kind and exception-timing contracts. A detached
+  mapped collection is not an acceptable fix. This needs its own rewrite audit.
+- Finer nominal allocation contexts: pursue after scoped identity/escape flows
+  support different storage without breaking assignments or method ABI.
+
+Verification and delivery cadence
+
+Use existing tests as anchors: source_call_staging, shared_receiver_returns,
+shared_interface_references, receiver_identity, generic_producer_references,
+and signature native/generic allocation unit tests. Add missing witnesses for
+new behavior, not tests that merely mirror helper implementations.
+
+Cheap plan/unit checks while editing; batch generated compile/parity checks after
+coherent changes. One appropriate already-working corpus after the substantial
+semantic batch. Saved Jahmm failures are useful evidence, but unrelated known
+failures must not be mistaken for new regressions or a passing acceptance target.
+Run the complete required checks before declaring completion; no full corpus per
+individual patch and no exploratory benchmark campaign for an obvious clone win.
+
+Suggested parallel implementation boundaries:
+
+- Transport lane: batch 1 transport witnesses + batch 2, primarily lower.rs and
+  existing transport tests.
+- Contract lane: batch 1 allocation witnesses + batch 3, then batch 4 with one
+  owner of shared signature/representation integration edits.
+- Scheduling lane: prepare pure transfer/index tests independently, integrate
+  batch 5 through that signature owner to avoid concurrent conflicting edits.
+- Selection lane: batch 6 only after contract/transport interfaces are stable.
+
+At every batch boundary record removed policies, newly checked coverage, fixed
+witnesses, unchanged limitations and next dependency. Keep commits reviewable and
+avoid repeated monolithic compiler/corpus cycles.

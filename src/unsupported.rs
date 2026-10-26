@@ -12,6 +12,12 @@ pub(crate) fn compile_error_expr(message: &str) -> RustExpr {
     }
 }
 
+pub(crate) fn collection_array_destination_expr() -> RustExpr {
+    compile_error_expr(
+        "typed Collection.toArray requires an exact compatible fresh reference-array destination; destination identity and runtime component checks are not represented for this call",
+    )
+}
+
 /// A `compile_error!` at item position, for a refusal that has no expression or
 /// statement to attach to.
 pub(crate) fn compile_error_item_text(message: &str) -> String {

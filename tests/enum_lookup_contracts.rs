@@ -2,6 +2,22 @@
 mod common;
 
 #[test]
+fn enum_bounds_share_the_native_key_and_object_capabilities() {
+    common::verify_java_fixture_zero_contract(
+        "enum_bound_map",
+        "EnumBoundMapProbe",
+        "tests/fixtures/EnumBoundMapProbe.java",
+        include_str!("fixtures/EnumBoundMapProbe.java"),
+        r#"
+trait Exit { fn value(self) -> i32; }
+impl Exit for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Exit for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn enums() { assert_eq!(EnumBoundMapProbe::run().value(), 0); }
+"#,
+    );
+}
+
+#[test]
 fn merged_enum_lookup_uses_original_names_after_rust_name_disambiguation() {
     let sources = [
         (

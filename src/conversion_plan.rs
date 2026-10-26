@@ -456,6 +456,10 @@ pub enum DispatchCoercionPolicy {
     BoxDynTrait {
         trait_name: String,
     },
+    ReferenceDynTrait {
+        trait_name: String,
+        sync: bool,
+    },
     CloneBoxDynTrait {
         trait_name: String,
     },
@@ -1773,6 +1777,22 @@ pub fn ownership_coercion_policy_with_effective_facts(
             },
         };
     }
+    if matches!(actual.dispatch, DispatchShape::ReferenceDynTrait { .. })
+        && actual.dispatch == target.dispatch
+        && actual.java_ty == target.java_ty
+        && actual.view == target.view
+        && matches!(
+            actual.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+        && target.ownership == OwnershipShape::Owned
+    {
+        return OwnershipCoercionPolicy::RecoverOwnedWithClone {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: actual.java_ty.clone(),
+            },
+        };
+    }
     if actual.ownership == target.ownership {
         return OwnershipCoercionPolicy::NoOwnershipChange;
     }
@@ -2108,7 +2128,9 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         element_shape.view = ViewShape::Native;
     } else if matches!(
         element_shape.dispatch,
-        DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+        DispatchShape::DynTrait { .. }
+            | DispatchShape::BoxedDynTrait { .. }
+            | DispatchShape::ReferenceDynTrait { .. }
     ) {
         // A facade slot can already describe how the optional payload crosses
         // the boundary.  In particular, `Optional(Borrowed)` for an
@@ -2649,6 +2671,21 @@ pub fn dispatch_coercion_policy_with_facts(
             trait_name: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
         };
     }
+    if let (
+        DispatchShape::ReferenceDynTrait {
+            trait_name: source,
+            sync: left,
+        },
+        DispatchShape::ReferenceDynTrait {
+            trait_name: destination,
+            sync: right,
+        },
+    ) = (&actual.dispatch, &target.dispatch)
+        && left == right
+        && dyn_trait_rust_abi_matches(source, &actual.java_ty, destination, &target.java_ty, facts)
+    {
+        return DispatchCoercionPolicy::NoDispatchChange;
+    }
     if actual.dispatch == target.dispatch && actual.java_ty == target.java_ty {
         return DispatchCoercionPolicy::NoDispatchChange;
     }
@@ -2910,6 +2947,12 @@ pub fn dispatch_coercion_policy_with_facts(
                 trait_name: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
             }
         }
+        (DispatchShape::Concrete, DispatchShape::ReferenceDynTrait { trait_name, sync }) => {
+            DispatchCoercionPolicy::ReferenceDynTrait {
+                trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
+                sync: *sync,
+            }
+        }
         (DispatchShape::Concrete, DispatchShape::BoxedDynTrait { trait_name }) => {
             if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
                 return DispatchCoercionPolicy::EraseObject;
@@ -2943,6 +2986,11 @@ pub fn dispatch_coercion_policy_with_facts(
         ) if dyn_trait_names_match(actual_trait, target_trait) => {
             DispatchCoercionPolicy::CloneBoxDynTrait {
                 trait_name: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
+            }
+        }
+        (DispatchShape::ReferenceDynTrait { trait_name, .. }, DispatchShape::ErasedObject) => {
+            DispatchCoercionPolicy::CloneDynTraitToErasedObject {
+                trait_name: dyn_trait_rust_abi_path(trait_name, &actual.java_ty, facts),
             }
         }
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
@@ -3018,23 +3066,24 @@ pub fn dispatch_coercion_policy_with_facts(
                 }
             }
         }
-        (DispatchShape::BoxedDynTrait { .. }, DispatchShape::Concrete) => {
-            match runtime_type_target_policy(&target.java_ty) {
-                RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    DispatchCoercionPolicy::DowncastBoxedDynTrait {
-                        target_type: erased_runtime_target_type(target, target_type, facts),
-                        invalid_cast: InvalidCastPolicy::Panic,
-                    }
-                }
-                RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
-                    unsupported_dispatch_coercion_policy_with_fallback(
-                        actual,
-                        target,
-                        DispatchCoercionFallbackPolicy::MissingRuntimeTarget { java_ty },
-                    )
+        (
+            DispatchShape::BoxedDynTrait { .. } | DispatchShape::ReferenceDynTrait { .. },
+            DispatchShape::Concrete,
+        ) => match runtime_type_target_policy(&target.java_ty) {
+            RuntimeTypeTargetPolicy::Nominal { target_type } => {
+                DispatchCoercionPolicy::DowncastBoxedDynTrait {
+                    target_type: erased_runtime_target_type(target, target_type, facts),
+                    invalid_cast: InvalidCastPolicy::Panic,
                 }
             }
-        }
+            RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
+                unsupported_dispatch_coercion_policy_with_fallback(
+                    actual,
+                    target,
+                    DispatchCoercionFallbackPolicy::MissingRuntimeTarget { java_ty },
+                )
+            }
+        },
         (DispatchShape::ErasedObject, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
@@ -3563,6 +3612,7 @@ pub fn shape_coercion_plan_with_facts(
     // just as signature solving and type rendering do.
     fn canonical<'a>(
         shape: &'a RustSlotShape,
+        counterpart: &RustSlotShape,
         facts: &FactSet,
     ) -> std::borrow::Cow<'a, RustSlotShape> {
         let effective = EffectiveFacts::new(facts);
@@ -3575,30 +3625,45 @@ pub fn shape_coercion_plan_with_facts(
             && effective
                 .retained_native_collection_kind(&shape.java_ty)
                 .is_some();
-        if shape.native_allocation.shared()
-            && (shape.view == ViewShape::Slice || retained_view || native_sam)
-        {
-            let mut shape = shape.clone();
-            if shape.view == ViewShape::Slice || retained_view {
-                shape.view = ViewShape::Native;
+        let allocation = if native_sam {
+            if shape.native_allocation.sync() {
+                crate::storage_strategy::StoragePlacement::new(true, false, true)
+            } else {
+                Default::default()
             }
-            if native_sam {
-                // The shared callback handle is internal to the facade. Local
-                // alias requirements do not add another wrapper, but the
-                // synchronized tier is part of its actual callback ABI.
-                shape.native_allocation = if shape.native_allocation.sync() {
-                    crate::storage_strategy::StoragePlacement::new(true, false, true)
-                } else {
-                    Default::default()
-                };
-            }
-            std::borrow::Cow::Owned(shape)
+        } else if crate::slot_render::native_allocation_has_outer_carrier(
+            &shape.java_ty,
+            &effective,
+        ) || crate::slot_render::native_allocation_has_outer_carrier(
+            &counterpart.java_ty,
+            &effective,
+        ) {
+            // At a concrete native <-> symbolic generic boundary the
+            // abstract side's qualifier describes the instantiated carrier.
+            // Keep it for the same physical comparison as the concrete side.
+
+            shape.native_allocation
+        } else {
+            Default::default()
+        };
+        let view = if allocation.shared() && (shape.view == ViewShape::Slice || retained_view) {
+            ViewShape::Native
+        } else {
+            shape.view.clone()
+        };
+        if allocation != shape.native_allocation || view != shape.view {
+            let mut canonical = shape.clone();
+            canonical.native_allocation = allocation;
+            canonical.view = view;
+            std::borrow::Cow::Owned(canonical)
         } else {
             std::borrow::Cow::Borrowed(shape)
         }
     }
-    let actual = canonical(actual, facts);
-    let target = canonical(target, facts);
+    let canonical_actual = canonical(actual, target, facts);
+    let canonical_target = canonical(target, actual, facts);
+    let actual = canonical_actual;
+    let target = canonical_target;
     let actual = actual.as_ref();
     let target = target.as_ref();
     ShapeCoercionPlan::new(
@@ -4062,7 +4127,8 @@ pub fn instanceof_target_policy(target: &RustSlotShape, facts: &FactSet) -> Inst
         DispatchShape::DynTrait { trait_name } => InstanceOfTargetPolicy::DynTraitTarget {
             trait_name: trait_name.clone(),
         },
-        DispatchShape::BoxedDynTrait { trait_name } => {
+        DispatchShape::BoxedDynTrait { trait_name }
+        | DispatchShape::ReferenceDynTrait { trait_name, .. } => {
             InstanceOfTargetPolicy::BoxedDynTraitTarget {
                 trait_name: trait_name.clone(),
             }
@@ -4191,7 +4257,9 @@ pub fn plan_instanceof_check_with_facts(
         let element_shape = optional_element_slot_shape(actual, element_ty);
         if matches!(
             element_shape.dispatch,
-            DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+            DispatchShape::DynTrait { .. }
+                | DispatchShape::BoxedDynTrait { .. }
+                | DispatchShape::ReferenceDynTrait { .. }
         ) && matches!(target.dispatch, DispatchShape::Concrete)
         {
             return InstanceOfCheck::OptionalPayload {
@@ -4312,22 +4380,23 @@ pub fn plan_instanceof_check_with_facts(
                 }
             }
         }
-        (DispatchShape::BoxedDynTrait { .. }, DispatchShape::Concrete) => {
-            match runtime_type_target_policy(&target.java_ty) {
-                RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    return InstanceOfCheck::BoxedDynTraitType {
-                        target_type: erased_runtime_target_type(target, target_type, facts),
-                    };
-                }
-                RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
-                    return unsupported_instanceof_check(
-                        actual,
-                        target,
-                        InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty },
-                    );
-                }
+        (
+            DispatchShape::BoxedDynTrait { .. } | DispatchShape::ReferenceDynTrait { .. },
+            DispatchShape::Concrete,
+        ) => match runtime_type_target_policy(&target.java_ty) {
+            RuntimeTypeTargetPolicy::Nominal { target_type } => {
+                return InstanceOfCheck::BoxedDynTraitType {
+                    target_type: erased_runtime_target_type(target, target_type, facts),
+                };
             }
-        }
+            RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
+                return unsupported_instanceof_check(
+                    actual,
+                    target,
+                    InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty },
+                );
+            }
+        },
         (DispatchShape::ErasedObject, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
@@ -5769,6 +5838,51 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn interface_destination_generic_markers_require_a_physical_outer_carrier() {
+        let facts = FactSet::default();
+        for ty in [
+            JavaType::String,
+            crate::parser::parse_type("Payload"),
+            crate::parser::parse_type("T"),
+        ] {
+            let actual = RustSlotShape::for_storage(ty);
+            let mut target = actual.clone();
+            target.native_allocation =
+                crate::storage_strategy::StoragePlacement::new(true, true, true);
+            let plan = shape_coercion_plan_with_facts(&actual, &target, &facts);
+            assert_eq!(
+                plan.native_allocation(),
+                &NativeAllocationCoercionPolicy::Preserve
+            );
+        }
+        // An instantiated array retains its qualifier when the other side
+        // is still spelled as the source generic binder.
+        let mut array = RustSlotShape::for_storage(crate::parser::parse_type("int[]"));
+        array.native_allocation = crate::storage_strategy::StoragePlacement::new(true, true, true);
+        let mut symbolic = RustSlotShape::for_storage(crate::parser::parse_type("T"));
+        symbolic.native_allocation = array.native_allocation;
+        for (actual, target) in [(&array, &symbolic), (&symbolic, &array)] {
+            assert_eq!(
+                shape_coercion_plan_with_facts(actual, target, &facts).native_allocation(),
+                &NativeAllocationCoercionPolicy::Preserve
+            );
+        }
+        symbolic.native_allocation = Default::default();
+        assert!(matches!(
+            shape_coercion_plan_with_facts(&array, &symbolic, &facts).native_allocation(),
+            NativeAllocationCoercionPolicy::UnsupportedPlacementChange { .. }
+        ));
+        // A real mutable array allocation cannot silently change its carrier.
+        let actual = RustSlotShape::for_storage(crate::parser::parse_type("int[]"));
+        let mut target = actual.clone();
+        target.native_allocation = crate::storage_strategy::StoragePlacement::new(true, true, true);
+        assert!(matches!(
+            shape_coercion_plan_with_facts(&actual, &target, &facts).native_allocation(),
+            NativeAllocationCoercionPolicy::UnsupportedPlacementChange { .. }
+        ));
     }
 
     #[test]

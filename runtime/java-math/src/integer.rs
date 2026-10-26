@@ -4,6 +4,7 @@ use super::numeric_text::java_numeric_decimal_digit as decimal_digit;
 use super::{ArithmeticException, BigInteger, NumberFormatException};
 use num_bigint::{BigInt, Sign};
 use num_integer::Integer;
+use num_traits::ToPrimitive;
 use std::borrow::Borrow;
 
 impl BigInteger {
@@ -12,6 +13,44 @@ impl BigInteger {
     pub fn new(value: impl AsRef<[u16]>) -> Result<Self, NumberFormatException> {
         parse_decimal(value.as_ref())
     }
+
+    /// Java's sign/magnitude constructor copies unsigned big-endian octets.
+    /// The mapped argument boundary checks null before entering this method.
+    pub fn from_sign_magnitude(
+        signum: i32,
+        magnitude: &[i8],
+    ) -> Result<Self, NumberFormatException> {
+        let error = |message: &str| NumberFormatException(Some(message.encode_utf16().collect()));
+        let sign = match signum {
+            -1 => Sign::Minus,
+            0 => Sign::NoSign,
+            1 => Sign::Plus,
+            _ => return Err(error("Invalid signum value")),
+        };
+        if signum == 0 && magnitude.iter().any(|byte| *byte != 0) {
+            return Err(error("signum-magnitude mismatch"));
+        }
+        let bytes = magnitude.iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+        Ok(Self::from_value(BigInt::from_bytes_be(sign, &bytes)))
+    }
+    pub fn int_value_exact(&self) -> Result<i32, ArithmeticException> {
+        i32::try_from(self.0.payload())
+            .map_err(|_| ArithmeticException("BigInteger out of int range"))
+    }
+
+    pub fn long_value_exact(&self) -> Result<i64, ArithmeticException> {
+        i64::try_from(self.0.payload())
+            .map_err(|_| ArithmeticException("BigInteger out of long range"))
+    }
+
+    pub fn double_value(&self) -> f64 {
+        // The pinned backend retains discarded sticky bits before converting
+        // to IEEE nearest-even, including values wider than a machine word.
+        self.0
+            .to_f64()
+            .expect("BigInt to_f64 always yields a finite value or infinity")
+    }
+
     pub fn signum(&self) -> i32 {
         match self.0.sign() {
             Sign::Minus => -1,
@@ -168,6 +207,9 @@ macro_rules! unary_adapter {
         }
     };
 }
+unary_adapter!(int_value_exact, Result<i32, ArithmeticException>);
+unary_adapter!(long_value_exact, Result<i64, ArithmeticException>);
+unary_adapter!(double_value, f64);
 unary_adapter!(signum, i32);
 unary_adapter!(abs, BigInteger);
 unary_adapter!(negate, BigInteger);
@@ -200,6 +242,103 @@ mod tests {
 
     fn integer(value: &str) -> BigInteger {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn exact_number_conversions_check_signed_bounds() {
+        for value in [i32::MIN, -1, 0, 1, i32::MAX] {
+            assert_eq!(
+                BigInteger::value_of(i64::from(value))
+                    .int_value_exact()
+                    .unwrap(),
+                value
+            );
+        }
+        for value in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert_eq!(
+                BigInteger::value_of(value).long_value_exact().unwrap(),
+                value
+            );
+        }
+        for value in ["2147483648", "-2147483649"] {
+            assert_eq!(
+                integer(value).int_value_exact().unwrap_err().to_string(),
+                "BigInteger out of int range"
+            );
+        }
+        for value in ["9223372036854775808", "-9223372036854775809"] {
+            assert_eq!(
+                integer(value).long_value_exact().unwrap_err().to_string(),
+                "BigInteger out of long range"
+            );
+        }
+    }
+
+    #[test]
+    fn double_conversion_preserves_integer_rounding_and_wide_sticky_bits() {
+        for value in [
+            0,
+            1,
+            -1,
+            (1_i64 << 53) - 1,
+            1_i64 << 53,
+            (1_i64 << 53) + 1,
+            (1_i64 << 53) + 3,
+            i64::MIN,
+            i64::MAX,
+        ] {
+            assert_eq!(
+                BigInteger::value_of(value).double_value().to_bits(),
+                (value as f64).to_bits()
+            );
+        }
+        assert_eq!(
+            integer("18446744073709553665").double_value().to_bits(),
+            0x43f0000000000001
+        );
+        assert_eq!(
+            integer("-18446744073709553665").double_value().to_bits(),
+            0xc3f0000000000001
+        );
+    }
+
+    #[test]
+    fn sign_magnitude_copies_unsigned_octets_and_validates_zero_and_sign() {
+        for sign in [-1, 0, 1] {
+            for bytes in [&[][..], &[0][..], &[0, 0][..]] {
+                assert_eq!(
+                    BigInteger::from_sign_magnitude(sign, bytes).unwrap(),
+                    integer("0")
+                );
+            }
+        }
+        let mut bytes = [0, -128, 1];
+        let positive = BigInteger::from_sign_magnitude(1, &bytes).unwrap();
+        assert_eq!(positive, integer("32769"));
+        assert_eq!(
+            BigInteger::from_sign_magnitude(-1, &bytes).unwrap(),
+            integer("-32769")
+        );
+        bytes[1] = 0;
+        assert_eq!(positive, integer("32769"));
+        assert_eq!(
+            BigInteger::from_sign_magnitude(1, &[-1; 16]).unwrap(),
+            integer("340282366920938463463374607431768211455")
+        );
+        for sign in [i32::MIN, -2, 2, i32::MAX] {
+            assert_eq!(
+                BigInteger::from_sign_magnitude(sign, &[])
+                    .unwrap_err()
+                    .to_string(),
+                "Invalid signum value"
+            );
+        }
+        assert_eq!(
+            BigInteger::from_sign_magnitude(0, &[0, 1])
+                .unwrap_err()
+                .to_string(),
+            "signum-magnitude mismatch"
+        );
     }
 
     #[test]

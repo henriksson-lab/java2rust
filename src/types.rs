@@ -2,6 +2,50 @@ use std::collections::{HashMap, HashSet};
 
 use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt, WildcardBound};
 
+/// Locate symbolic owner binders structurally before actual-type substitution.
+/// Method/constructor binders shadow same-named owner binders.
+pub(crate) fn type_parameter_paths(
+    declared: &JavaType,
+    params: &[String],
+    shadows: &[String],
+) -> Vec<(usize, Vec<usize>)> {
+    fn visit(
+        ty: &JavaType,
+        prefix: &mut Vec<usize>,
+        params: &[String],
+        shadows: &[String],
+        out: &mut Vec<(usize, Vec<usize>)>,
+    ) {
+        let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        match ty {
+            JavaType::Named { name, args }
+                if args.is_empty() && !shadows.contains(&name) && params.contains(&name) =>
+            {
+                out.push((
+                    params.iter().position(|param| param == &name).unwrap(),
+                    prefix.clone(),
+                ));
+            }
+            JavaType::Named { args, .. } => {
+                for (index, arg) in args.iter().enumerate() {
+                    prefix.push(index);
+                    visit(arg, prefix, params, shadows, out);
+                    prefix.pop();
+                }
+            }
+            JavaType::Array(element) => {
+                prefix.push(0);
+                visit(&element, prefix, params, shadows, out);
+                prefix.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    visit(declared, &mut Vec::new(), params, shadows, &mut out);
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
     locals: HashMap<String, JavaType>,
@@ -16,11 +60,27 @@ pub struct TypeEnv {
     anonymous_this_fields: Option<HashMap<String, JavaType>>,
     type_fields: HashMap<(String, String), JavaType>,
     type_param_bounds: HashMap<String, Option<JavaType>>,
+    // Invocation-local wildcard captures have both an upper bound and an
+    // optional lower bound. Ordinary Java type parameters have no lower bound.
+    inference_capture_lower_bounds: HashMap<String, Option<JavaType>>,
     static_type_aliases: HashMap<String, String>,
     // Shared across lexical environment clones: emission ownership is a
     // batch invariant, not a per-expression map to rebuild or deep-copy.
     source_emission: Option<std::sync::Arc<crate::source_emission::SourceEmissionPlan>>,
     static_member_imports: HashMap<String, String>,
+}
+
+pub(crate) enum MethodReferenceValueBinding<'a> {
+    Local(String, &'a JavaType),
+    Field(String, &'a JavaType),
+}
+
+impl MethodReferenceValueBinding<'_> {
+    pub(crate) fn java_type(&self) -> &JavaType {
+        match self {
+            Self::Local(_, ty) | Self::Field(_, ty) => ty,
+        }
+    }
 }
 
 impl TypeEnv {
@@ -161,7 +221,29 @@ impl TypeEnv {
         name: impl Into<String>,
         bound: Option<JavaType>,
     ) {
-        self.type_param_bounds.insert(name.into(), bound);
+        let name = name.into();
+        self.inference_capture_lower_bounds.remove(&name);
+        self.type_param_bounds.insert(name, bound);
+    }
+
+    pub(crate) fn insert_inference_capture(
+        &mut self,
+        name: String,
+        upper: JavaType,
+        lower: Option<JavaType>,
+    ) {
+        self.type_param_bounds.insert(name.clone(), Some(upper));
+        self.inference_capture_lower_bounds.insert(name, lower);
+    }
+
+    pub(crate) fn is_inference_capture(&self, name: &str) -> bool {
+        self.inference_capture_lower_bounds.contains_key(name)
+    }
+
+    pub(crate) fn inference_capture_lower_bound(&self, name: &str) -> Option<&JavaType> {
+        self.inference_capture_lower_bounds
+            .get(name)
+            .and_then(Option::as_ref)
     }
 
     pub fn insert_static_type_alias(
@@ -206,6 +288,34 @@ impl TypeEnv {
                     self.locals.get(&format!("r#{name}"))
                 }
             })
+    }
+
+    /// Exact Java value bindings shadow types. A normalized compatibility
+    /// spelling must never manufacture that shadowing for a known type owner.
+    /// Share the same namespace decision between selection, effects and emit.
+    pub(crate) fn method_reference_value_binding(
+        &self,
+        target: &str,
+        known_type_owner: bool,
+    ) -> Option<MethodReferenceValueBinding<'_>> {
+        let lookup = |name: &str| {
+            self.local_type(name)
+                .map(|ty| MethodReferenceValueBinding::Local(name.to_string(), ty))
+                .or_else(|| {
+                    self.field_type_exact(name)
+                        .map(|ty| MethodReferenceValueBinding::Field(name.to_string(), ty))
+                })
+        };
+        if let Some(binding) = lookup(target) {
+            return Some(binding);
+        }
+        if known_type_owner || self.static_type_alias(target).is_some() {
+            return None;
+        }
+        let normalized = crate::parser::to_snake_case(target);
+        (normalized != target)
+            .then(|| lookup(&normalized))
+            .flatten()
     }
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
@@ -617,10 +727,16 @@ pub fn sequence_mutation_element_type(java_ty: &JavaType) -> Option<JavaType> {
 /// native carriers (for example `List<T>`) into erased objects.  Contravariant
 /// `? super T` does not have that property and therefore remains unchanged.
 pub fn generic_read_type(ty: &JavaType) -> JavaType {
-    match ty {
-        JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => bound.as_ref().clone(),
-        _ => ty.clone(),
+    generic_read_type_ref(ty).clone()
+}
+
+/// Borrowed form of the same read projection for representation decisions.
+/// This projects one value, never reinterprets an invariant container.
+pub(crate) fn generic_read_type_ref(mut ty: &JavaType) -> &JavaType {
+    while let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
+        ty = bound;
     }
+    ty
 }
 
 /// Read a generic reference slot without discarding its solved null carrier.

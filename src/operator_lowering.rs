@@ -354,6 +354,8 @@ fn integer_wrapping_method_projection(left: RustExpr, method: &str, right: RustE
 }
 
 fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
+    // Platform/source constants can arrive as raw leaves. The same exact
+    // integer-literal predicate and promotion rule apply to both producers.
     match expr {
         RustExpr::Grouped(expr) => {
             RustExpr::Grouped(Box::new(integer_wrapping_receiver_expr(*expr, primitive)))
@@ -368,18 +370,22 @@ fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> R
             }
             .into(),
         },
-        RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
-            integer_wrapping_receiver_literal_expr(None, rendered, primitive)
+        RustExpr::Literal(rendered) | RustExpr::Raw(rendered)
+            if integer_wrapping_receiver_is_literal(rendered.trim()) =>
+        {
+            integer_wrapping_receiver_literal_expr(None, rendered.trim().to_string(), primitive)
         }
-        RustExpr::Unary { op, expr } if op == "-" => match *expr {
-            RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
-                integer_wrapping_receiver_literal_expr(Some("-"), rendered, primitive)
+        RustExpr::Unary { op, expr } if op == "-" => {
+            match recover_parseable_raw_operand_projection(*expr) {
+                RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
+                    integer_wrapping_receiver_literal_expr(Some("-"), rendered, primitive)
+                }
+                other => RustExpr::Unary {
+                    op,
+                    expr: Box::new(other),
+                },
             }
-            other => RustExpr::Unary {
-                op,
-                expr: Box::new(other),
-            },
-        },
+        }
         other => other,
     }
 }
@@ -387,6 +393,22 @@ fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> R
 #[cfg(test)]
 mod numeric_receiver_tests {
     use super::*;
+
+    #[test]
+    fn raw_constant_receivers_reuse_java_integer_promotion() {
+        for (primitive, suffix) in [(PrimitiveType::Int, "i32"), (PrimitiveType::Long, "i64")] {
+            for value in ["8", "-1"] {
+                let lowered = lower_numeric_binary_expr(
+                    BinaryOp::Mul,
+                    RustExpr::raw_leaf(value),
+                    RustExpr::Literal("2".into()),
+                    NumericBinaryPromotionPlan::identity(primitive),
+                );
+                let rendered = crate::emit::emit_expr(&lowered);
+                assert!(rendered.contains(&format!("{value}{suffix}")), "{rendered}");
+            }
+        }
+    }
 
     #[test]
     fn conditional_integer_receivers_use_the_java_promotion_type() {
@@ -779,7 +801,7 @@ fn plan_canonical_equality_comparison(
         {
             EqualityComparisonPlan::LeftOptionalByRef
         }
-        _ if left.java_ty == right.java_ty
+        _ if java_types_match_for_equality(&left.java_ty, &right.java_ty)
             && left.ownership == OwnershipShape::SharedBorrow
             && right.ownership != OwnershipShape::SharedBorrow =>
         {

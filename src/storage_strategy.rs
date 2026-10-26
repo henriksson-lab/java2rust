@@ -189,6 +189,37 @@ class Factory { static Item make() { return new Worker(); } }
             StorageStrategy::SharedSync,
         );
     }
+    #[test]
+    fn static_interface_storage_reaches_inherited_implementors_and_payloads() {
+        let source = r#"
+interface Parent { int get(); }
+interface Child extends Parent {}
+class Payload { int value; }
+class Concrete implements Child {
+    final Payload payload = new Payload();
+    public int get() { return payload.value; }
+}
+class Other implements Parent { public int get() { return 7; } }
+class Holder {
+    static final Holder DEFAULT = new Holder();
+    final Parent value = make();
+    static Parent make() { return new Concrete(); }
+}
+"#;
+        for (source, expected) in [
+            (source.to_string(), true),
+            (
+                source.replace("static final Holder DEFAULT = new Holder();", ""),
+                false,
+            ),
+        ] {
+            let parsed = parse_java_source(&source);
+            let reachable = statically_reachable_source_type_names(&parsed.program);
+            for name in ["Concrete", "Other", "Payload"] {
+                assert_eq!(reachable.contains(name), expected, "{name}: {reachable:?}");
+            }
+        }
+    }
 }
 
 impl StorageStrategy {
@@ -923,38 +954,11 @@ fn plan_storage_strategies_with_facts(
             &mut callback_roots,
         );
     }
-    // A native facade retains its implementing object just as a lambda
+    // An interface view retains its implementing object just as a lambda
     // retains captures. Include this hidden edge before the same transitive
     // field walk, so nested payloads use the canonical synchronized tier too.
-    fn collect_native_implementor_edges(
-        ty: &TypeDecl,
-        program: &Program,
-        callbacks: &BTreeSet<String>,
-        fields: &mut BTreeMap<String, Vec<String>>,
-    ) {
-        if ty.kind == TypeKind::Class {
-            for callback in callbacks {
-                if source_type_reaches_interface_value(
-                    ty,
-                    program,
-                    &BTreeSet::from([callback.clone()]),
-                    &mut BTreeSet::new(),
-                ) {
-                    fields
-                        .entry(callback.clone())
-                        .or_default()
-                        .push(ty.name.clone());
-                }
-            }
-        }
-        for member in &ty.members {
-            if let Member::Type(nested) = member {
-                collect_native_implementor_edges(nested, program, callbacks, fields);
-            }
-        }
-    }
     for ty in &program.types {
-        collect_native_implementor_edges(ty, program, &native_callbacks, &mut callback_fields);
+        collect_interface_implementor_storage_edges(ty, program, &interfaces, &mut callback_fields);
     }
     if let Some(facts) = facts {
         for owner in &facts.captures.owners {
@@ -1671,6 +1675,35 @@ fn collect_inner_outer_capture_storage_requirements(
     }
 }
 
+/// A source interface and a native facade both retain their implementing object.
+fn collect_interface_implementor_storage_edges(
+    ty: &TypeDecl,
+    program: &Program,
+    callbacks: &BTreeSet<String>,
+    fields: &mut BTreeMap<String, Vec<String>>,
+) {
+    if ty.kind == TypeKind::Class {
+        for callback in callbacks {
+            if source_type_reaches_interface_value(
+                ty,
+                program,
+                &BTreeSet::from([callback.clone()]),
+                &mut BTreeSet::new(),
+            ) {
+                fields
+                    .entry(callback.clone())
+                    .or_default()
+                    .push(ty.name.clone());
+            }
+        }
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_interface_implementor_storage_edges(nested, program, callbacks, fields);
+        }
+    }
+}
+
 /// Types a Java `static` field can reach, transitively through fields.
 ///
 /// A `static` in Rust must be `Sync`, and a Java `static` is now a process-wide
@@ -1681,10 +1714,23 @@ fn collect_inner_outer_capture_storage_requirements(
 fn static_reachable_type_names(program: &Program, declared: &BTreeSet<String>) -> BTreeSet<String> {
     let mut fields_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut reachable = BTreeSet::new();
+    let mut interfaces = BTreeSet::new();
     for ty in &program.types {
-        collect_static_reachability_edges(ty, declared, &mut fields_of, &mut reachable);
+        collect_interface_type_names(ty, &mut interfaces);
+    }
+    // An interface field retains its concrete Java object. Keep that edge
+    // inside the ordinary reachability graph, including when the requested
+    // storage inventory itself contains only concrete classes.
+    let mut reachable_declared = declared.clone();
+    reachable_declared.extend(interfaces.iter().cloned());
+    for ty in &program.types {
+        collect_static_reachability_edges(ty, &reachable_declared, &mut fields_of, &mut reachable);
+        collect_interface_implementor_storage_edges(ty, program, &interfaces, &mut fields_of);
     }
     storage_reachability(fields_of, reachable)
+        .into_iter()
+        .filter(|name| declared.contains(name))
+        .collect()
 }
 
 fn storage_reachability(
@@ -2928,6 +2974,10 @@ fn collect_anonymous_body_facts_from_expr(
             collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
             collect_anonymous_body_facts_from_expr(receiver, owner, program, declared, locals, into)
@@ -3462,6 +3512,10 @@ fn mark_captures_in_expr(
     match expr {
         Expr::Var(name) => mark_captured_local(name, owner, declared, outer_locals, bound, into),
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {

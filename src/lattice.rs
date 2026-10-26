@@ -62,7 +62,7 @@ pub(crate) fn dispatch_shape_lattice_rank(requirement: &DispatchShape) -> u8 {
     match requirement {
         DispatchShape::Concrete => 50,
         DispatchShape::ErasedObject => 40,
-        DispatchShape::BoxedDynTrait { .. } => 30,
+        DispatchShape::BoxedDynTrait { .. } | DispatchShape::ReferenceDynTrait { .. } => 30,
         DispatchShape::ClosedEnum { .. } | DispatchShape::DynTrait { .. } => 20,
     }
 }

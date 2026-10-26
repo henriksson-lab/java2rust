@@ -361,7 +361,11 @@ fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
         | Expr::Super
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
-        Expr::FieldAccess(receiver, _) => qualify_java_sql_expr(receiver, imported),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => qualify_java_sql_expr(receiver, imported),
         Expr::ArrayAccess(array, index) => {
             qualify_java_sql_expr(array, imported);
             qualify_java_sql_expr(index, imported);
@@ -2688,6 +2692,7 @@ fn parse_lambda_node(node: tree_sitter::Node, source: &str) -> Expr {
 fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam> {
     match node.kind() {
         "identifier" => vec![LambdaParam {
+            binding: None,
             name: to_snake_case(text(node, source)),
             source_name: expression_identifier_name(text(node, source)),
             ty: None,
@@ -2696,6 +2701,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
             .into_iter()
             .filter(|child| child.kind() == "identifier")
             .map(|id| LambdaParam {
+                binding: None,
                 name: to_snake_case(text(id, source)),
                 source_name: expression_identifier_name(text(id, source)),
                 ty: None,
@@ -2704,6 +2710,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
         "formal_parameters" => parse_params_node(node, source)
             .into_iter()
             .map(|param| LambdaParam {
+                binding: None,
                 name: param.name,
                 source_name: param.source_name,
                 ty: Some(param.ty),
@@ -2716,10 +2723,28 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
 fn parse_method_reference_node(node: tree_sitter::Node, source: &str) -> Expr {
     let raw = text(node, source);
     let (target, method) = raw
-        .split_once("::")
+        .rsplit_once("::")
         .map(|(target, method)| (target.trim().to_string(), method.trim().to_string()))
         .unwrap_or_else(|| (raw.to_string(), "unknown".to_string()));
-    Expr::MethodReference { target, method }
+    let receiver = (method != "new")
+        .then(|| named_children(node).into_iter().next())
+        .flatten()
+        .filter(|node| {
+            !matches!(
+                node.kind(),
+                "identifier"
+                    | "type_identifier"
+                    | "scoped_type_identifier"
+                    | "generic_type"
+                    | "array_type"
+            )
+        })
+        .map(|node| Box::new(parse_expr_node(node, source)));
+    Expr::MethodReference {
+        target,
+        method,
+        receiver,
+    }
 }
 
 fn parse_arg_list(node: tree_sitter::Node, source: &str) -> Vec<Expr> {
@@ -3069,6 +3094,16 @@ fn parse_hierarchy_type_text(src: &str) -> JavaType {
         .trim_start_matches("extends")
         .trim_start_matches("implements")
         .trim();
+    if let Some(bound) = src.strip_prefix("? extends ") {
+        return JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(
+            parse_hierarchy_type_text(bound),
+        ))));
+    }
+    if let Some(bound) = src.strip_prefix("? super ") {
+        return JavaType::Wildcard(Some(WildcardBound::Super(Box::new(
+            parse_hierarchy_type_text(bound),
+        ))));
+    }
     if let Some(inner) = src.strip_suffix("[]") {
         return JavaType::Array(Box::new(parse_hierarchy_type_text(inner)));
     }
@@ -3080,8 +3115,17 @@ fn parse_hierarchy_type_text(src: &str) -> JavaType {
             name,
             args: split_top_level_commas(inner)
                 .into_iter()
-                .map(|part| parse_type_text(part.trim()))
+                .map(|part| parse_hierarchy_type_text(part.trim()))
                 .collect(),
+        };
+    }
+    // A hierarchy edge retains its qualified owner with or without type
+    // arguments. Dropping the package only for a non-generic edge confuses
+    // foreign/source parents with same-leaf native interfaces.
+    if src.contains('.') {
+        return JavaType::Named {
+            name: src.to_string(),
+            args: Vec::new(),
         };
     }
     parse_type_text(src)
@@ -3177,6 +3221,14 @@ fn java_type_name_suffix(src: &str) -> String {
 }
 
 fn preserve_explicit_runtime_type_name(src: &str) -> bool {
+    // The same intrinsic carrier registry owns both clone semantics and
+    // qualification. Do not erase a platform owner before lexical binding.
+    if src.starts_with("java.")
+        && crate::stdlib::NATIVE_SHARED_REFERENCE_TYPES
+            .contains(&crate::stdlib::canonical_external_receiver_type_key(src).as_str())
+    {
+        return true;
+    }
     // A qualified platform exception must remain distinct from a lexical
     // source declaration with the same leaf name, through resolution.
     if crate::stdlib::jdk_exception_binary_name(src).is_some_and(|binary| binary == src) {
@@ -3189,7 +3241,9 @@ fn preserve_explicit_runtime_type_name(src: &str) -> bool {
     // merely a source overload. Retain non-platform owners too, including
     // javax-prefixed source names that the general name shortening excludes.
     if src.rsplit_once('.').is_some_and(|(_, name)| {
-        name == "Object" || crate::java_append_plan::NATIVE_BUILDER_TYPES.contains(&name)
+        name == "Object"
+            || name == "ByteBuffer"
+            || crate::java_append_plan::NATIVE_BUILDER_TYPES.contains(&name)
     }) {
         return true;
     }
@@ -3724,6 +3778,36 @@ fn java_type_suffix_name(name: &str) -> String {
 
 #[cfg(test)]
 mod naming_tests {
+    #[test]
+    fn hierarchy_arguments_preserve_qualified_arrays_and_wildcard_bounds() {
+        use super::*;
+        let named = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![],
+        };
+        let expected = JavaType::Named {
+            name: "root.Contract".into(),
+            args: vec![
+                JavaType::Array(Box::new(named("left.Value"))),
+                JavaType::Named {
+                    name: "right.Box".into(),
+                    args: vec![JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(
+                        JavaType::Array(Box::new(named("left.Value"))),
+                    ))))],
+                },
+                JavaType::Wildcard(Some(WildcardBound::Super(Box::new(named("right.Value"))))),
+            ],
+        };
+        let parsed = parse_hierarchy_type(
+            "root.Contract<left.Value[], right.Box<? extends left.Value[]>, ? super right.Value>",
+        );
+        assert_eq!(parsed, expected);
+        assert_eq!(
+            parse_hierarchy_type(&crate::java_type_substitution::java_type_text(&parsed)),
+            expected
+        );
+    }
+
     #[test]
     fn explicit_java_lang_object_retains_its_owner_before_source_resolution() {
         use super::*;

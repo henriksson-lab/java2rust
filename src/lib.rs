@@ -7,6 +7,7 @@ mod array_plan;
 pub mod binding_id;
 pub mod call_lowering;
 pub mod call_plan;
+pub mod representation_cost;
 
 /// Producer-owned runtime snippets needed by package assemblers as well as
 /// individual translation units. Assemblers must not maintain forked bodies.
@@ -83,6 +84,7 @@ mod java_utf16_string {
     };
     include!("java_utf16_string.rs");
 }
+mod hierarchy_products;
 mod java_type_substitution;
 mod javalibs;
 mod lattice;
@@ -108,6 +110,7 @@ mod representation_lowering;
 pub mod resolve;
 pub mod resolver_benchmark;
 pub mod rewrite;
+mod runtime_class;
 pub mod rust_ir;
 pub mod semantic_analysis;
 pub mod shape_projection;
@@ -118,6 +121,8 @@ pub mod slot_shape;
 mod source_callbacks;
 mod source_constant_values;
 mod source_emission;
+mod source_generic_allocations;
+mod source_interface_refs;
 mod statement_render;
 pub mod stdlib;
 pub mod storage_strategy;
@@ -1106,7 +1111,8 @@ fn build_batch_translation_context(
         "representation::plan_representations",
     );
     let representation_start = Instant::now();
-    let representations = representation::plan_representations(&support_program, &semantic.facts);
+    let mut representations =
+        representation::plan_representations(&support_program, &semantic.facts);
     representations.project_source_hierarchy_carriers_into_facts(&mut semantic.facts);
     timings.global_representation_ms = representation_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -1145,6 +1151,8 @@ fn build_batch_translation_context(
         );
     timings.global_signature_ms = signature_start.elapsed().as_millis();
     let (signature_plan, signature_profile) = profiled_signatures.into_parts();
+    representations.source_generic_allocations = signature_plan.source_generic_allocations.clone();
+    representations.install_hierarchy_products(&support_program, &signature_plan);
     analysis_profile.signature = signature_profile;
     emit_batch_phase_progress(
         event_sink,
@@ -1955,6 +1963,7 @@ fn qualify_duplicate_program_type_names(programs: &mut [&mut Program]) {
     let mut occupied_rust_names: BTreeMap<String, String> =
         crate::java_append_plan::NATIVE_BUILDER_TYPES
             .into_iter()
+            .chain(["ByteBuffer"])
             .map(|name| (name.to_string(), format!("<native runtime {name}>")))
             .collect();
     for index in order {
@@ -2000,11 +2009,24 @@ fn qualify_duplicate_program_type_names(programs: &mut [&mut Program]) {
             rewrite_type_references_in_program(program, &old_source_name, &change.planned_name);
         }
         if !change.package.is_empty() && !change.old_name.contains('.') {
-            rewrite_type_references_in_program(
-                programs[change.program_index],
-                &change.old_name,
-                &change.planned_name,
-            );
+            for program in programs.iter_mut() {
+                let explicit_import = program.imports.iter().find(|import| {
+                    !import.is_static
+                        && !import.is_wildcard
+                        && import.path.rsplit('.').next() == Some(change.old_name.as_str())
+                });
+                let visible = explicit_import.map_or_else(
+                    || program.package.as_deref() == Some(change.package.as_str()),
+                    |import| import.path == old_source_name,
+                );
+                if visible {
+                    rewrite_type_references_in_program(
+                        program,
+                        &change.old_name,
+                        &change.planned_name,
+                    );
+                }
+            }
         }
     }
 }
@@ -2042,9 +2064,17 @@ fn rewrite_type_references_in_program(program: &mut Program, old_name: &str, new
 }
 
 fn qualify_type_references_in_type_with_name(ty: &mut TypeDecl, old_name: &str, new_name: &str) {
+    if !old_name.contains('.')
+        && (ty.type_params.iter().any(|param| param == old_name) || ty.name == old_name)
+    {
+        return;
+    }
     rewrite_type_name_in_string_option(&mut ty.extends, old_name, new_name);
     for implemented in &mut ty.implements {
         rewrite_type_name_in_string(implemented, old_name, new_name);
+    }
+    for permitted in &mut ty.permits {
+        rewrite_type_name_in_string(permitted, old_name, new_name);
     }
     for bound in &mut ty.type_param_bounds {
         rewrite_type_name_in_java_type_option(bound, old_name, new_name);
@@ -2057,11 +2087,6 @@ fn qualify_type_references_in_type_with_name(ty: &mut TypeDecl, old_name: &str, 
     }
 }
 
-fn qualify_type_references_in_type(ty: &mut TypeDecl, old_name: &str) {
-    let new_name = ty.name.clone();
-    qualify_type_references_in_type_with_name(ty, old_name, &new_name);
-}
-
 fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &str) {
     match member {
         Member::Field(field) => {
@@ -2071,7 +2096,13 @@ fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &s
             }
         }
         Member::Method(method) => {
+            if !old_name.contains('.') && method.type_params.iter().any(|param| param == old_name) {
+                return;
+            }
             rewrite_type_name_in_java_type(&mut method.return_type, old_name, new_name);
+            for thrown in &mut method.throws {
+                rewrite_type_name_in_java_type(thrown, old_name, new_name);
+            }
             for bound in &mut method.type_param_bounds {
                 rewrite_type_name_in_java_type_option(bound, old_name, new_name);
             }
@@ -2083,6 +2114,17 @@ fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &s
             }
         }
         Member::Constructor(constructor) => {
+            if !old_name.contains('.')
+                && constructor
+                    .type_params
+                    .iter()
+                    .any(|param| param == old_name)
+            {
+                return;
+            }
+            for thrown in &mut constructor.throws {
+                rewrite_type_name_in_java_type(thrown, old_name, new_name);
+            }
             for bound in &mut constructor.type_param_bounds {
                 rewrite_type_name_in_java_type_option(bound, old_name, new_name);
             }
@@ -2093,7 +2135,9 @@ fn rewrite_type_name_in_member(member: &mut Member, old_name: &str, new_name: &s
                 rewrite_type_name_in_block(body, old_name, new_name);
             }
         }
-        Member::Type(nested) => qualify_type_references_in_type(nested, old_name),
+        Member::Type(nested) => {
+            qualify_type_references_in_type_with_name(nested, old_name, new_name)
+        }
         Member::Unsupported { .. } => {}
     }
 }
@@ -2201,7 +2245,7 @@ fn rewrite_type_name_in_stmt(stmt: &mut Stmt, old_name: &str, new_name: &str) {
                 rewrite_type_name_in_block(finally_block, old_name, new_name);
             }
         }
-        Stmt::LocalType(ty) => qualify_type_references_in_type(ty, old_name),
+        Stmt::LocalType(ty) => qualify_type_references_in_type_with_name(ty, old_name, new_name),
         Stmt::ConstructorInvocation { args, resolved, .. } => {
             for arg in args {
                 rewrite_type_name_in_expr(arg, old_name, new_name);
@@ -2246,7 +2290,11 @@ fn rewrite_type_name_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
                 *name = new_name.to_string();
             }
         }
-        Expr::FieldAccess(receiver, _) => rewrite_type_name_in_expr(receiver, old_name, new_name),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => rewrite_type_name_in_expr(receiver, old_name, new_name),
         Expr::ArrayAccess(array, index) => {
             rewrite_type_name_in_expr(array, old_name, new_name);
             rewrite_type_name_in_expr(index, old_name, new_name);
@@ -2411,8 +2459,11 @@ fn rewrite_type_name_in_string_option(ty: &mut Option<String>, old_name: &str, n
 }
 
 fn rewrite_type_name_in_string(ty: &mut String, old_name: &str, new_name: &str) {
-    if ty == old_name {
-        *ty = new_name.to_string();
+    let original = parser::parse_hierarchy_type(ty);
+    let mut rewritten = original.clone();
+    rewrite_type_name_in_java_type(&mut rewritten, old_name, new_name);
+    if rewritten != original {
+        *ty = java_type_substitution::java_type_text(&rewritten);
     }
 }
 
@@ -2421,6 +2472,14 @@ fn rewrite_type_name_in_java_type(ty: &mut JavaType, old_name: &str, new_name: &
         JavaType::Named { name, args } => {
             if name == old_name {
                 *name = new_name.to_string();
+            } else if let Some(nested) = name
+                .strip_prefix(old_name)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+            {
+                // Renaming an imported source owner also renames references
+                // to its nested types. Keep the complete nested suffix so a
+                // sibling package's same-leaf declaration cannot supply it.
+                *name = format!("{new_name}.{nested}");
             }
             for arg in args {
                 rewrite_type_name_in_java_type(arg, old_name, new_name);
@@ -2773,7 +2832,11 @@ fn qualify_same_package_class_literals_in_expr(
     top_level_type_names: &BTreeSet<String>,
 ) {
     match expr {
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             qualify_same_package_class_literals_in_expr(receiver, package, top_level_type_names);
         }
         Expr::ArrayAccess(array, index) => {
@@ -3190,6 +3253,93 @@ public class Item {
             "bare same-simple owner must fail closed instead of selecting a package peer"
         );
         assert_package_peer_who_keys_stay_in_java_owner_space(&context, &methods);
+    }
+
+    #[test]
+    fn collision_rewrites_keep_nested_generic_contracts_and_lexical_binders() {
+        let mut a = parser::parse_java_source(
+            r#"
+package a;
+interface Accumulator<T> { T combine(T value); }
+interface Pair<X, Y> { }
+class Sum implements Accumulator<Sum>, Pair<b.Sum, Sum> {
+    public Sum combine(Sum value) { return value; }
+    static class Builder { java.util.Map<b.Sum, Sum> values; }
+    <Sum> Sum identity(Sum value) { return value; }
+}
+"#,
+        );
+        let mut b = parser::parse_java_source("package b; class Sum {}");
+        let mut client = parser::parse_java_source(
+            r#"
+package a;
+class Client { static class Builder { java.util.function.Function<b.Sum, Sum> factory; } }
+"#,
+        );
+        let mut imported =
+            parser::parse_java_source("package c; import b.Sum; class Imported { Sum value; }");
+        qualify_duplicate_program_type_names(&mut [
+            &mut a.program,
+            &mut b.program,
+            &mut client.program,
+            &mut imported.program,
+        ]);
+        let sum = a
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "a.Sum")
+            .unwrap();
+        assert_eq!(sum.implements, ["Accumulator<a.Sum>", "Pair<b.Sum, a.Sum>"]);
+        let named = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![],
+        };
+        let builder = sum
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .unwrap();
+        let Member::Field(values) = &builder.members[0] else {
+            panic!("expected field")
+        };
+        assert_eq!(
+            values.ty,
+            JavaType::Named {
+                name: "Map".into(),
+                args: vec![named("b.Sum"), named("a.Sum")]
+            }
+        );
+        let identity = sum
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "identity" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(identity.return_type, parser::parse_hierarchy_type("Sum"));
+        assert_eq!(identity.params[0].ty, parser::parse_hierarchy_type("Sum"));
+        let Member::Type(builder) = &client.program.types[0].members[0] else {
+            panic!("expected nested type")
+        };
+        let Member::Field(factory) = &builder.members[0] else {
+            panic!("expected field")
+        };
+        assert_eq!(
+            factory.ty,
+            JavaType::Named {
+                name: "Function".into(),
+                args: vec![named("b.Sum"), named("a.Sum")]
+            }
+        );
+        let Member::Field(imported) = &imported.program.types[0].members[0] else {
+            panic!("expected field")
+        };
+        assert_eq!(imported.ty, parser::parse_hierarchy_type("b.Sum"));
     }
 
     #[test]

@@ -155,14 +155,18 @@ pub enum FunctionalTypeSource {
 }
 
 impl FunctionalTypeSource {
-    pub(crate) fn type_argument_index(self) -> Option<usize> {
+    /// Relate the SAM's parameter/result value to its interface type argument.
+    /// Applied values such as Iterator<T> expose T at child zero of that value.
+    pub(crate) fn type_argument_projection(self) -> Option<(usize, &'static [usize])> {
         match self {
-            Self::TypeArgument(index)
-            | Self::AppliedUnary {
-                argument: index, ..
-            } => Some(index),
+            Self::TypeArgument(index) => Some((index, &[])),
+            Self::AppliedUnary { argument, .. } => Some((argument, &[0])),
             Self::Primitive(_) => None,
         }
+    }
+
+    pub(crate) fn type_argument_index(self) -> Option<usize> {
+        self.type_argument_projection().map(|(index, _)| index)
     }
 
     fn project_type(self, args: &[JavaType], input: bool) -> Option<JavaType> {
@@ -197,6 +201,73 @@ pub struct FunctionalInterfaceShape {
     returns: Option<FunctionalTypeSource>,
 }
 
+/// A capability bound is distinct from the owning native SAM value. Derive
+/// this primitive-consumer contract from the same descriptor as its facade.
+#[derive(Debug, Clone)]
+pub(crate) struct NativePrimitiveConsumerBound {
+    pub(crate) owner: String,
+    pub(crate) primitive: PrimitiveType,
+}
+
+impl NativePrimitiveConsumerBound {
+    pub(crate) fn for_name(name: &str) -> Option<Self> {
+        let canonical = canonical_external_receiver_type_key(name);
+        let simple = canonical
+            .strip_prefix("java.util.function.")
+            .unwrap_or(&canonical);
+        if simple.contains('.') {
+            return None;
+        }
+        let shape = functional_interface_shape(simple)?;
+        let [FunctionalTypeSource::Primitive(primitive)] = shape.inputs() else {
+            return None;
+        };
+        (shape.method() == "accept" && shape.returns().is_none()).then(|| Self {
+            owner: simple.to_string(),
+            primitive: *primitive,
+        })
+    }
+
+    pub(crate) fn trait_name(&self) -> String {
+        format!("__JavaBound{}", self.owner)
+    }
+
+    pub(crate) fn rust_input(&self) -> String {
+        external_facade_functional_type_source_rust_type(&FunctionalTypeSource::Primitive(
+            self.primitive,
+        ))
+    }
+}
+
+/// Only lexical type parameters use this protocol. Concrete facades and source
+/// interfaces retain their own selected invocation ABI and source precedence.
+pub(crate) fn native_primitive_consumer_receiver_bound(
+    receiver: &JavaType,
+    env: &crate::types::TypeEnv,
+    facts: &FactSet,
+) -> Option<NativePrimitiveConsumerBound> {
+    let bound = env.type_parameter_receiver_bound(receiver)?;
+    fn project(bound: &JavaType, facts: &FactSet) -> Option<NativePrimitiveConsumerBound> {
+        if let JavaType::Intersection(parts) = bound {
+            let mut candidates = parts.iter().filter_map(|part| project(part, facts));
+            let selected = candidates.next()?;
+            return candidates.next().is_none().then_some(selected);
+        }
+        let JavaType::Named { name, args } = bound else {
+            return None;
+        };
+        if !args.is_empty()
+            || crate::effective_facts::EffectiveFacts::new(facts)
+                .native_functional_carrier(bound)
+                .is_none()
+        {
+            return None;
+        }
+        NativePrimitiveConsumerBound::for_name(name)
+    }
+    project(&bound, facts)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum IteratorProtocolOperation {
     HasNext,
@@ -209,6 +280,388 @@ impl IteratorProtocolOperation {
         match self {
             Self::HasNext => "has_next_result",
             Self::Next => "next_result",
+        }
+    }
+}
+
+/// Invocation order for retained SAM composition. The two operands remain
+/// independent references; the returned callback has its own Java identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeFunctionalComposition {
+    Before,
+    After,
+}
+
+impl NativeFunctionalComposition {
+    pub(crate) fn generic_for_call(owner: &str, name: &str, arity: usize) -> Option<Self> {
+        let operation = Self::for_call(name, arity)?;
+        let owner = canonical_external_receiver_type_key(owner);
+        let owner = native_functional_owner(&owner);
+        let parent = NATIVE_FUNCTIONAL_PARENTS
+            .iter()
+            .find(|(child, _, _)| *child == owner)
+            .map_or(owner, |(_, parent, _)| *parent);
+        match (parent, operation) {
+            ("Function", _) | ("BiFunction", Self::After) => Some(operation),
+            _ => None,
+        }
+    }
+    pub(crate) fn for_call(name: &str, arity: usize) -> Option<Self> {
+        match (name, arity) {
+            ("andThen" | "and_then", 1) => Some(Self::After),
+            ("compose", 1) => Some(Self::Before),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn fixed_for_call(owner: &str, name: &str, arity: usize) -> Option<Self> {
+        let operation = Self::for_call(name, arity)?;
+        let owner = canonical_external_receiver_type_key(owner);
+        let owner = owner.strip_prefix("java.util.function.").unwrap_or(&owner);
+        let consumer = matches!(owner, "IntConsumer" | "LongConsumer" | "DoubleConsumer");
+        let unary = matches!(
+            owner,
+            "IntUnaryOperator" | "LongUnaryOperator" | "DoubleUnaryOperator"
+        );
+        match operation {
+            Self::After if consumer || unary => Some(operation),
+            Self::Before if unary => Some(operation),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn rust_name(self) -> &'static str {
+        match self {
+            Self::Before => "compose_result",
+            Self::After => "and_then_result",
+        }
+    }
+
+    pub(crate) fn fixed_for_override(owner: &str, method: &MethodDecl) -> Option<Self> {
+        let operation = Self::fixed_for_call(owner, &method.name, method.params.len())?;
+        if method.modifiers.contains(&Modifier::Static) || !method.type_params.is_empty() {
+            return None;
+        }
+        let param = method.params.first()?;
+        let JavaType::Named { name, args } = &param.ty else {
+            return None;
+        };
+        let canonical = |name: &str| {
+            canonical_external_receiver_type_key(name)
+                .strip_prefix("java.util.function.")
+                .unwrap_or(name)
+                .to_string()
+        };
+        (!param.is_varargs && args.is_empty() && canonical(name) == canonical(owner))
+            .then_some(operation)
+    }
+}
+
+/// A generic default method instantiated at its receiver. The method's fresh
+/// type variable is supplied through the argument or the target result, never
+/// represented by a Java identifier that could capture a receiver type name.
+///
+/// In particular Function<T, R>.andThen returns Function<T, V>, not a copy of
+/// the receiver's generic layout: R is an intermediate value even when it no
+/// longer occurs in the resulting interface.
+pub(crate) struct NativeGenericCompositionContract {
+    operation: NativeFunctionalComposition,
+    owner: &'static str,
+    receiver_args: Vec<JavaType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeCompositionValueEndpoint {
+    ReceiverInput(usize),
+    ReceiverResult,
+    ArgumentInput(usize),
+    ArgumentResult,
+    ResultInput(usize),
+    ResultResult,
+}
+
+impl NativeGenericCompositionContract {
+    /// Invocation value flow, independent of physical carriers and generic
+    /// argument positions. An intermediate result need not occur in the final
+    /// interface's type arguments at all.
+    pub(crate) fn value_transfers(
+        &self,
+    ) -> Vec<(
+        NativeCompositionValueEndpoint,
+        NativeCompositionValueEndpoint,
+    )> {
+        use NativeCompositionValueEndpoint::*;
+        match self.operation {
+            NativeFunctionalComposition::After => (0..self.receiver_args.len() - 1)
+                .map(|index| (ResultInput(index), ReceiverInput(index)))
+                .chain([
+                    (ReceiverResult, ArgumentInput(0)),
+                    (ArgumentResult, ResultResult),
+                ])
+                .collect(),
+            NativeFunctionalComposition::Before => vec![
+                (ResultInput(0), ArgumentInput(0)),
+                (ArgumentResult, ReceiverInput(0)),
+                (ReceiverResult, ResultResult),
+            ],
+        }
+    }
+    pub(crate) fn for_call(receiver: &JavaType, name: &str, arity: usize) -> Option<Self> {
+        NativeFunctionalComposition::for_call(name, arity)?;
+        let JavaType::Named { name: owner, .. } = receiver else {
+            return None;
+        };
+        let operation = NativeFunctionalComposition::generic_for_call(owner, name, arity)?;
+        let receiver = native_functional_parent_type(receiver).unwrap_or_else(|| receiver.clone());
+        let JavaType::Named { name, args } = receiver else {
+            return None;
+        };
+        let owner = native_functional_owner(&name);
+        let owner = match (owner, args.len(), operation) {
+            ("Function", 2, _) => "Function",
+            ("BiFunction", 3, NativeFunctionalComposition::After) => "BiFunction",
+            _ => return None,
+        };
+        Some(Self {
+            operation,
+            owner,
+            receiver_args: args,
+        })
+    }
+
+    /// Ground target type of the callback argument, including the otherwise
+    /// hidden intermediate value. Contextual lambda typing and later storage
+    /// planning must use this contract rather than zip result type arguments.
+    pub(crate) fn argument_type_for_result(&self, result: &JavaType) -> Option<JavaType> {
+        let JavaType::Named { name, args } = result else {
+            return None;
+        };
+        if native_functional_owner(name) != self.owner || args.len() != self.receiver_args.len() {
+            return None;
+        }
+        let method_type = match self.operation {
+            NativeFunctionalComposition::After => {
+                if args[..args.len() - 1] != self.receiver_args[..self.receiver_args.len() - 1] {
+                    return None;
+                }
+                args.last()?
+            }
+            NativeFunctionalComposition::Before => {
+                if args.last()? != self.receiver_args.last()? {
+                    return None;
+                }
+                args.first()?
+            }
+        };
+        Some(self.instantiate(method_type).0)
+    }
+
+    /// Extract only the fresh method argument from an already selected result
+    /// contract. Physical nullable/borrowed input ABIs can differ between a
+    /// composed callback and its receiver; ordinary invocation adapters bridge
+    /// those endpoints. Java applicability remains checked by the resolver.
+    pub(crate) fn method_type_for_result(&self, result: &JavaType) -> Option<JavaType> {
+        let JavaType::Named { name, args } = result else {
+            return None;
+        };
+        if native_functional_owner(name) != self.owner || args.len() != self.receiver_args.len() {
+            return None;
+        }
+        match self.operation {
+            NativeFunctionalComposition::After => args.last().cloned(),
+            NativeFunctionalComposition::Before => args.first().cloned(),
+        }
+    }
+
+    /// Instantiate the sole, scoped method variable, for example from an
+    /// explicit Java method type witness. Return (callback argument, result).
+    pub(crate) fn instantiate(&self, method_type: &JavaType) -> (JavaType, JavaType) {
+        let mut result_args = self.receiver_args.clone();
+        let argument_args = match self.operation {
+            NativeFunctionalComposition::After => {
+                *result_args.last_mut().unwrap() = method_type.clone();
+                vec![
+                    self.receiver_args.last().unwrap().clone(),
+                    method_type.clone(),
+                ]
+            }
+            NativeFunctionalComposition::Before => {
+                result_args[0] = method_type.clone();
+                vec![method_type.clone(), self.receiver_args[0].clone()]
+            }
+        };
+        (
+            JavaType::Named {
+                name: "Function".into(),
+                args: argument_args,
+            },
+            JavaType::Named {
+                name: self.owner.into(),
+                args: result_args,
+            },
+        )
+    }
+
+    pub(crate) fn result_type_for_argument(&self, argument: &JavaType) -> Option<JavaType> {
+        let argument = native_functional_parent_type(argument).unwrap_or_else(|| argument.clone());
+        let JavaType::Named { name, args } = argument else {
+            return None;
+        };
+        if native_functional_owner(&name) != "Function" || args.len() != 2 {
+            return None;
+        }
+        let method_type = match self.operation {
+            NativeFunctionalComposition::After => crate::types::generic_read_type(&args[1]),
+            NativeFunctionalComposition::Before => crate::types::generic_input_type(&args[0]),
+        };
+        Some(self.instantiate(&method_type).1)
+    }
+}
+
+pub(crate) fn native_functional_owner(name: &str) -> &str {
+    name.strip_prefix("java.util.function.").unwrap_or(name)
+}
+
+#[cfg(test)]
+mod native_functional_composition_tests {
+    use super::*;
+
+    fn named(name: &str, args: Vec<JavaType>) -> JavaType {
+        JavaType::Named {
+            name: name.into(),
+            args,
+        }
+    }
+
+    #[test]
+    fn generic_composition_keeps_intermediate_types_and_method_scope_separate() {
+        let array = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+        // V is an actual receiver type, not the default method's fresh V.
+        let receiver_value = named("V", vec![]);
+        let receiver = named("Function", vec![receiver_value.clone(), array.clone()]);
+        let argument = named("Function", vec![array.clone(), JavaType::String]);
+        let result = named("Function", vec![receiver_value.clone(), JavaType::String]);
+        let after = NativeGenericCompositionContract::for_call(&receiver, "andThen", 1).unwrap();
+        assert_eq!(
+            after.argument_type_for_result(&result),
+            Some(argument.clone())
+        );
+        assert_eq!(
+            after.result_type_for_argument(&argument),
+            Some(result.clone())
+        );
+        assert_eq!(
+            known_external_method_return_type_for_call(Some(&receiver), "andThen", &[argument]),
+            Some(result)
+        );
+
+        let receiver = named("Function", vec![array.clone(), receiver_value.clone()]);
+        let argument = named("Function", vec![JavaType::String, array]);
+        let result = named("Function", vec![JavaType::String, receiver_value]);
+        let before = NativeGenericCompositionContract::for_call(&receiver, "compose", 1).unwrap();
+        assert_eq!(
+            before.argument_type_for_result(&result),
+            Some(argument.clone())
+        );
+        assert_eq!(before.result_type_for_argument(&argument), Some(result));
+        assert!(
+            before
+                .argument_type_for_result(&named("Function", vec![JavaType::String; 2]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn generic_composition_uses_native_parent_projections_without_foreign_name_matches() {
+        let array = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+        for prefix in ["", "java.util.function."] {
+            let unary = named(&format!("{prefix}UnaryOperator"), vec![array.clone()]);
+            let after = NativeGenericCompositionContract::for_call(&unary, "andThen", 1).unwrap();
+            let result = named("Function", vec![array.clone(), JavaType::String]);
+            assert_eq!(
+                after.result_type_for_argument(&named(
+                    "Function",
+                    vec![array.clone(), JavaType::String]
+                )),
+                Some(result)
+            );
+            let binary = named(&format!("{prefix}BinaryOperator"), vec![array.clone()]);
+            let after = NativeGenericCompositionContract::for_call(&binary, "andThen", 1).unwrap();
+            let result = named(
+                "BiFunction",
+                vec![array.clone(), array.clone(), JavaType::String],
+            );
+            assert_eq!(
+                after.argument_type_for_result(&result),
+                Some(named("Function", vec![array.clone(), JavaType::String]))
+            );
+            assert!(NativeGenericCompositionContract::for_call(&binary, "compose", 1).is_none());
+        }
+        for owner in [
+            "foreign.Function",
+            "foreign.UnaryOperator",
+            "Consumer",
+            "IntFunction",
+        ] {
+            assert!(
+                NativeGenericCompositionContract::for_call(
+                    &named(owner, vec![array.clone(), JavaType::String]),
+                    "andThen",
+                    1
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            NativeGenericCompositionContract::for_call(
+                &named("Function", vec![array, JavaType::String]),
+                "andThen",
+                2
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn primitive_composition_contracts_keep_owner_arity_and_operation_exact() {
+        for primitive in ["Int", "Long", "Double"] {
+            for owner in [
+                format!("{primitive}Consumer"),
+                format!("{primitive}UnaryOperator"),
+            ] {
+                for native in [owner.clone(), format!("java.util.function.{owner}")] {
+                    assert_eq!(
+                        NativeFunctionalComposition::fixed_for_call(&native, "andThen", 1),
+                        Some(NativeFunctionalComposition::After)
+                    );
+                    assert_eq!(
+                        NativeFunctionalComposition::fixed_for_call(&native, "compose", 1),
+                        owner
+                            .ends_with("UnaryOperator")
+                            .then_some(NativeFunctionalComposition::Before)
+                    );
+                    assert!(
+                        NativeFunctionalComposition::fixed_for_call(&native, "andThen", 2)
+                            .is_none()
+                    );
+                }
+                assert!(
+                    NativeFunctionalComposition::fixed_for_call(
+                        &format!("foreign.{owner}"),
+                        "andThen",
+                        1
+                    )
+                    .is_none()
+                );
+            }
+        }
+        for owner in [
+            "IntBinaryOperator",
+            "DoublePredicate",
+            "ObjIntConsumer",
+            "Function",
+        ] {
+            assert!(NativeFunctionalComposition::fixed_for_call(owner, "andThen", 1).is_none());
         }
     }
 }
@@ -474,6 +927,25 @@ impl FunctionalInterfaceShape {
             .map(|source| source.project_type(args, true))
             .collect()
     }
+}
+
+/// Method-reference arity discovery is conservative, but a native SAM's
+/// descriptor is exact. Never synthesize inherited overloads that it lacks.
+fn native_functional_method_has_invalid_arity(
+    facts: &FactSet,
+    owner: &str,
+    method: &str,
+    arity: usize,
+) -> bool {
+    crate::effective_facts::EffectiveFacts::new(facts)
+        .native_functional_carrier(&JavaType::Named {
+            name: owner.into(),
+            args: vec![],
+        })
+        .is_some_and(|sam| {
+            crate::parser::to_snake_case(sam.method()) == crate::parser::to_snake_case(method)
+                && sam.inputs().len() != arity
+        })
 }
 
 /// Reads a functional interface's shape out of its **name**.
@@ -781,12 +1253,73 @@ pub(crate) fn is_known_self_comparable_type(name: &str) -> bool {
     )
 }
 
+/// The generic parent views of native functional interfaces. Invocation
+/// descriptors and hierarchy clients must agree on these argument positions.
+const NATIVE_FUNCTIONAL_PARENTS: &[(&str, &str, &[usize])] = &[
+    ("UnaryOperator", "Function", &[0, 0]),
+    ("BinaryOperator", "BiFunction", &[0, 0, 0]),
+];
+
+pub(crate) fn native_functional_parent_type(ty: &JavaType) -> Option<JavaType> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    let owner = canonical_external_receiver_type_key(name);
+    let owner = native_functional_owner(&owner);
+    let (_, parent, indices) = NATIVE_FUNCTIONAL_PARENTS
+        .iter()
+        .find(|(child, _, _)| *child == owner)?;
+    Some(JavaType::Named {
+        name: (*parent).into(),
+        args: indices
+            .iter()
+            .map(|index| args.get(*index).cloned())
+            .collect::<Option<_>>()?,
+    })
+}
+
+/// Complete nominal parent identities for the modeled JDK functional
+/// interfaces. This is narrower than the positive-only platform subtype
+/// relation: an empty list proves a root interface, rather than an unknown
+/// type. Generic parent argument positions remain owned by the same catalog
+/// used for invocation and source inheritance.
+pub(crate) fn native_functional_runtime_parent_names(binary: &str) -> Option<Vec<String>> {
+    if matches!(
+        binary,
+        "java.lang.Comparable"
+            | "java.lang.Runnable"
+            | "java.lang.Iterable"
+            | "java.util.Comparator"
+    ) {
+        return Some(Vec::new());
+    }
+    let owner = binary.strip_prefix("java.util.function.")?;
+    // These SAMs belong to java.lang/java.util, not java.util.function.
+    if matches!(owner, "Comparable" | "Runnable" | "Iterable" | "Comparator") {
+        return None;
+    }
+    functional_interface_shape(owner)?;
+    Some(
+        NATIVE_FUNCTIONAL_PARENTS
+            .iter()
+            .filter(|(child, _, _)| *child == owner)
+            .map(|(_, parent, _)| format!("java.util.function.{parent}"))
+            .collect(),
+    )
+}
+
 pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
     let actual = canonical_subtype_name(actual);
     let target = canonical_subtype_name(target);
     let actual = actual.as_str();
     let target = target.as_str();
     if actual == target {
+        return true;
+    }
+    if NATIVE_FUNCTIONAL_PARENTS
+        .iter()
+        .any(|(child, parent, _)| *child == actual && *parent == target)
+    {
         return true;
     }
     match target {
@@ -926,6 +1459,7 @@ jdk_exception_catalog! {
         AccessDeniedException => ("java.nio.file.AccessDeniedException", FileSystemException),
         IllegalArgumentException => ("java.lang.IllegalArgumentException", RuntimeException),
         IllegalStateException => ("java.lang.IllegalStateException", RuntimeException),
+        BufferOverflowException => ("java.nio.BufferOverflowException", RuntimeException),
         NoSuchElementException => ("java.util.NoSuchElementException", RuntimeException),
         NumberFormatException => ("java.lang.NumberFormatException", IllegalArgumentException),
         PatternSyntaxException => ("java.util.regex.PatternSyntaxException", IllegalArgumentException),
@@ -1244,6 +1778,85 @@ pub(crate) fn native_collection_constructor_kind_for_type(
 
 pub fn rust_stdlib_signature_facts() -> FactSet {
     let mut facts = FactSet::default();
+    for simple in ["Function", "UnaryOperator", "BiFunction", "BinaryOperator"] {
+        for owner in [simple.to_string(), format!("java.util.function.{simple}")] {
+            for method in ["andThen", "and_then", "compose"] {
+                if NativeFunctionalComposition::generic_for_call(&owner, method, 1).is_none() {
+                    continue;
+                }
+                let mut effect = jdk_instance_api_fact(&owner, method, 1, JavaType::Void);
+                // Generic types belong to the scoped composition contract,
+                // not an erased nominal result/argument signature.
+                effect.return_type = None;
+                effect.return_nullability = NullabilityState::MaybeNull;
+                effect.role = ExternalApiRole::Mutator;
+                effect.thrown = ["RuntimeException", "Error"]
+                    .into_iter()
+                    .map(|name| JavaType::Named {
+                        name: name.into(),
+                        args: vec![],
+                    })
+                    .collect();
+                facts.external_api_effect_facts.push(effect);
+                let mut argument = jdk_owned_argument_effect(&owner, method, 1, 0, JavaType::Void);
+                argument.parameter_type = None;
+                argument.parameter_nullability = NullabilityState::MaybeNull;
+                argument.alias_policy = ExternalArgumentAliasPolicy::Escapes;
+                facts.external_api_argument_effect_facts.push(argument);
+            }
+        }
+    }
+    for simple in [
+        "IntConsumer",
+        "LongConsumer",
+        "DoubleConsumer",
+        "IntUnaryOperator",
+        "LongUnaryOperator",
+        "DoubleUnaryOperator",
+    ] {
+        for owner in [simple.to_string(), format!("java.util.function.{simple}")] {
+            for method in ["andThen", "and_then", "compose"] {
+                let Some(operation) =
+                    NativeFunctionalComposition::fixed_for_call(&owner, method, 1)
+                else {
+                    continue;
+                };
+                let ty = JavaType::Named {
+                    name: simple.to_string(),
+                    args: Vec::new(),
+                };
+                let mut effect = jdk_instance_api_fact(&owner, method, 1, ty.clone());
+                // Interface dispatch can select a source override, whose
+                // result is permitted to be null (and which owns validation).
+                effect.return_nullability = NullabilityState::MaybeNull;
+                // The facade's operation table owns interior mutation. The
+                // handle itself is borrowed through the shared-self ABI.
+                effect.role = ExternalApiRole::Mutator;
+                effect.thrown = ["RuntimeException", "Error"]
+                    .into_iter()
+                    .map(|name| JavaType::Named {
+                        name: name.into(),
+                        args: Vec::new(),
+                    })
+                    .collect();
+                facts.external_api_effect_facts.push(effect);
+                let mut argument = jdk_owned_argument_effect(&owner, method, 1, 0, ty);
+                // Null is consumed by the result-returning runtime method so
+                // validation happens at composition, after operand evaluation.
+                argument.parameter_nullability = NullabilityState::MaybeNull;
+                argument.alias_policy = ExternalArgumentAliasPolicy::Escapes;
+                facts.external_api_argument_effect_facts.push(argument);
+                facts.facade_abi_facts.push(jdk_result_method_abi(
+                    &owner,
+                    method,
+                    1,
+                    &format!("{simple}::{}", operation.rust_name()),
+                    vec![FacadeSlot::Optional(Box::new(FacadeSlot::Owned))],
+                    FacadeSlot::Optional(Box::new(FacadeSlot::Owned)),
+                ));
+            }
+        }
+    }
     for owner in ["Object", "java.lang.Object"] {
         let mut effect = jdk_instance_api_fact(owner, "toString", 0, JavaType::String);
         effect.return_nullability = NullabilityState::MaybeNull;
@@ -2561,6 +3174,27 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             .push(jdk_constructor_result_fact(owner, 1));
     }
     for owner in ["Class", "JavaClass", "java.lang.Class"] {
+        for method in ["isAssignableFrom", "is_assignable_from"] {
+            let mut effect = jdk_instance_api_fact(
+                owner,
+                method,
+                1,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            );
+            effect.thrown.push(JavaType::Named {
+                name: "NullPointerException".into(),
+                args: vec![],
+            });
+            facts.external_api_effect_facts.push(effect);
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "JavaClass::is_assignable_from",
+                vec![FacadeSlot::Optional(Box::new(FacadeSlot::Owned))],
+                FacadeSlot::Owned,
+            ));
+        }
         for method in ["getResourceAsStream", "get_resource_as_stream"] {
             facts.facade_abi_facts.push(jdk_option_method_abi(
                 owner,
@@ -3179,9 +3813,52 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
                 ));
         }
     }
+    for owner in ["SplittableRandom", "java.util.SplittableRandom"] {
+        facts
+            .external_crate_type_mapping_facts
+            .push(crate::facts::ExternalCrateTypeMappingFact {
+                type_name: owner.to_string(),
+                rust_type_name: "JavaUtilSplittableRandom".to_string(),
+                reference_identity_method: Some("java_identity_eq".to_string()),
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        for (java_method, arity) in [
+            ("nextInt", 0),
+            ("nextInt", 1),
+            ("nextInt", 2),
+            ("nextLong", 0),
+            ("split", 0),
+        ] {
+            let (rust_method, result, throws) =
+                splittable_random_method(java_method, arity).unwrap();
+            for method in [
+                java_method.to_string(),
+                crate::parser::to_snake_case(java_method),
+            ] {
+                let mut effect = jdk_instance_api_fact(owner, &method, arity, result.clone());
+                effect.role = ExternalApiRole::Mutator;
+                effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+                if throws {
+                    effect.thrown.push(JavaType::Named {
+                        name: "IllegalArgumentException".to_string(),
+                        args: Vec::new(),
+                    });
+                }
+                facts.external_api_effect_facts.push(effect);
+                let target = format!("JavaUtilSplittableRandom::{rust_method}");
+                let slots = vec![FacadeSlot::Owned; arity];
+                let abi = if throws {
+                    jdk_result_method_abi(owner, &method, arity, &target, slots, FacadeSlot::Owned)
+                } else {
+                    rust_stdlib_method_abi(owner, &method, arity, &target, slots, FacadeSlot::Owned)
+                };
+                facts.facade_abi_facts.push(abi);
+            }
+        }
+    }
     for (owner, rust_owner) in [
-        ("ByteBuffer", "ByteBuffer"),
-        ("java.nio.ByteBuffer", "ByteBuffer"),
+        ("ByteBuffer", "JavaNioByteBuffer"),
+        ("java.nio.ByteBuffer", "JavaNioByteBuffer"),
         ("CharBuffer", "CharBuffer"),
         ("java.nio.CharBuffer", "CharBuffer"),
     ] {
@@ -3209,6 +3886,181 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             Vec::new(),
             FacadeSlot::Owned,
         ));
+    }
+    for owner in ["ByteBuffer", "java.nio.ByteBuffer", "JavaNioByteBuffer"] {
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: owner.into(),
+                copy: Some(false),
+                clone: Some(true),
+                string_like: None,
+                sequence_like: None,
+                implements: vec![],
+                extends: None,
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        let buffer = JavaType::Named {
+            name: "java.nio.ByteBuffer".into(),
+            args: vec![],
+        };
+        for (java_name, rust_name, params, result, checked, is_static) in [
+            (
+                "allocate",
+                "allocate",
+                vec![PrimitiveType::Int],
+                buffer.clone(),
+                true,
+                true,
+            ),
+            (
+                "putInt",
+                "put_int",
+                vec![PrimitiveType::Int],
+                buffer.clone(),
+                true,
+                false,
+            ),
+            (
+                "putLong",
+                "put_long",
+                vec![PrimitiveType::Long],
+                buffer.clone(),
+                true,
+                false,
+            ),
+            (
+                "array",
+                "array",
+                vec![],
+                JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+                false,
+                false,
+            ),
+            (
+                "capacity",
+                "capacity",
+                vec![],
+                JavaType::Primitive(PrimitiveType::Int),
+                false,
+                false,
+            ),
+            (
+                "position",
+                "position",
+                vec![],
+                JavaType::Primitive(PrimitiveType::Int),
+                false,
+                false,
+            ),
+            (
+                "remaining",
+                "remaining",
+                vec![],
+                JavaType::Primitive(PrimitiveType::Int),
+                false,
+                false,
+            ),
+            (
+                "hasRemaining",
+                "has_remaining",
+                vec![],
+                JavaType::Primitive(PrimitiveType::Boolean),
+                false,
+                false,
+            ),
+        ] {
+            for method in
+                std::collections::BTreeSet::from([java_name.to_string(), rust_name.to_string()])
+            {
+                let mut effect =
+                    jdk_instance_api_fact(owner, &method, params.len(), result.clone());
+                if checked {
+                    effect.thrown.push(JavaType::Named {
+                        name: if is_static {
+                            "IllegalArgumentException"
+                        } else {
+                            "java.nio.BufferOverflowException"
+                        }
+                        .into(),
+                        args: vec![],
+                    });
+                }
+                if !is_static && !params.is_empty() {
+                    effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+                    effect.role = ExternalApiRole::FluentMutator;
+                }
+                facts.external_api_effect_facts.push(effect);
+                facts
+                    .external_rust_result_facts
+                    .push(crate::facts::ExternalRustResultFact {
+                        receiver_type: Some(owner.into()),
+                        method_name: method.clone(),
+                        arg_count: Some(params.len()),
+                        returns_result: checked,
+                        provenance: FactProvenance::BuiltinExternalModel,
+                    });
+                let path = format!("JavaNioByteBuffer::{rust_name}");
+                for (index, primitive) in params.iter().enumerate() {
+                    facts
+                        .external_api_argument_effect_facts
+                        .push(ExternalApiArgumentEffectFact {
+                            null_message_function: None,
+                            method_name: method.clone(),
+                            receiver_type: Some(owner.into()),
+                            arg_count: Some(params.len()),
+                            parameter_index: index,
+                            parameter_type: Some(JavaType::Primitive(*primitive)),
+                            parameter_nullability: NullabilityState::DefinitelyNonNull,
+                            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                            alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                            provenance: FactProvenance::BuiltinExternalModel,
+                        });
+                }
+                let slots = vec![FacadeSlot::Owned; params.len()];
+                let abi = match (checked, is_static) {
+                    (true, true) => jdk_result_static_abi(
+                        owner,
+                        &method,
+                        params.len(),
+                        &path,
+                        slots,
+                        FacadeSlot::Owned,
+                    ),
+                    (true, false) => jdk_result_method_abi(
+                        owner,
+                        &method,
+                        params.len(),
+                        &path,
+                        slots,
+                        FacadeSlot::Owned,
+                    ),
+                    _ => rust_stdlib_method_abi(
+                        owner,
+                        &method,
+                        params.len(),
+                        &path,
+                        slots,
+                        FacadeSlot::Owned,
+                    ),
+                };
+                if java_name == "array" {
+                    facts.native_return_allocations.insert(
+                        abi.key.clone(),
+                        crate::facts::NativeReturnAllocationContract {
+                            rust_path: path,
+                            allocations: vec![(
+                                vec![],
+                                crate::storage_strategy::StoragePlacement::new(true, true, true),
+                            )],
+                        },
+                    );
+                }
+                facts.facade_abi_facts.push(abi);
+            }
+        }
     }
     for (owner, rust_owner) in [
         ("Reader", "Reader"),
@@ -3475,7 +4327,7 @@ fn add_jdk_platform_stream_facts(facts: &mut FactSet) {
         }
         for (field, ty) in [
             ("ttype", JavaType::Primitive(PrimitiveType::Int)),
-            ("sval", JavaType::String),
+            ("sval", crate::types::optional_java_type(JavaType::String)),
             ("nval", JavaType::Primitive(PrimitiveType::Double)),
         ] {
             facts
@@ -3707,6 +4559,37 @@ fn jdk_instance_api_fact(
         thrown: Vec::new(),
         provenance: FactProvenance::BuiltinExternalModel,
     }
+}
+
+pub(crate) fn splittable_random_method(
+    method: &str,
+    arity: usize,
+) -> Option<(&'static str, JavaType, bool)> {
+    Some(match (method, arity) {
+        ("nextInt" | "next_int", 0) => ("next_int", JavaType::Primitive(PrimitiveType::Int), false),
+        ("nextInt" | "next_int", 1) => (
+            "next_int_result",
+            JavaType::Primitive(PrimitiveType::Int),
+            true,
+        ),
+        ("nextInt" | "next_int", 2) => (
+            "next_int_range_result",
+            JavaType::Primitive(PrimitiveType::Int),
+            true,
+        ),
+        ("nextLong" | "next_long", 0) => {
+            ("next_long", JavaType::Primitive(PrimitiveType::Long), false)
+        }
+        ("split", 0) => (
+            "split",
+            JavaType::Named {
+                name: "SplittableRandom".to_string(),
+                args: Vec::new(),
+            },
+            false,
+        ),
+        _ => return None,
+    })
 }
 
 fn rust_stdlib_method_abi(
@@ -4990,6 +5873,12 @@ pub fn known_external_method_return_type_for_receiver(
         let receiver =
             crate::types::optional_element_type(receiver).unwrap_or_else(|| receiver.clone());
         if let JavaType::Named { name: owner, args } = &receiver
+            && args.is_empty()
+            && NativeFunctionalComposition::fixed_for_call(owner, name, arg_count).is_some()
+        {
+            return Some(receiver);
+        }
+        if let JavaType::Named { name: owner, args } = &receiver
             && matches!(owner.as_str(), "Comparator" | "java.util.Comparator")
             && args.len() == 1
             && NativeComparatorOperation::for_call(name, arg_count)
@@ -5034,6 +5923,12 @@ pub fn known_external_method_return_type_for_call(
     name: &str,
     arg_types: &[JavaType],
 ) -> Option<JavaType> {
+    if let Some(contract) = receiver_type.and_then(|receiver| {
+        NativeGenericCompositionContract::for_call(receiver, name, arg_types.len())
+    }) && let Some(result) = contract.result_type_for_argument(&arg_types[0])
+    {
+        return Some(result);
+    }
     if let Some(java_ty) =
         known_java_string_receiver_method_return_type(receiver_type, name, arg_types.len())
     {
@@ -6619,9 +7514,23 @@ pub(crate) fn external_api_receiver_owner_key(
         JavaType::Intersection(bounds) => bounds
             .iter()
             .find_map(|bound| external_api_receiver_owner_key(bound, types)),
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(
-            canonical_external_receiver_type_key(rust_path_simple_type_name(name)),
-        ),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let raw = rust_path_simple_type_name(name);
+            let canonical = canonical_external_receiver_type_key(raw);
+            // A qualified value type already selects its owner. Rebinding its
+            // shortened platform alias through an unrelated lexical source
+            // declaration would choose that source class's ABI instead.
+            if raw.contains('.')
+                && raw != canonical
+                && types
+                    .static_type_alias(&canonical)
+                    .is_some_and(|alias| alias != raw)
+            {
+                Some(raw.to_string())
+            } else {
+                Some(canonical)
+            }
+        }
         JavaType::String => Some("String".to_string()),
         JavaType::Array(_) => Some("Array".to_string()),
         JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
@@ -6777,6 +7686,14 @@ fn is_object_list_domain_getter(name: &str) -> bool {
     matches!(name, "getRecords")
 }
 
+pub(crate) const NATIVE_SHARED_REFERENCE_TYPES: &[&str] = &[
+    "StringBuilder",
+    "StringBuffer",
+    "CharSequence",
+    "SplittableRandom",
+    "ByteBuffer",
+];
+
 pub fn canonical_external_receiver_type_key(name: &str) -> String {
     let name = name.trim();
     let name = strip_java_type_modifiers(name);
@@ -6784,6 +7701,9 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         return alias.to_string();
     }
     match name {
+        "java.util.SplittableRandom"
+        | "JavaUtilSplittableRandom"
+        | "java_util_splittable_random" => "SplittableRandom",
         "java.lang.Iterable" | "JavaLangIterable" | "java_lang_iterable" => "Iterable",
         "string" => "String",
         "java.lang.StringBuilder" | "JavaLangStringBuilder" | "java_lang_string_builder" => {
@@ -6816,6 +7736,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "java.util.regex.Pattern" | "JavaUtilRegexPattern" | "java_util_regex_pattern" => "Pattern",
         "java.util.regex.Matcher" | "JavaUtilRegexMatcher" | "java_util_regex_matcher" => "Matcher",
         "java.nio.CharBuffer" | "JavaNioCharBuffer" | "java_nio_char_buffer" => "CharBuffer",
+        "java.nio.ByteBuffer" | "JavaNioByteBuffer" | "java_nio_byte_buffer" => "ByteBuffer",
         "java.util.stream.Collectors"
         | "JavaUtilStreamCollectors"
         | "java_util_stream_collectors" => "Collectors",
@@ -7282,11 +8203,13 @@ pub(crate) fn class_literal_java_name(ty: &JavaType) -> String {
 
 #[cfg(test)]
 pub(crate) fn java_class_support_item() -> crate::rust_ir::RustItem {
-    java_class_support_item_with_classloader_shim(false)
+    java_class_support_item_with_classloader_shim(false, &[], &FactSet::default())
 }
 
 pub(crate) fn java_class_support_item_with_classloader_shim(
     include_classloader_shim: bool,
+    programs: &[&Program],
+    facts: &FactSet,
 ) -> crate::rust_ir::RustItem {
     let classloader_shim = if include_classloader_shim {
         r#"
@@ -7346,12 +8269,20 @@ impl ClassLoader {
     } else {
         ""
     };
-    let mut support = r#"#[derive(Debug, Clone)]
-pub struct JavaClass<T> {
+    let mut support = r#"pub struct JavaClass<T> {
     name: String,
-    _marker: std::marker::PhantomData<T>,
+    // A class token names T without owning a T or borrowing any instance.
+    _marker: std::marker::PhantomData<fn() -> T>,
 }
 
+impl<T> std::fmt::Debug for JavaClass<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaClass").field("name", &self.name).finish()
+    }
+}
+impl<T> Clone for JavaClass<T> {
+    fn clone(&self)->Self {Self {name:self.name.clone(),_marker:std::marker::PhantomData}}
+}
 impl<T, U> PartialEq<JavaClass<U>> for JavaClass<T> {
     fn eq(&self, other: &JavaClass<U>) -> bool {
         self.name == other.name
@@ -7368,11 +8299,12 @@ impl<T> Default for JavaClass<T> {
 
 impl<T> JavaClass<T> {
     pub fn literal(name: &'static str) -> JavaClass<T> {
-        JavaClass { name: name.to_string(), _marker: std::marker::PhantomData }
+        JavaClass { name: java_runtime_class_canonical_name(name), _marker: std::marker::PhantomData }
     }
 
     pub fn for_name<S: Into<String>>(name: S) -> JavaClass<T> {
-        JavaClass { name: name.into(), _marker: std::marker::PhantomData }
+        let name:String=name.into();
+        JavaClass { name: java_runtime_class_canonical_name(&name), _marker: std::marker::PhantomData }
     }
 
     pub fn for_name_result<S: Into<String>>(name: S) -> Result<JavaClass<T>, JavaException> {
@@ -7384,10 +8316,15 @@ impl<T> JavaClass<T> {
             ))
         } else {
             Ok(JavaClass {
-                name,
+                name: java_runtime_class_canonical_name(&name),
                 _marker: std::marker::PhantomData,
             })
         }
+    }
+
+    pub fn is_assignable_from<C:JavaClassArgument>(&self, other:C)->Result<bool,JavaException> {
+        let actual=other.java_class_argument_name()?;
+        java_runtime_class_is_assignable(&self.name,&actual)
     }
 
     pub fn get_name(&self) -> String {
@@ -7399,7 +8336,7 @@ impl<T> JavaClass<T> {
     }
 
     pub fn is_array(&self) -> bool {
-        false
+        self.name.starts_with('[')
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
@@ -7491,6 +8428,7 @@ impl<T> std::fmt::Display for JavaClass<T> {
     }
 }"#
     .to_string();
+    support.push_str(&crate::runtime_class::support(programs, facts));
     support.push_str(classloader_shim);
     crate::rust_ir::RustItem::Raw(support)
 }
@@ -7601,7 +8539,7 @@ impl<T: Ord> JavaComparable for T {
 pub(crate) fn java_enum_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"/// Capabilities guaranteed by `java.lang.Enum<E>`.
-pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {
+pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display + JavaMapKey + std::any::Any {
     fn values() -> Vec<Self>
     where
         Self: Sized;
@@ -7609,12 +8547,26 @@ pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {
     fn name(&self) -> &'static str;
 }
 
-/// Return the enum universe minus `source`, preserving Java enum order.
-pub fn java_enum_set_complement<E: JavaEnum>(
-    source: &std::collections::BTreeSet<E>,
-) -> std::collections::BTreeSet<E> {
+/// The stored enum slot can carry publication nullability independently of
+/// the enum's capabilities. Optional<E> is not itself a Java enum.
+pub trait JavaEnumSetValue<E: JavaEnum>: Clone + Ord {
+    fn from_enum_value(value: E) -> Self;
+}
+impl<E: JavaEnum> JavaEnumSetValue<E> for E {
+    fn from_enum_value(value: E) -> Self { value }
+}
+impl<E: JavaEnum> JavaEnumSetValue<E> for Option<E> {
+    fn from_enum_value(value: E) -> Self { Some(value) }
+}
+
+/// Return the enum universe minus `source`, preserving Java enum order and
+/// the input's solved element carrier. The complement is a fresh set.
+pub fn java_enum_set_complement<E: JavaEnum, V: JavaEnumSetValue<E>>(
+    source: &std::collections::BTreeSet<V>,
+) -> std::collections::BTreeSet<V> {
     E::values()
         .into_iter()
+        .map(V::from_enum_value)
         .filter(|value| !source.contains(value))
         .collect()
 }"#
@@ -7685,6 +8637,47 @@ pub trait JavaMapKey {
 /// of a Rust handle slot. The token identifies the retained Java allocation.
 pub trait JavaReferenceIdentity {
     fn java_reference_identity(&self) -> *const ();
+}
+
+/// Java invocation shares a callable object; it does not borrow that object's
+/// entire dispatch closure mutably. Keep Rust FnMut convenience constructors
+/// available separately, without imposing their exclusive borrow on Java code.
+pub enum JavaLocalCallback<A, R> {
+    Shared(std::rc::Rc<dyn Fn(A) -> R>),
+    Mutable(std::rc::Rc<std::cell::RefCell<dyn FnMut(A) -> R>>),
+}
+
+impl<A, R> std::clone::Clone for JavaLocalCallback<A, R> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Shared(callback) => Self::Shared(callback.clone()),
+            Self::Mutable(callback) => Self::Mutable(callback.clone()),
+        }
+    }
+}
+
+impl<A, R> JavaReferenceIdentity for JavaLocalCallback<A, R> {
+    fn java_reference_identity(&self) -> *const () {
+        match self {
+            Self::Shared(callback) => std::rc::Rc::as_ptr(callback) as *const (),
+            Self::Mutable(callback) => std::rc::Rc::as_ptr(callback) as *const (),
+        }
+    }
+}
+
+impl<A, R> JavaLocalCallback<A, R> {
+    pub fn from_shared<F: Fn(A) -> R + 'static>(callback: F) -> Self {
+        Self::Shared(std::rc::Rc::new(callback))
+    }
+    pub fn from_mut<F: FnMut(A) -> R + 'static>(callback: F) -> Self {
+        Self::Mutable(std::rc::Rc::new(std::cell::RefCell::new(callback)))
+    }
+    pub fn invoke(&self, arguments: A) -> R {
+        match self {
+            Self::Shared(callback) => callback(arguments),
+            Self::Mutable(callback) => callback.borrow_mut()(arguments),
+        }
+    }
 }
 
 impl<T: ?Sized> JavaReferenceIdentity for std::rc::Rc<T> {
@@ -7903,6 +8896,9 @@ impl JavaMapKeyQuery<String> for &str {
 }
 impl<T> JavaMapKeyQuery<T> for Option<&T> {
     fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&T>) -> R) -> R { query(*self) }
+}
+impl<T> JavaMapKeyQuery<T> for Option<T> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&T>) -> R) -> R { query(self.as_ref()) }
 }
 impl JavaMapKeyQuery<String> for Option<&str> {
     fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&String>) -> R) -> R { query(self.map(str::to_string).as_ref()) }
@@ -8918,6 +9914,17 @@ impl<T> JavaSharedAllocationAccess for std::rc::Rc<std::cell::RefCell<T>> {
     fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.borrow_mut()) }
 }
 impl<T> JavaSharedAllocationAccess for std::sync::Arc<std::sync::Mutex<T>> {
+    type Value = T;
+    fn java_read<R>(&self, read: impl FnOnce(&T) -> R) -> R { read(&self.lock().expect("Java shared object mutex poisoned")) }
+    fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.lock().expect("Java shared object mutex poisoned")) }
+}
+
+impl<T> JavaSharedAllocationAccess for JavaLocalNativeRef<std::cell::RefCell<T>> {
+    type Value = T;
+    fn java_read<R>(&self, read: impl FnOnce(&T) -> R) -> R { read(&self.borrow()) }
+    fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.borrow_mut()) }
+}
+impl<T> JavaSharedAllocationAccess for JavaSyncNativeRef<std::sync::Mutex<T>> {
     type Value = T;
     fn java_read<R>(&self, read: impl FnOnce(&T) -> R) -> R { read(&self.lock().expect("Java shared object mutex poisoned")) }
     fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.lock().expect("Java shared object mutex poisoned")) }
@@ -13806,7 +14813,7 @@ impl std::fmt::Display for InputStreamReader {
 }
 
 struct JavaReaderState {
-    chars: Vec<char>,
+    chars: Vec<u16>,
     position: std::cell::Cell<usize>,
     marked_position: std::cell::Cell<usize>,
     closed: std::cell::Cell<bool>,
@@ -13823,10 +14830,10 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn from_string<S: AsRef<str>>(text: S) -> Reader {
+    pub fn from_string<S: JavaTextView>(text: S) -> Reader {
         Reader {
             state: std::rc::Rc::new(JavaReaderState {
-                chars: text.as_ref().chars().collect(),
+                chars: text.java_text_view().units().to_vec(),
                 position: std::cell::Cell::new(0),
                 marked_position: std::cell::Cell::new(0),
                 closed: std::cell::Cell::new(false),
@@ -13850,7 +14857,7 @@ impl Reader {
         }
         Reader {
             state: std::rc::Rc::new(JavaReaderState {
-                chars: String::from_utf8_lossy(&bytes).chars().collect(),
+                chars: String::from_utf8_lossy(&bytes).encode_utf16().collect(),
                 position: std::cell::Cell::new(0),
                 marked_position: std::cell::Cell::new(0),
                 closed: std::cell::Cell::new(false),
@@ -13859,7 +14866,7 @@ impl Reader {
         }
     }
 
-    fn read_char(&self) -> Result<Option<char>, JavaException> {
+    fn read_code_unit(&self) -> Result<Option<u16>, JavaException> {
         if self.state.closed.get() {
             return Err(JavaException::new("IOException", "Reader closed".to_string()));
         }
@@ -13872,6 +14879,23 @@ impl Reader {
         };
         self.state.position.set(position + 1);
         Ok(Some(ch))
+    }
+
+    // Scalar adapter for the legacy native char-buffer API. Java character
+    // consumers use read_code_unit directly and never decode/lossify surrogates.
+    fn read_char(&self) -> Result<Option<char>, JavaException> {
+        let Some(first) = self.read_code_unit()? else { return Ok(None) };
+        if let Some(ch) = char::from_u32(first as u32) { return Ok(Some(ch)); }
+        if (0xd800..=0xdbff).contains(&first) {
+            if let Some(second) = self.state.chars.get(self.state.position.get()).copied() {
+                if (0xdc00..=0xdfff).contains(&second) {
+                    self.state.position.set(self.state.position.get() + 1);
+                    let point = 0x10000 + ((first as u32 - 0xd800) << 10) + second as u32 - 0xdc00;
+                    return Ok(char::from_u32(point));
+                }
+            }
+        }
+        Err(JavaException::new("IOException", "Native scalar character buffer cannot represent an isolated UTF-16 surrogate".to_string()))
     }
 
     pub fn close(&self) -> Result<(), JavaException> {
@@ -13896,7 +14920,7 @@ impl Reader {
     }
 
     pub fn read_0(&self) -> Result<i32, JavaException> {
-        Ok(self.read_char()?.map_or(-1, |ch| ch as i32))
+        Ok(self.read_code_unit()?.map_or(-1, |ch| ch as i32))
     }
 
     pub fn read(&self, buffer: &mut [char]) -> Result<i32, JavaException> {
@@ -14004,11 +15028,11 @@ pub struct StringReader {
 }
 
 impl StringReader {
-    pub fn new<S: AsRef<str>>(text: S) -> StringReader {
+    pub fn new<S: JavaTextView>(text: S) -> StringReader {
         StringReader { reader: Reader::from_string(text) }
     }
 
-    pub fn new_1<S: AsRef<str>>(text: S) -> StringReader { Self::new(text) }
+    pub fn new_1<S: JavaTextView>(text: S) -> StringReader { Self::new(text) }
 
     pub fn close(&self) -> Result<(), JavaException> { self.reader.close() }
 }
@@ -14089,10 +15113,10 @@ struct JavaStreamTokenizerState {
     syntax: [u8; 256],
     eol_significant: bool,
     line_number: i32,
-    lookahead: Option<char>,
+    lookahead: Option<u16>,
     pushed_back: bool,
     ttype: i32,
-    sval: Option<String>,
+    sval: Option<JavaString>,
     nval: f64,
 }
 
@@ -14143,7 +15167,7 @@ impl StreamTokenizer {
     pub fn new_1<R: Into<Reader>>(reader: R) -> StreamTokenizer { Self::new(reader) }
 
     pub fn ttype(&self) -> i32 { self.state.borrow().ttype }
-    pub fn sval(&self) -> String { self.state.borrow().sval.clone().unwrap_or_default() }
+    pub fn sval(&self) -> Option<JavaString> { self.state.borrow().sval.clone() }
     pub fn nval(&self) -> f64 { self.state.borrow().nval }
     pub fn lineno(&self) -> i32 { self.state.borrow().line_number }
 
@@ -14210,7 +15234,7 @@ impl StreamTokenizer {
             };
             let syntax = Self::syntax_for(&state, ch);
             if syntax == JAVA_STREAM_TOKENIZER_WHITESPACE {
-                if ch == '\n' {
+                if ch == b'\n' as u16 {
                     state.line_number = state.line_number.saturating_add(1);
                     if state.eol_significant {
                         state.ttype = Self::TT_EOL;
@@ -14222,7 +15246,7 @@ impl StreamTokenizer {
             if syntax == JAVA_STREAM_TOKENIZER_COMMENT {
                 loop {
                     match Self::take_char(&mut state)? {
-                        Some('\n') => {
+                        Some(10) => {
                             state.line_number = state.line_number.saturating_add(1);
                             if state.eol_significant {
                                 state.ttype = Self::TT_EOL;
@@ -14240,7 +15264,7 @@ impl StreamTokenizer {
                 continue;
             }
             if syntax == JAVA_STREAM_TOKENIZER_WORD {
-                let mut word = String::new();
+                let mut word = Vec::new();
                 word.push(ch);
                 loop {
                     let Some(next) = Self::take_char(&mut state)? else { break };
@@ -14251,11 +15275,11 @@ impl StreamTokenizer {
                         break;
                     }
                 }
-                state.sval = Some(word);
+                state.sval = Some(JavaString::from_units(word));
                 state.ttype = Self::TT_WORD;
                 return Ok(Self::TT_WORD);
             }
-            state.ttype = ch as u32 as i32;
+            state.ttype = ch as i32;
             return Ok(state.ttype);
         }
     }
@@ -14269,24 +15293,24 @@ impl StreamTokenizer {
         self.state.borrow_mut().syntax[start as usize..=end as usize].fill(syntax);
     }
 
-    fn syntax_for(state: &JavaStreamTokenizerState, ch: char) -> u8 {
-        let code = ch as u32;
-        if code > 255 { JAVA_STREAM_TOKENIZER_WORD } else { state.syntax[code as usize] }
+    fn syntax_for(state: &JavaStreamTokenizerState, ch: u16) -> u8 {
+        let code = ch as usize;
+        if code > 255 { JAVA_STREAM_TOKENIZER_WORD } else { state.syntax[code] }
     }
 
-    fn take_char(state: &mut JavaStreamTokenizerState) -> Result<Option<char>, JavaException> {
+    fn take_char(state: &mut JavaStreamTokenizerState) -> Result<Option<u16>, JavaException> {
         let ch = match state.lookahead.take() {
             Some(ch) => Some(ch),
-            None => state.reader.read_char()?,
+            None => state.reader.read_code_unit()?,
         };
-        if ch != Some('\r') {
+        if ch != Some(13) {
             return Ok(ch);
         }
-        let next = state.reader.read_char()?;
-        if next != Some('\n') {
+        let next = state.reader.read_code_unit()?;
+        if next != Some(10) {
             state.lookahead = next;
         }
-        Ok(Some('\n'))
+        Ok(Some(10))
     }
 }
 
@@ -14321,7 +15345,7 @@ impl std::fmt::Display for StreamTokenizer {
         match self.ttype() {
             Self::TT_EOF => f.write_str("Token[EOF]"),
             Self::TT_EOL => f.write_str("Token[EOL]"),
-            Self::TT_WORD => write!(f, "Token[{}]", self.sval()),
+            Self::TT_WORD => match self.sval() { Some(text) => write!(f, "Token[{}]", String::from_utf16_lossy(text.units())), None => f.write_str("Token[null]") },
             token => write!(f, "Token['{}']", char::from_u32(token as u32).unwrap_or('\u{fffd}')),
         }
     }
@@ -14337,6 +15361,10 @@ impl JavaTokenizerCharCode for i32 {
 
 impl JavaTokenizerCharCode for char {
     fn java_tokenizer_char_code(self) -> i32 { self as u32 as i32 }
+}
+
+impl JavaTokenizerCharCode for JavaCodeUnit {
+    fn java_tokenizer_char_code(self) -> i32 { self.as_u16() as i32 }
 }
 
 impl std::fmt::Display for BufferedReader {
@@ -15413,6 +16441,7 @@ pub mod logger {
     pub fn trace<M: std::fmt::Display>(_message: M) {}
 }"#,
         JAVA_MATH_SCALAR_SUPPORT,
+        include_str!("java_byte_buffer.rs"),
         include_str!("java_float_parse.rs"),
     ].concat(),
     )
@@ -15784,7 +16813,7 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
         .join("\n");
     let source_map_entry_value_clone_downcasts = source_map_entry_value_rust_types
         .iter()
-        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"))
+        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(std::clone::Clone::clone(value)); }}"))
         .collect::<Vec<_>>()
         .join("\n");
     let vec_to_string_downcasts = erased_vec_to_string_downcasts();
@@ -15851,7 +16880,7 @@ impl JavaArraysDeepToStringElement for JavaCodeUnit {
         ""
     };
     let java_string_identity_clone_downcast = if facts.java_string_identity_representation {
-        "    if let Some(value) = value.downcast_ref::<JavaString>() { return Box::new(value.clone()); }"
+        "    if let Some(value) = value.downcast_ref::<JavaString>() { return Box::new(std::clone::Clone::clone(value)); }"
     } else {
         ""
     };
@@ -15943,14 +16972,16 @@ pub fn java_clone_erased_any_ref(value: &dyn std::any::Any) -> std::boxed::Box<d
         return java_clone_erased_any_ref(value.as_ref());
     }}
     if let Some(value) = value.downcast_ref::<std::rc::Rc<std::boxed::Box<dyn std::any::Any>>>() {{
-        return Box::new(value.clone());
+        return Box::new(std::clone::Clone::clone(value));
     }}
     if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
-        return Box::new(value.clone());
+        return Box::new(std::clone::Clone::clone(value));
     }}
-    if let Some(value) = value.downcast_ref::<String>() {{ return Box::new(value.clone()); }}
+    if let Some(value) = value.downcast_ref::<String>() {{ return Box::new(std::clone::Clone::clone(value)); }}
 {java_string_identity_clone_downcast}
-    if let Some(value) = value.downcast_ref::<JavaPlainObject>() {{ return Box::new(value.clone()); }}
+    if let Some(value) = value.downcast_ref::<JavaPlainObject>() {{ return Box::new(std::clone::Clone::clone(value)); }}
+    if let Some(value) = value.downcast_ref::<std::rc::Rc<JavaPlainObject>>() {{ return Box::new(std::clone::Clone::clone(value)); }}
+    if let Some(value) = value.downcast_ref::<std::sync::Arc<JavaPlainObject>>() {{ return Box::new(std::clone::Clone::clone(value)); }}
     if let Some(value) = value.downcast_ref::<bool>() {{ return Box::new(*value); }}
     if let Some(value) = value.downcast_ref::<char>() {{ return Box::new(*value); }}
     if let Some(value) = value.downcast_ref::<JavaCodeUnit>() {{ return Box::new(*value); }}
@@ -16035,21 +17066,21 @@ impl JavaPlainObject {{
 /// when a method consumes the wildcard value.
 pub struct JavaErasedValue {{
     value: std::rc::Rc<dyn std::any::Any>,
-    clone_value: fn(&dyn std::any::Any) -> std::boxed::Box<dyn std::any::Any>,
 }}
 
 impl JavaErasedValue {{
-    pub fn new<T: Clone + std::any::Any>(value: T) -> Self {{
-        fn clone_value<T: Clone + std::any::Any>(value: &dyn std::any::Any) -> std::boxed::Box<dyn std::any::Any> {{
-            std::boxed::Box::new(value.downcast_ref::<T>().expect("Java erased value type").clone())
-        }}
-        Self {{ value: std::rc::Rc::new(value), clone_value: clone_value::<T> }}
+    pub fn new<T: std::any::Any>(value: T) -> Self {{
+        Self {{ value: std::rc::Rc::new(value) }}
     }}
 
-    pub fn downcast_clone<T: std::any::Any>(&self) -> T {{
-        *(self.clone_value)(self.value.as_ref())
-            .downcast::<T>()
-            .expect("invalid Java erased generic interface cast")
+    pub fn try_downcast_clone<T: Clone + std::any::Any>(&self) -> Result<T, JavaException> {{
+        self.value.downcast_ref::<T>().cloned().ok_or_else(||
+            JavaException::new("ClassCastException", "invalid Java erased generic interface cast".to_string()))
+    }}
+
+    pub fn downcast_clone<T: Clone + std::any::Any>(&self) -> T {{
+        self.try_downcast_clone::<T>()
+            .unwrap_or_else(|error| panic!("uncaught Java exception: {{:?}}", error))
     }}
 
     pub fn as_any(&self) -> &dyn std::any::Any {{ self.value.as_ref() }}
@@ -16062,7 +17093,7 @@ impl JavaErasedValue {{
 
 impl Clone for JavaErasedValue {{
     fn clone(&self) -> Self {{
-        Self {{ value: std::clone::Clone::clone(&self.value), clone_value: self.clone_value }}
+        Self {{ value: std::clone::Clone::clone(&self.value) }}
     }}
 }}
 
@@ -16082,25 +17113,34 @@ impl PartialEq for JavaErasedValue {{
 
 impl Eq for JavaErasedValue {{}}
 
+/// Checked conversion at the generic value boundary. Keep erased references
+/// idempotent and clone a known carrier directly, without allocating a Box to
+/// move it through Any. Consumers select the Java exception propagation policy.
+pub fn java_retarget_erased_generic_value_result<
+    Source: Clone + std::any::Any,
+    Target: Clone + std::any::Any,
+>(value: Source) -> Result<Target, JavaException> {{
+    let source = &value as &dyn std::any::Any;
+    if let Some(same) = source.downcast_ref::<Target>() {{
+        return Ok(same.clone());
+    }}
+    if std::any::TypeId::of::<Target>() == std::any::TypeId::of::<JavaErasedValue>() {{
+        let erased = JavaErasedValue::new(value);
+        return Ok((&erased as &dyn std::any::Any).downcast_ref::<Target>()
+            .expect("Java erased target type").clone());
+    }}
+    if let Some(erased) = source.downcast_ref::<JavaErasedValue>() {{
+        return erased.try_downcast_clone::<Target>();
+    }}
+    Err(JavaException::new("ClassCastException", "invalid Java erased generic interface cast".to_string()))
+}}
+
 pub fn java_retarget_erased_generic_value<
     Source: Clone + std::any::Any,
     Target: Clone + std::any::Any,
 >(value: Source) -> Target {{
-    if std::any::TypeId::of::<Target>() == std::any::TypeId::of::<JavaErasedValue>() {{
-        return *(std::boxed::Box::new(JavaErasedValue::new(value))
-            as std::boxed::Box<dyn std::any::Any>)
-            .downcast::<Target>()
-            .expect("Java erased target type");
-    }}
-    if std::any::TypeId::of::<Source>() == std::any::TypeId::of::<JavaErasedValue>() {{
-        let erased = *(std::boxed::Box::new(value) as std::boxed::Box<dyn std::any::Any>)
-            .downcast::<JavaErasedValue>()
-            .expect("Java erased source type");
-        return erased.downcast_clone::<Target>();
-    }}
-    *(std::boxed::Box::new(value) as std::boxed::Box<dyn std::any::Any>)
-        .downcast::<Target>()
-        .expect("invalid Java erased generic interface cast")
+    java_retarget_erased_generic_value_result(value)
+        .unwrap_or_else(|error| panic!("uncaught Java exception: {{:?}}", error))
 }}
 
 {object_string_result_protocol}
@@ -16584,6 +17624,107 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> {object_string_va
     ))
 }
 
+/// Dynamic Object hashing delegates to the exact typed hash protocol emitted
+/// for each canonical reference carrier. Unknown payloads remain unsupported;
+/// their address is not a substitute for an unmodelled Java hashCode override.
+pub(crate) fn java_erased_hash_runtime_support_item(
+    programs: &[&Program],
+    support_program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    signatures: &crate::signature::SignaturePlan,
+) -> crate::rust_ir::RustItem {
+    let mut arms = BTreeSet::new();
+    let mut register = |java_ty: &JavaType, decl: &TypeDecl| {
+        let supported = match representations.representation_for(java_ty) {
+            ObjectRepresentation::JavaEnum { .. } => true,
+            ObjectRepresentation::SourceHierarchyCarrier { variants, .. } => {
+                crate::representation_lowering::source_hierarchy_hash_protocol_is_supported(
+                    &variants,
+                    support_program,
+                    facts,
+                    representations,
+                    signatures,
+                    representations.anonymous_class_base_requires_virtual_carrier(&decl.name),
+                )
+            }
+            _ => source_java_hash_protocol_is_supported(
+                decl,
+                support_program,
+                facts,
+                representations,
+                signatures,
+            ),
+        };
+        if !supported || source_type_is_erased_alias(decl, Some(representations)) {
+            return;
+        }
+        let rust_type =
+            source_object_protocol_storage_rust_type(java_ty, facts, Some(representations));
+        arms.insert(format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return JavaHashCode::java_hash_code_result(value); }}"));
+    };
+    fn visit(ty: &TypeDecl, register: &mut impl FnMut(&JavaType, &TypeDecl)) {
+        if ty.type_params.is_empty() {
+            register(
+                &JavaType::Named {
+                    name: ty.name.clone(),
+                    args: vec![],
+                },
+                ty,
+            );
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, register);
+            }
+        }
+    }
+    for program in programs {
+        for ty in &program.types {
+            visit(ty, &mut register);
+        }
+    }
+    visit_source_concrete_generic_instances(programs, &mut |ty, decl, _| register(ty, decl));
+    let arms = arms.into_iter().collect::<Vec<_>>().join("\n");
+    let string_arm = if facts.java_string_identity_representation {
+        "    hash_leaf!(JavaString);"
+    } else {
+        ""
+    };
+    crate::rust_ir::RustItem::Raw(format!(
+        r#"
+pub fn java_erased_any_hash_code_result(value: &dyn std::any::Any) -> Result<i32, JavaException> {{
+    if let Some(value) = value.downcast_ref::<Box<dyn std::any::Any>>() {{ return java_erased_any_hash_code_result(value.as_ref()); }}
+    if let Some(value) = value.downcast_ref::<std::rc::Rc<Box<dyn std::any::Any>>>() {{ return java_erased_any_hash_code_result(value.as_ref().as_ref()); }}
+    if let Some(value) = value.downcast_ref::<std::sync::Arc<Box<dyn std::any::Any>>>() {{ return java_erased_any_hash_code_result(value.as_ref().as_ref()); }}
+    // java2rust: additive-registry-begin object_hash
+{arms}
+    // java2rust: additive-registry-end object_hash
+    macro_rules! hash_leaf {{ ($ty:ty) => {{
+        if let Some(value) = value.downcast_ref::<$ty>() {{ return JavaHashCode::java_hash_code_result(value); }}
+    }}; }}
+    hash_leaf!(bool); hash_leaf!(char); hash_leaf!(JavaCodeUnit);
+    hash_leaf!(i8); hash_leaf!(i16); hash_leaf!(i32); hash_leaf!(i64);
+    hash_leaf!(f32); hash_leaf!(f64); hash_leaf!(String);
+{string_arm}
+    macro_rules! object_identity {{ ($ty:ty) => {{
+        if let Some(value) = value.downcast_ref::<$ty>() {{ return Ok(JavaReferenceIdentity::java_reference_identity(value) as usize as i32); }}
+    }}; }}
+    object_identity!(std::rc::Rc<JavaPlainObject>);
+    object_identity!(std::sync::Arc<JavaPlainObject>);
+    panic!("unsupported Java erased object hashCode: runtime hash protocol is not registered")
+}}
+
+impl JavaHashCode for dyn std::any::Any {{
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {{ java_erased_any_hash_code_result(self) }}
+}}
+impl<T: JavaHashCode + ?Sized> JavaHashCode for Box<T> {{
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {{ JavaHashCode::java_hash_code_result(self.as_ref()) }}
+}}
+"#
+    ))
+}
+
 fn source_erased_object_clone_downcasts(
     programs: &[&Program],
     facts: &FactSet,
@@ -16633,6 +17774,12 @@ fn source_erased_object_reference_identity_downcasts_with_optional(
     optional: bool,
 ) -> String {
     let mut arms = BTreeSet::new();
+    for rust_type in [
+        "std::rc::Rc<JavaPlainObject>",
+        "std::sync::Arc<JavaPlainObject>",
+    ] {
+        arms.insert(source_reference_identity_downcast_arm(rust_type, optional));
+    }
     fn visit(
         ty: &TypeDecl,
         facts: &FactSet,
@@ -16751,7 +17898,11 @@ fn source_erased_object_class_downcasts(
                     &java_ty, facts, plan,
                 ));
                 for rust_type in rust_types {
-                    arms.insert(format!("    if let Some(_value) = value.downcast_ref::<{rust_type}>() {{ return JavaClass::<()>::literal({java_name:?}); }}"));
+                    arms.insert(if ty.kind == TypeKind::Enum {
+                        format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return JavaClass::<()>::for_name(value.get_class().get_name()); }}")
+                    } else {
+                        format!("    if let Some(_value) = value.downcast_ref::<{rust_type}>() {{ return JavaClass::<()>::literal({java_name:?}); }}")
+                    });
                 }
             }
         }
@@ -16784,6 +17935,11 @@ fn source_erased_object_equals_downcasts(
 ) -> String {
     let mut arms = BTreeSet::new();
     let mut register = |java_ty: &JavaType, decl: &TypeDecl| {
+        if decl.kind == TypeKind::Enum {
+            let rust_type = rust_name_for_java_named_type(&decl.name);
+            arms.insert(format!("    if let Some(value) = left.downcast_ref::<{rust_type}>() {{ return Some(JavaObjectEquals::java_object_equals_result(value, right)); }}"));
+            return;
+        }
         if !matches!(decl.kind, TypeKind::Class | TypeKind::Record)
             || source_type_is_erased_alias(decl, plan)
             || source_type_is_source_hierarchy_carrier_root(decl, plan)
@@ -16872,6 +18028,9 @@ fn source_erased_shared_reference_types(
     facts: &FactSet,
     plan: Option<&RepresentationPlan>,
 ) -> Vec<String> {
+    if ty.kind == TypeKind::Enum {
+        return vec![rust_name_for_java_named_type(&ty.name)];
+    }
     if source_type_is_source_hierarchy_carrier_root(ty, plan)
         && let Some(plan) = plan
     {
@@ -16929,7 +18088,7 @@ fn collect_source_erased_object_clone_downcasts(
         && source_type_is_source_hierarchy_carrier_root(ty, representations)
     {
         for rust_type in source_erased_shared_reference_types(ty, facts, representations) {
-            arms.insert(format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"));
+            arms.insert(format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(std::clone::Clone::clone(value)); }}"));
         }
     }
     if ty.type_params.is_empty()
@@ -16948,7 +18107,7 @@ fn collect_source_erased_object_clone_downcasts(
         let rust_name = rust_name_for_java_named_type(&ty.name);
         for rust_type in source_erased_shared_reference_types(ty, facts, representations) {
             arms.insert(format!(
-                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"
+                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(std::clone::Clone::clone(value)); }}"
             ));
         }
         let simple_clone_fields = ty.members.iter().all(|member| match member {
@@ -16962,7 +18121,7 @@ fn collect_source_erased_object_clone_downcasts(
             && ty.extends.is_none()
         {
             arms.insert(format!(
-                "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{ return Box::new(value.clone()); }}"
+                "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{ return Box::new(std::clone::Clone::clone(value)); }}"
             ));
         }
     }
@@ -17168,7 +18327,7 @@ fn typed_map_entry_erased_object_clone_downcasts(
         .into_iter()
         .map(|(rust_type, _, _)| {
             format!(
-                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"
+                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(std::clone::Clone::clone(value)); }}"
             )
         })
         .collect::<Vec<_>>()
@@ -17624,7 +18783,11 @@ fn collect_expr_class_literal_token_types(
                 collect_expr_class_literal_token_types(arg, facts, token_types);
             }
         }
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             collect_expr_class_literal_token_types(receiver, facts, token_types);
         }
         Expr::ArrayAccess(array, index) => {
@@ -17729,7 +18892,7 @@ fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
 fn erased_display_to_string_downcast_arms(rust_type: &str) -> String {
     if matches!(
         rust_type,
-        "StringBuilder" | "StringBuffer" | "CharSequence" | "StringWriter"
+        "StringBuilder" | "StringBuffer" | "CharSequence" | "StringWriter" | "JavaException"
     ) {
         // Native Rust Display is only an output adapter. Java logical text
         // must call the facade's lossless snapshot, never round-trip through it.
@@ -17937,9 +19100,12 @@ fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &Fac
             {
                 continue;
             }
-            let rust_name =
+            let rust_name = if is_known_throwable_carrier_type(external_type) {
+                "JavaException".to_string()
+            } else {
                 external_facade_crate_mapped_return_type(external_type, &[], facts, None)
-                    .unwrap_or(rust_name);
+                    .unwrap_or(rust_name)
+            };
             arms.insert(erased_display_to_string_downcast_arms(&rust_name));
         }
     }
@@ -18191,7 +19357,11 @@ fn stmt_mentions_java_type(stmt: &Stmt, target_simple_name: &str) -> bool {
 fn expr_mentions_java_type(expr: &Expr, target_simple_name: &str) -> bool {
     match expr {
         Expr::Literal(_) | Expr::Var(_) | Expr::This | Expr::Super | Expr::Raw(_) => false,
-        Expr::FieldAccess(receiver, _) => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => {
             if let Expr::Var(receiver_name) = receiver.as_ref()
                 && external_receiver_name_matches_simple(receiver_name, target_simple_name)
             {
@@ -20403,6 +21573,7 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         None,
         crate::source_emission::SourceEmissionPlan::empty(),
         &invariant_inputs,
+        &[],
     )
     .items
 }
@@ -20492,6 +21663,7 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     source_boundary_plans: Option<SourceBoundaryTraitPlans<'_>>,
     source_emission: &crate::source_emission::SourceEmissionPlan,
     invariant_inputs: &ExternalFacadeInvariantInputs,
+    required_native_carriers: &[&str],
 ) -> ExternalFacadeSupportItems {
     let profile_facade = std::env::var_os("NEW_JAVA2RUST_PROFILE_LOWERING").is_some();
     let mut profile_phase_start = std::time::Instant::now();
@@ -20646,6 +21818,12 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
             // authoritative evidence that the canonical facade is in scope.
             support.add_opaque_type(value_object.to_string());
         }
+    }
+    // Lowering may materialize a platform callback even when no declaration
+    // or import spells its carrier. Use the same facade dependency machinery
+    // as declared native functional values.
+    for carrier in required_native_carriers {
+        support.add_opaque_type((*carrier).to_string());
     }
     support.add_erased_source_alias_owners(representations, &declared_external_type_exclusions);
     // Context sources are normally summaries for declarations which are not
@@ -21192,7 +22370,12 @@ fn collect_local_type_keys_from_expr(
                 }
             }
         }
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
+        | Expr::Unary { expr: receiver, .. } => {
             collect_local_type_keys_from_expr(receiver, enclosing, types);
         }
         Expr::ArrayAccess(array, index) => {
@@ -22368,8 +23551,20 @@ impl ExternalApiFacadeSupport {
             let arity = evidence.arity;
             let type_key = canonical_external_receiver_type_key(&bound_name);
             let trait_name = rust_name_for_java_named_type(&type_key);
+            let type_params = (0..arity)
+                .map(|index| format!("T{index}"))
+                .collect::<Vec<_>>();
+            let bound_args = type_params
+                .iter()
+                .cloned()
+                .map(JavaType::Unknown)
+                .collect::<Vec<_>>();
             if local_type_set_matches_external_name(local_types, &bound_name)
                 || is_builtin_external_facade_type(&trait_name)
+                // Native bound projection already supplies the executable
+                // capability. A parallel opaque trait would disagree with
+                // source signatures and displace its actual runtime carrier.
+                || !crate::item_assembly::jdk_type_param_bound_rust_bounds(&type_key, &bound_args).is_empty()
                 || crate::effective_facts::EffectiveFacts::new(facts)
                     .native_functional_carrier(&JavaType::Named {
                         name: bound_name.clone(),
@@ -22380,9 +23575,6 @@ impl ExternalApiFacadeSupport {
             {
                 continue;
             }
-            let type_params = (0..arity)
-                .map(|index| format!("T{index}"))
-                .collect::<Vec<_>>();
             let methods = self
                 .impls
                 .remove(&trait_name)
@@ -22620,6 +23812,7 @@ impl ExternalApiFacadeSupport {
                     method,
                     plans.program,
                     plans.signatures,
+                    representations,
                 );
                 let exceptions = crate::representation_lowering::trait_method_exception_plan(
                     method_owner,
@@ -22781,6 +23974,29 @@ impl ExternalApiFacadeSupport {
         ty: &crate::java_ir::TypeDecl,
         local_types: &BTreeSet<String>,
     ) {
+        // An inherited native functional facet needs its runtime carrier and
+        // protocol even when no declaration/import/expression names a value
+        // of that type. Keep unrelated source and exception parents on their
+        // own existing representation paths.
+        for parent in ty.extends.iter().chain(&ty.implements) {
+            let parent = crate::parser::parse_hierarchy_type(parent);
+            if let JavaType::Named { name, args } = &parent {
+                let canonical = canonical_external_receiver_type_key(name);
+                let native = native_functional_owner(&canonical);
+                if !native.contains('.') && functional_interface_shape(native).is_some() {
+                    // Native facet protocols and their carriers use the same
+                    // existing owner key (e.g. DoubleConsumer), independently
+                    // of whether the source edge was fully qualified.
+                    self.add_declared_java_type(
+                        &JavaType::Named {
+                            name: native.to_string(),
+                            args: args.clone(),
+                        },
+                        local_types,
+                    );
+                }
+            }
+        }
         for bound in &ty.type_param_bounds {
             if let Some(bound) = bound {
                 self.add_declared_java_type(bound, local_types);
@@ -23517,6 +24733,14 @@ impl ExternalApiFacadeSupport {
                 let method_name = inherited.method_name();
                 let rust_name = inherited.rust_name();
                 let arg_count = inherited.arg_count();
+                if native_functional_method_has_invalid_arity(
+                    facts,
+                    declaring_type,
+                    method_name,
+                    arg_count,
+                ) {
+                    continue;
+                }
                 // A source interface is emitted as a Rust trait, so an
                 // inherent `impl Interface { ... }` is never valid Rust.
                 // Java Object methods that remain callable through an
@@ -23605,6 +24829,14 @@ impl ExternalApiFacadeSupport {
                 let method_name = inherited.method_name();
                 let rust_name = inherited.rust_name();
                 let arg_count = inherited.arg_count();
+                if native_functional_method_has_invalid_arity(
+                    facts,
+                    declaring_type,
+                    method_name,
+                    arg_count,
+                ) {
+                    continue;
+                }
                 if (ty.kind == TypeKind::Interface
                     || functional_interface_shape(
                         declaring_type.rsplit('.').next().unwrap_or(declaring_type),
@@ -23881,7 +25113,12 @@ impl ExternalApiFacadeSupport {
         local_types: &BTreeSet<String>,
     ) {
         match expr {
-            Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+            Expr::FieldAccess(receiver, _)
+            | Expr::MethodReference {
+                receiver: Some(receiver),
+                ..
+            }
+            | Expr::Unary { expr: receiver, .. } => {
                 self.add_declared_external_types_from_expr(receiver, local_types)
             }
             Expr::ArrayAccess(array, index)
@@ -26712,6 +27949,16 @@ impl ExternalApiFacadeSupport {
             // compatibility stub must not duplicate or replace them.
             return false;
         }
+        if !self.source_declared_facade_shadows.contains(&owner)
+            && (NativeFunctionalComposition::fixed_for_call(&owner, method_name, arg_count)
+                .is_some()
+                || NativeFunctionalComposition::generic_for_call(&owner, method_name, arg_count)
+                    .is_some())
+        {
+            // The retained native carrier implements this operation, including
+            // eager validation and deferred fallible invocation.
+            return false;
+        }
         let receiver_kind = facade_method_receiver_kind(&method);
         let method = if external_facade_objects_to_string_method_needs_arity_suffix(
             &owner,
@@ -29078,7 +30325,11 @@ fn collect_expr_imported_static_owner_calls(
                 );
             }
         }
-        Expr::FieldAccess(receiver, _) => collect_expr_imported_static_owner_calls(
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => collect_expr_imported_static_owner_calls(
             receiver,
             aliases,
             static_members,
@@ -29820,7 +31071,11 @@ fn collect_expr_display_return_hints(
                 collect_expr_display_return_hints(arg, ctx, hints);
             }
         }
-        Expr::FieldAccess(receiver, _) => collect_expr_display_return_hints(receiver, ctx, hints),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => collect_expr_display_return_hints(receiver, ctx, hints),
         Expr::ArrayAccess(array, index) => {
             collect_expr_display_return_hints(array, ctx, hints);
             collect_expr_display_return_hints(index, ctx, hints);
@@ -31549,7 +32804,11 @@ fn collect_expr_constructor_arities(
                 collect_expr_constructor_arities(arg, constructors);
             }
         }
-        Expr::FieldAccess(receiver, _) => collect_expr_constructor_arities(receiver, constructors),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => collect_expr_constructor_arities(receiver, constructors),
         Expr::ArrayAccess(array, index) => {
             collect_expr_constructor_arities(array, constructors);
             collect_expr_constructor_arities(index, constructors);
@@ -31875,7 +33134,12 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
             crate::java_ir::LambdaBody::Expr(expr) => collect_expr_call_arities(expr, calls),
             crate::java_ir::LambdaBody::Block(block) => collect_block_call_arities(block, calls),
         },
-        Expr::MethodReference { method, .. } => {
+        Expr::MethodReference {
+            method, receiver, ..
+        } => {
+            if let Some(receiver) = receiver {
+                collect_expr_call_arities(receiver, calls);
+            }
             let method = crate::parser::to_snake_case(method);
             let arities = calls.entry(method).or_default();
             arities.insert(0);
@@ -32761,6 +34025,14 @@ fn representation_dispatch_return_type(
     match representations.dispatch_for(java_type) {
         DispatchShape::ClosedEnum { enum_name } => Some(enum_name),
         DispatchShape::ErasedObject => Some("Box<dyn std::any::Any>".to_string()),
+        DispatchShape::ReferenceDynTrait { trait_name, sync } => Some(format!(
+            "{}<dyn {trait_name}>",
+            if sync {
+                "std::sync::Arc"
+            } else {
+                "std::rc::Rc"
+            }
+        )),
         DispatchShape::BoxedDynTrait { trait_name } => Some(format!("Box<dyn {trait_name}>")),
         // A facade method return is an owned value position. Bare `dyn Trait`
         // is unsized and cannot inhabit `Option`, `Result`, or a direct return;
@@ -33286,9 +34558,9 @@ fn external_facade_eq_impl(ty: &str, inferred_arities: &BTreeMap<String, usize>)
     )
 }
 
-fn functional_reference_eq_impl(ty: &str, generics: &str, handle: &str) -> String {
+fn functional_reference_eq_impl(ty: &str, generics: &str, _handle: &str) -> String {
     format!(
-        "impl{generics} JavaReferenceIdentity for {ty}{generics} {{\n    fn java_reference_identity(&self) -> *const () {{ self.reference_identity.unwrap_or_else(|| {handle}::as_ptr(&self.callback) as *const () as usize) as *const () }}\n}}\n\nimpl{generics} PartialEq for {ty}{generics} {{\n    fn eq(&self, other: &Self) -> bool {{ JavaReferenceIdentity::java_reference_identity(self) == JavaReferenceIdentity::java_reference_identity(other) }}\n}}\n\nimpl{generics} Eq for {ty}{generics} {{}}"
+        "impl{generics} JavaReferenceIdentity for {ty}{generics} {{\n    fn java_reference_identity(&self) -> *const () {{ self.reference_identity.unwrap_or_else(|| JavaReferenceIdentity::java_reference_identity(&self.callback) as usize) as *const () }}\n}}\n\nimpl{generics} PartialEq for {ty}{generics} {{\n    fn eq(&self, other: &Self) -> bool {{ JavaReferenceIdentity::java_reference_identity(self) == JavaReferenceIdentity::java_reference_identity(other) }}\n}}\n\nimpl{generics} Eq for {ty}{generics} {{}}"
     )
 }
 
@@ -33482,7 +34754,13 @@ fn external_facade_functional_closure_carrier_struct_for_shape(
         retained_collection,
         true,
     );
-    format!("{local}\n\n{sync}")
+    let protocol = NativePrimitiveConsumerBound::for_name(ty).map(|bound| {
+        let protocol = bound.trait_name();
+        let input = bound.rust_input();
+        let synchronized = synchronized_functional_carrier_name(ty);
+        format!("\n\npub trait {protocol} {{\n    fn __java_accept_result(&mut self, value: {input}) -> Result<(), JavaException>;\n}}\n\nimpl {protocol} for {ty} {{\n    fn __java_accept_result(&mut self, value: {input}) -> Result<(), JavaException> {{ self.accept_result(value) }}\n}}\n\nimpl {protocol} for {synchronized} {{\n    fn __java_accept_result(&mut self, value: {input}) -> Result<(), JavaException> {{ self.accept_result(value) }}\n}}\n\nimpl<T: {protocol} + ?Sized> {protocol} for &mut T {{\n    fn __java_accept_result(&mut self, value: {input}) -> Result<(), JavaException> {{ T::__java_accept_result(*self, value) }}\n}}")
+    }).unwrap_or_default();
+    format!("{local}\n\n{sync}{protocol}")
 }
 
 fn external_facade_functional_closure_carrier_struct_for_domain(
@@ -33523,20 +34801,32 @@ fn external_facade_functional_closure_carrier_struct_for_domain(
         "dyn {callback_trait}({}) -> {result_type}{callback_bounds}",
         input_types.join(", ")
     );
+    let argument_names = (0..input_types.len())
+        .map(|index| format!("arg{index}"))
+        .collect::<Vec<_>>();
+    let method_args = argument_names.join(", ");
+    let tuple_suffix = if input_types.len() == 1 { "," } else { "" };
+    let tuple_type = format!("({}{tuple_suffix})", input_types.join(", "));
+    let tuple_arguments = format!("({method_args}{tuple_suffix})");
     let callback_storage = if synchronized {
         format!("std::sync::Arc<{callback_signature}>")
     } else {
-        format!("std::rc::Rc<std::cell::RefCell<{callback_signature}>>")
+        format!("JavaLocalCallback<{tuple_type}, {result_type}>")
     };
     let callback_construction = if synchronized {
-        "std::sync::Arc::new(callback)"
+        "std::sync::Arc::new(callback)".to_string()
     } else {
-        "std::rc::Rc::new(std::cell::RefCell::new(callback))"
+        format!("JavaLocalCallback::from_mut(move |{tuple_arguments}| callback({method_args}))")
+    };
+    let shared_callback_construction = if synchronized {
+        "std::sync::Arc::new(callback)".to_string()
+    } else {
+        format!("JavaLocalCallback::from_shared(move |{tuple_arguments}| callback({method_args}))")
     };
     let callback_dispatch = if synchronized {
-        "self.callback"
+        format!("(self.callback)({method_args})")
     } else {
-        "self.callback.borrow_mut()"
+        format!("self.callback.invoke({tuple_arguments})")
     };
     let callback_mut = if synchronized { "" } else { "mut " };
     let default_params = input_types
@@ -33559,10 +34849,6 @@ fn external_facade_functional_closure_carrier_struct_for_domain(
         .enumerate()
         .map(|(index, ty)| format!("arg{index}: {ty}"))
         .collect::<Vec<_>>();
-    let method_args = (0..input_types.len())
-        .map(|index| format!("arg{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let method_params = if method_params.is_empty() {
         "&self".to_string()
     } else {
@@ -33570,6 +34856,12 @@ fn external_facade_functional_closure_carrier_struct_for_domain(
     };
     let method_name = rust_raw_ident_if_needed(shape.method());
     let result_method = shape.result_method_name();
+    let (composition_fields, composition_clone, composition_default, composition_methods) =
+        native_fixed_composition_runtime_methods(
+            ty.strip_prefix("__JavaSync").unwrap_or(ty),
+            shape,
+            synchronized,
+        );
     let plain_body = crate::emit::emit_expr(
         &crate::coercion::unwrap_result_or_panic_uncaught_java_exception(
             crate::coercion::receiver_method_call_projection_exact(
@@ -33598,11 +34890,12 @@ fn external_facade_functional_closure_carrier_struct_for_domain(
     // genuine lambda owns the callback allocation itself. Neither token is
     // the address of a movable Rust facade slot.
     reference_identity: Option<usize>,
+    {composition_fields}
     {collection_field}
 }}
 
 impl{impl_generics} std::clone::Clone for {ty_with_impl_generics} {{
-    fn clone(&self) -> Self {{ Self {{ callback: self.callback.clone(), reference_identity: self.reference_identity{collection_clone} }} }}
+    fn clone(&self) -> Self {{ Self {{ callback: self.callback.clone(), reference_identity: self.reference_identity{collection_clone}{composition_clone} }} }}
 }}
 
 impl{impl_generics} std::fmt::Debug for {ty_with_impl_generics} {{
@@ -33624,10 +34917,22 @@ impl{impl_generics} {ty_with_impl_generics} {{
         Self::from_fallible_fn(move |{method_args}| std::result::Result::Ok(callback({method_args})))
     }}
 
-    pub fn from_fallible_fn<F>(callback: F) -> Self
+    pub fn from_fallible_fn<F>({callback_mut}callback: F) -> Self
     where F: {callback_trait}({input_types}) -> {result_type}{callback_bounds} + 'static,
     {{
-        Self {{ callback: {callback_construction}, reference_identity: None{collection_default} }}
+        Self {{ callback: {callback_construction}, reference_identity: None{collection_default}{composition_default} }}
+    }}
+
+    pub fn from_shared_fn<F>(callback: F) -> Self
+    where F: Fn({input_types}) -> {return_type}{callback_bounds} + 'static,
+    {{
+        Self::from_shared_fallible_fn(move |{method_args}| Ok(callback({method_args})))
+    }}
+
+    pub fn from_shared_fallible_fn<F>(callback: F) -> Self
+    where F: Fn({input_types}) -> {result_type}{callback_bounds} + 'static,
+    {{
+        Self {{ callback: {shared_callback_construction}, reference_identity: None{collection_default}{composition_default} }}
     }}
 
     pub fn with_java_reference_identity(mut self, identity: *const ()) -> Self {{
@@ -33635,18 +34940,100 @@ impl{impl_generics} {ty_with_impl_generics} {{
         self
     }}
 
-    pub fn {result_method}({method_params}) -> {result_type} {{ ({callback_dispatch})({method_args}) }}
+    pub fn {result_method}({method_params}) -> {result_type} {{ {callback_dispatch} }}
 
     pub fn {method_name}({method_params}) -> {return_type} {{ {plain_body} }}
+
+{composition_methods}
 }}"#
     );
     support
 }
 
+fn native_fixed_composition_runtime_methods(
+    owner: &str,
+    shape: &FunctionalInterfaceShape,
+    synchronized: bool,
+) -> (String, String, String, String) {
+    let mut fields = String::new();
+    let mut clones = String::new();
+    let mut defaults = String::new();
+    let mut methods = String::new();
+    for name in ["compose", "andThen"] {
+        let Some(operation) = NativeFunctionalComposition::fixed_for_call(owner, name, 1) else {
+            continue;
+        };
+        let method = operation.rust_name();
+        let field = format!("__{method}_override");
+        let builder = format!("with_{method}_override");
+        let callback = if synchronized { "Fn" } else { "FnMut" };
+        let bounds = if synchronized { " + Send + Sync" } else { "" };
+        let signature = "(Option<Self>) -> std::result::Result<Option<Self>, JavaException>";
+        let (storage, construction, shared_construction, dispatch) = if synchronized {
+            (
+                format!("std::sync::Arc<dyn {callback}{signature}{bounds}>"),
+                "std::sync::Arc::new(callback)",
+                "std::sync::Arc::new(callback)",
+                format!("(self.{field}.as_ref().unwrap())(other)"),
+            )
+        } else {
+            (
+                "JavaLocalCallback<Option<Self>, std::result::Result<Option<Self>, JavaException>>"
+                    .to_string(),
+                "JavaLocalCallback::from_mut(callback)",
+                "JavaLocalCallback::from_shared(callback)",
+                format!("self.{field}.as_ref().unwrap().invoke(other)"),
+            )
+        };
+        fields.push_str(&format!("{field}: Option<{storage}>,\n"));
+        clones.push_str(&format!(", {field}: self.{field}.clone()"));
+        defaults.push_str(&format!(", {field}: None"));
+        let invoke = shape.result_method_name();
+        let body = match (operation, shape.returns().is_some()) {
+            (NativeFunctionalComposition::Before, _) => {
+                format!("first.{invoke}(other.{invoke}(value)?)")
+            }
+            (NativeFunctionalComposition::After, true) => {
+                format!("other.{invoke}(first.{invoke}(value)?)")
+            }
+            (NativeFunctionalComposition::After, false) => {
+                format!("{{ first.{invoke}(value)?; other.{invoke}(value) }}")
+            }
+        };
+        // Each result call ends before the next starts. In particular a.andThen(a)
+        // must not hold the first RefCell guard while entering the second call.
+        methods.push_str(&format!(r#"
+    pub fn {builder}<F>(mut self, callback: F) -> Self
+    where F: {callback}{signature}{bounds} + 'static,
+    {{ self.{field} = Some({construction}); self }}
+
+    pub fn with_{method}_shared_override<F>(mut self, callback: F) -> Self
+    where F: Fn{signature}{bounds} + 'static,
+    {{ self.{field} = Some({shared_construction}); self }}
+
+    pub fn {method}(&self, other: Option<Self>) -> std::result::Result<Option<Self>, JavaException> {{
+        if self.{field}.is_some() {{ return {dispatch}; }}
+        let other = other.ok_or_else(|| JavaException::from_constructor("NullPointerException", None, None))?;
+        let first = self.clone();
+        Ok(Some(Self::from_shared_fallible_fn(move |value| {body})))
+    }}
+"#));
+    }
+    (fields, clones, defaults, methods)
+}
+
 pub(crate) fn java_native_collection_runtime_support() -> String {
-    format!(
+    let mut support = include_str!("java_native_reference.rs").to_string();
+    support.push_str(&format!(
         r#"#[derive(Clone, Copy, PartialEq, Eq)]
 enum JavaNativeCollectionMutation {{ Mutable, FixedSize, ImmutableEmpty, ImmutableSingleton, Unmodifiable, RemoveOnly }}
+
+impl<T> JavaReferenceIdentity for JavaLocalNativeRef<T> {{
+    fn java_reference_identity(&self) -> *const () {{ self.identity_ptr() }}
+}}
+impl<T> JavaReferenceIdentity for JavaSyncNativeRef<T> {{
+    fn java_reference_identity(&self) -> *const () {{ self.identity_ptr() }}
+}}
 
 /// A live projected collection supplies operations, not a detached Vec. Key
 /// copies are canonical Java reference copies; map values need not be Clone.
@@ -34234,7 +35621,8 @@ impl<T: JavaMapKey> JavaMapKey for std::rc::Rc<std::cell::RefCell<JavaNativeColl
 }}
 
 "#
-    )
+    ));
+    support
 }
 
 fn native_iterable_runtime_support(ty: &str) -> String {
@@ -34351,14 +35739,17 @@ struct JavaListOperations<T> {
 /// An operation view, not a replacement Java allocation. In particular two
 /// independently built views of one source object still have the same identity.
 pub struct JavaListView<T> {
-    allocation: std::rc::Rc<dyn std::any::Any>,
-    operations: std::rc::Rc<JavaListOperations<T>>,
+    operations: JavaLocalNativeRef<JavaListOperations<T>>,
 }
 
 impl<T> Clone for JavaListView<T> {
     fn clone(&self) -> Self {
-        Self { allocation: self.allocation.clone(), operations: self.operations.clone() }
+        Self { operations: self.operations.clone() }
     }
+}
+
+impl<T> JavaReferenceIdentity for JavaListView<T> {
+    fn java_reference_identity(&self) -> *const () { self.operations.identity_ptr() }
 }
 
 impl<T> std::fmt::Debug for JavaListView<T> {
@@ -34378,8 +35769,7 @@ impl<T> JavaListView<T> {
         I: Fn() -> Result<JavaIterator<T>, JavaException> + 'static,
     {
         Self {
-            allocation: source,
-            operations: std::rc::Rc::new(JavaListOperations {
+            operations: JavaLocalNativeRef::projected_from_rc(&source, JavaListOperations {
                 get: Box::new(get), set: Box::new(set), size: Box::new(size), iterator: Box::new(iterator),
             }),
         }
@@ -34392,12 +35782,11 @@ impl<T> JavaListView<T> {
     pub fn iterator_result(&self) -> Result<JavaIterator<T>, JavaException> { (self.operations.iterator)() }
 
     pub fn same_allocation(&self, other: &Self) -> bool {
-        std::rc::Rc::ptr_eq(&self.allocation, &other.allocation)
+        self.operations.identity_ptr() == other.operations.identity_ptr()
     }
 
     pub fn shares_allocation_with<S: 'static>(&self, source: &std::rc::Rc<S>) -> bool {
-        let erased: std::rc::Rc<dyn std::any::Any> = source.clone();
-        std::rc::Rc::ptr_eq(&self.allocation, &erased)
+        self.operations.identity_ptr() == std::rc::Rc::as_ptr(source).cast()
     }
 }
 
@@ -35477,7 +36866,12 @@ fn source_summary_expr_calls_fallible_external(
                 .iter()
                 .any(|arg| source_summary_expr_calls_fallible_external(facts, arg, param_types))
         }
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
+        | Expr::Unary { expr: receiver, .. } => {
             source_summary_expr_calls_fallible_external(facts, receiver, param_types)
         }
         Expr::Binary { left, right, .. } => {
@@ -36011,10 +37405,11 @@ pub(crate) fn external_facade_receiver_call_is_noop_method(
         .next()
         .unwrap_or(receiver_key)
         .to_string();
-    if matches!(
-        receiver_simple.as_str(),
-        "StringBuilder" | "StringBuffer" | "Appendable"
-    ) {
+    // These linked carriers implement their own shared state; a fluent
+    // return is an executable mutation, not a generated facade placeholder.
+    if NATIVE_SHARED_REFERENCE_TYPES.contains(&receiver_simple.as_str())
+        || receiver_simple == "Appendable"
+    {
         return false;
     }
     external_facade_method_is_self_returning_fluent(facts, receiver_key, java_method, arg_count)
@@ -36072,6 +37467,12 @@ fn external_facade_trait_item(trait_surface: &ExternalFacadeTrait) -> String {
     if trait_surface.source_interface_object_support {
         methods.extend(
             crate::representation_lowering::trait_object_support_method_signatures(&trait_path),
+        );
+    }
+    if trait_surface.source_interface_object_support {
+        crate::representation_lowering::materialize_trait_object_support_defaults(
+            &mut methods,
+            &trait_path,
         );
     }
     let methods = methods.join("\n");
@@ -37561,6 +38962,8 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
     matches!(
         name,
         "String"
+            | "SplittableRandom"
+            | "JavaUtilSplittableRandom"
             | "JavaException"
             | "CharSequence"
             | "Vec"
@@ -37589,6 +38992,8 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "StringBuilder"
             | "Appendable"
             | "CharBuffer"
+            | "ByteBuffer"
+            | "JavaNioByteBuffer"
             | "StringTokenizer"
             | "Pattern"
             | "Matcher"
@@ -39076,7 +40481,17 @@ fn external_enum_variant_names(facts: &FactSet, owner: &str) -> Vec<String> {
     variants
 }
 
+/// Java Enum.compareTo returns the ordinal difference, including its magnitude.
+/// Source declarations and native enum facades must use the same contract.
+pub(crate) fn java_enum_compare_to_method() -> &'static str {
+    r#"    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {
+        self.ordinal().wrapping_sub(other.borrow().ordinal())
+    }
+"#
+}
+
 fn external_enum_facade_item(owner: &str, variants: &[String]) -> String {
+    let enum_compare_to = java_enum_compare_to_method();
     let variant_items = variants
         .iter()
         .map(|variant| format!("    {variant},"))
@@ -39107,7 +40522,7 @@ fn external_enum_facade_item(owner: &str, variants: &[String]) -> String {
         format!("impl Default for {owner} {{\n    fn default() -> Self {{ Self::{variant} }}\n}}")
     });
     format!(
-        "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {owner} {{\n{variant_items}\n}}\n\n{default_impl}\n\nimpl {owner} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {owner}.{{}}\", other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        match self.ordinal().cmp(&other.borrow().ordinal()) {{\n            std::cmp::Ordering::Less => -1,\n            std::cmp::Ordering::Equal => 0,\n            std::cmp::Ordering::Greater => 1,\n        }}\n    }}\n}}\n\nimpl std::fmt::Display for {owner} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{}}\", self.name()) }}\n}}"
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {owner} {{\n{variant_items}\n}}\n\n{default_impl}\n\nimpl {owner} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {owner}.{{}}\", other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n{enum_compare_to}}}\n\nimpl std::fmt::Display for {owner} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{}}\", self.name()) }}\n}}"
     )
 }
 
@@ -40233,6 +41648,7 @@ pub(crate) fn is_java_platform_facade_type_name(name: &str) -> bool {
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
         "Path"
+            | "ByteBuffer"
             | "CharSequence"
             | "URI"
             | "File"
@@ -40431,7 +41847,11 @@ fn expr_contains_string_concat(expr: &Expr) -> bool {
             receiver.as_deref().is_some_and(expr_contains_string_concat)
                 || args.iter().any(expr_contains_string_concat)
         }
-        Expr::FieldAccess(receiver, _) => expr_contains_string_concat(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_contains_string_concat(receiver),
         Expr::ArrayAccess(array, index) => {
             expr_contains_string_concat(array) || expr_contains_string_concat(index)
         }
@@ -40696,7 +42116,11 @@ fn expr_uses_java_erased_object_runtime_support(expr: &Expr) -> bool {
                     .iter()
                     .any(expr_uses_java_erased_object_runtime_support)
         }
-        Expr::FieldAccess(receiver, _) => expr_uses_java_erased_object_runtime_support(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_uses_java_erased_object_runtime_support(receiver),
         Expr::ArrayAccess(array, index) => {
             expr_uses_java_erased_object_runtime_support(array)
                 || expr_uses_java_erased_object_runtime_support(index)
@@ -40947,7 +42371,11 @@ fn expr_uses_java_string_format(expr: &Expr) -> bool {
                     .is_some_and(expr_uses_java_string_format)
                 || args.iter().any(expr_uses_java_string_format)
         }
-        Expr::FieldAccess(receiver, _) => expr_uses_java_string_format(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_uses_java_string_format(receiver),
         Expr::ArrayAccess(array, index) => {
             expr_uses_java_string_format(array) || expr_uses_java_string_format(index)
         }
@@ -41223,7 +42651,11 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     .is_some_and(expr_uses_java_string_runtime_helpers)
                 || args.iter().any(expr_uses_java_string_runtime_helpers)
         }
-        Expr::FieldAccess(receiver, _) => expr_uses_java_string_runtime_helpers(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_uses_java_string_runtime_helpers(receiver),
         Expr::ArrayAccess(array, index) => {
             expr_uses_java_string_runtime_helpers(array)
                 || expr_uses_java_string_runtime_helpers(index)
@@ -41420,7 +42852,11 @@ fn expr_uses_java_string_split(expr: &Expr) -> bool {
                 || receiver.as_deref().is_some_and(expr_uses_java_string_split)
                 || args.iter().any(expr_uses_java_string_split)
         }
-        Expr::FieldAccess(receiver, _) => expr_uses_java_string_split(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_uses_java_string_split(receiver),
         Expr::ArrayAccess(array, index) => {
             expr_uses_java_string_split(array) || expr_uses_java_string_split(index)
         }
@@ -41605,6 +43041,10 @@ fn expr_uses_java_class_tokens(expr: &Expr) -> bool {
                 || args.iter().any(expr_uses_java_class_tokens)
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::ArrayAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -41842,7 +43282,7 @@ fn is_known_jdk_utility_constructor(type_name: &str, arg_types: &[JavaType]) -> 
         "BigInteger" => matches!(arg_types.len(), 1 | 2),
         "BitSet" => arg_types.len() <= 1,
         "Date" => arg_types.len() <= 1,
-        "Random" => arg_types.len() <= 1,
+        "Random" | "SplittableRandom" => arg_types.len() <= 1,
         "ConsoleHandler" => arg_types.is_empty(),
         "ForkJoinPool" => arg_types.len() <= 1,
         "Manifest" => arg_types.len() == 1,
@@ -42956,6 +44396,17 @@ mod source_summary_method_identity_tests {
             ),
             Some("PathBuf".to_string())
         );
+        types.insert_static_type_alias("SplittableRandom", "Local.SplittableRandom");
+        assert_eq!(
+            external_api_receiver_owner_key(
+                &JavaType::Named {
+                    name: "java.util.SplittableRandom".into(),
+                    args: Vec::new()
+                },
+                &types,
+            ),
+            Some("java.util.SplittableRandom".into())
+        );
     }
 
     #[test]
@@ -43762,6 +45213,45 @@ mod functional_interface_shape_tests {
     };
     use crate::java_ir::PrimitiveType;
 
+    #[test]
+    fn primitive_consumer_capabilities_follow_scoped_bounds_and_source_precedence() {
+        use crate::java_ir::JavaType;
+        let named = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![],
+        };
+        let mut env = crate::types::TypeEnv::new();
+        env.insert_type_param_bound("T", named("U"));
+        env.insert_type_param_bound("U", named("java.util.function.DoubleConsumer"));
+        let facts = crate::facts::FactSet::default();
+        let selected =
+            super::native_primitive_consumer_receiver_bound(&named("T"), &env, &facts).unwrap();
+        assert_eq!(selected.primitive, PrimitiveType::Double);
+        assert!(
+            super::native_primitive_consumer_receiver_bound(&named("DoubleConsumer"), &env, &facts)
+                .is_none()
+        );
+        env.insert_type_param_bound("U", named("vendor.DoubleConsumer"));
+        assert!(
+            super::native_primitive_consumer_receiver_bound(&named("T"), &env, &facts).is_none()
+        );
+        env.insert_type_param_bound("U", named("DoubleConsumer"));
+        let parsed = crate::parser::parse_java_source(
+            "interface DoubleConsumer { void accept(double value); }",
+        );
+        let source_facts =
+            crate::resolve::resolve_program(&parsed.program, parsed.diagnostics).facts;
+        assert!(
+            super::native_primitive_consumer_receiver_bound(&named("T"), &env, &source_facts)
+                .is_none()
+        );
+        env.insert_type_param_declaration("T", None);
+        assert!(
+            super::native_primitive_consumer_receiver_bound(&named("T"), &env, &source_facts)
+                .is_none()
+        );
+    }
+
     fn shape_of(
         name: &str,
     ) -> (
@@ -44420,7 +45910,7 @@ pub fn exercise() {
         );
         let support = external_facade_functional_closure_carrier_struct("Iterable");
         let source = format!(
-            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator, JavaMapKey, JavaSemanticHashMap}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
+            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator, JavaLocalCallback, JavaReferenceIdentity, JavaMapKey, JavaSemanticHashMap}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
             runtime.rust,
             r#"
 pub fn exercise() {
@@ -44691,7 +46181,7 @@ pub fn exercise() {
     assert!(list_view.shares_allocation_with(&source));
     let independently_projected = JavaListView::from_native_allocation(source.clone()).unwrap();
     assert!(list_view.same_allocation(&independently_projected));
-    assert!(!std::rc::Rc::ptr_eq(&list_view.operations, &independently_projected.operations));
+    assert!(!std::ptr::eq(list_view.operations.as_ref(), independently_projected.operations.as_ref()));
     let other_source = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(vec![1, 2], true)));
     assert!(!list_view.same_allocation(&JavaListView::from_native_allocation(other_source).unwrap()));
     assert_eq!(list_view.get_result(0).unwrap(), 1);
@@ -44830,7 +46320,7 @@ pub fn exercise() {
     // SAME get callback is legal, so the dispatch table cannot be RefCell<FnMut>.
     struct SourceList {
         base: i32,
-        operations: Option<std::rc::Weak<JavaListOperations<i32>>>,
+        operations: Option<JavaLocalNativeWeak<JavaListOperations<i32>>>,
     }
     fn project_source(source: std::rc::Rc<std::cell::RefCell<SourceList>>) -> JavaListView<i32> {
         let get_source = source.clone();
@@ -44871,7 +46361,7 @@ pub fn exercise() {
     }
     let source = std::rc::Rc::new(std::cell::RefCell::new(SourceList { base: 3, operations: None }));
     let source_projection = project_source(source.clone());
-    source.borrow_mut().operations = Some(std::rc::Rc::downgrade(&source_projection.operations));
+    source.borrow_mut().operations = Some(source_projection.operations.downgrade());
     let independently_projected = project_source(source.clone());
     assert!(source_projection.same_allocation(&independently_projected));
     assert!(source_projection.shares_allocation_with(&source));
@@ -44949,7 +46439,7 @@ pub fn exercise() {
             false,
         );
         let source = format!(
-            "{}\nmod factory_scope {{ use super::{{JavaException, JavaIterator, JavaMapKey}};\n{support}\n{}\n}}\nfn main() {{ factory_scope::exercise(); }}",
+            "{}\nmod factory_scope {{ use super::{{JavaException, JavaIterator, JavaLocalCallback, JavaReferenceIdentity, JavaMapKey}};\n{support}\n{}\n}}\nfn main() {{ factory_scope::exercise(); }}",
             runtime.rust,
             r#"
 struct Opaque(i32);
@@ -44964,7 +46454,7 @@ pub fn exercise() {
     });
     let alias = factory.clone();
     assert_eq!(state.get(), 0);
-    assert!(std::rc::Rc::ptr_eq(&factory.callback, &alias.callback));
+    assert_eq!(JavaReferenceIdentity::java_reference_identity(&factory.callback), JavaReferenceIdentity::java_reference_identity(&alias.callback));
     assert_eq!(factory.iterator_result().unwrap().next_result().unwrap().0, 0);
     assert_eq!(alias.iterator_result().unwrap().next_result().unwrap().0, 1);
     assert!(factory.iterator_result().is_err());
@@ -44993,7 +46483,7 @@ pub fn exercise() {
             .map(external_facade_functional_closure_carrier_struct)
             .join("\n");
         let source = format!(
-            "{runtime}\nmod callback_scope {{ use super::JavaException;\n{support}\n{}\n}}\nfn main() {{ callback_scope::exercise(); }}",
+            "{runtime}\nmod callback_scope {{ use super::{{JavaException, JavaLocalCallback, JavaReferenceIdentity}};\n{support}\n{}\n}}\nfn main() {{ callback_scope::exercise(); }}",
             r#"
 struct Opaque(i32);
 // A source class with this spelling must not shadow the runtime trait path.
@@ -45002,7 +46492,7 @@ pub fn exercise() {
     let mut next = 0;
     let supplier = Supplier::from_fn(move || { next += 1; Opaque(next) });
     let alias = supplier.clone();
-    assert!(std::rc::Rc::ptr_eq(&supplier.callback, &alias.callback));
+    assert_eq!(JavaReferenceIdentity::java_reference_identity(&supplier.callback), JavaReferenceIdentity::java_reference_identity(&alias.callback));
     assert_eq!(supplier.get().0, 1);
     assert_eq!(alias.get().0, 2);
     assert_eq!(supplier.get().0, 3);

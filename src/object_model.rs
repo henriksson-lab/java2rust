@@ -1235,6 +1235,10 @@ fn stmt_accesses_instance_field(stmt: &Stmt, field_names: &HashSet<String>) -> b
 
 fn expr_accesses_instance_field(expr: &Expr, field_names: &HashSet<String>) -> bool {
     match expr {
+        Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => expr_accesses_instance_field(receiver, field_names),
         Expr::Var(name) => field_names.contains(name),
         Expr::FieldAccess(receiver, field_name) => {
             matches!(receiver.as_ref(), Expr::This) && field_names.contains(field_name)

@@ -110,6 +110,25 @@ trait Value { fn value(self) -> i32; }
 impl Value for i32 { fn value(self) -> i32 { self } }
 impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self.unwrap() } }
 #[test] fn java_list_contracts() { assert_eq!(RetainedListOperations::run().value(), 23); }
+#[test] fn projected_reference_identity_and_operation_access_share_the_root() {
+    struct NoClone(i32);
+    let source = JavaLocalNativeRef::new(std::cell::RefCell::new(NoClone(1)));
+    let view = JavaLocalNativeRef::projected(&source, std::cell::RefCell::new(source.clone()));
+    let source_loan = source.borrow_mut();
+    let view_loan = view.borrow_mut();
+    assert!(java_reference_equals(Some(&source), Some(&view)));
+    drop((source_loan, view_loan));
+    view.java_read(|owner| owner.java_write(|value| value.0 = 9));
+    assert_eq!(source.java_read(|value| value.0), 9);
+    let sync = JavaSyncNativeRef::new(std::sync::Mutex::new(NoClone(3)));
+    let sync_view = JavaSyncNativeRef::projected(&sync, std::sync::Mutex::new(sync.clone()));
+    let source_guard = sync.lock().unwrap();
+    let view_guard = sync_view.lock().unwrap();
+    assert!(java_reference_equals(Some(&sync), Some(&sync_view)));
+    drop((source_guard, view_guard));
+    sync_view.java_read(|owner| owner.java_write(|value| value.0 = 11));
+    assert_eq!(sync.java_read(|value| value.0), 11);
+}
 #[test] fn probes_and_reversal_do_not_require_payload_clone() {
     struct NoClone(i32);
     let cursor = JavaListIterator::<NoClone>::from_fallible_operations(

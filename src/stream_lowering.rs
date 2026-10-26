@@ -477,7 +477,7 @@ fn emit_stream_lambda_shared_native_call(
                 ctx.propagate_java_exceptions,
                 None,
                 ctx.representations.and_then(|representations| {
-                    crate::shape_projection::retained_native_queue_result_shape(
+                    crate::shape_projection::retained_native_collection_result_shape(
                         &shape,
                         *method,
                         facts,
@@ -2103,12 +2103,17 @@ fn stream_bound_receiver_capture<'a>(
     lambda: &LambdaPlan<'a>,
     ctx: StreamRenderContext<'_>,
 ) -> Option<StreamBoundReceiverCapture<'a>> {
-    let StreamLambdaBody::MethodReference { target, .. } = lambda.body() else {
+    let StreamLambdaBody::MethodReference {
+        target,
+        receiver: source,
+        ..
+    } = lambda.body()
+    else {
         return None;
     };
     let env = ctx.env?;
     let receiver =
-        crate::method_reference_plan::bound_method_reference_receiver(target, env)?.source_expr();
+        crate::method_reference_plan::bound_method_reference_source(target, source, env)?;
     let shape = infer_expr_shape_with_context(
         &receiver,
         env,
@@ -2143,19 +2148,11 @@ fn stream_bound_receiver_capture<'a>(
     );
     captured_shape.ownership = OwnershipShape::SharedBorrow;
     if captured_shape.java_ty == JavaType::String {
-        // Capture an immutable string view, not a reference to a String
-        // container whose equality/argument ABI is different from `str`.
-        if captured_shape.view == crate::slot_shape::ViewShape::Str {
-            value = crate::coercion::deref_borrowed_projection(value);
-        }
-        let target = borrowed_string_content_shape();
-        let conversion = plan_lowered_slot_conversion(
-            &LoweredType::Slot(Box::new(captured_shape)),
-            Slot::Argument(target.clone()),
-            ctx.facts.unwrap_or(&default_facts),
-        );
-        value = apply_lowered_slot_conversion_to_expr(value, &conversion);
-        captured_shape = target;
+        // Retain the canonical Java String handle, rather than a borrow of
+        // the Option local. Its Clone preserves Java identity and UTF-16.
+        // Native equality then receives its ordinary owned String carrier.
+        value = apply_clone_projection(crate::coercion::deref_borrowed_projection(value));
+        captured_shape = crate::shape_projection::owned_string_value_shape();
     }
     let mut captured_env = env.clone();
     captured_env.insert_local_shape("__java_bound_receiver".to_string(), captured_shape);
@@ -2941,7 +2938,7 @@ fn render_context_lambda_output_shape(
     ctx: StreamRenderContext<'_>,
 ) -> Option<RustSlotShape> {
     let env = ctx.env?;
-    if let StreamLambdaBody::MethodReference { target, method } = lambda.body() {
+    if let StreamLambdaBody::MethodReference { target, method, .. } = lambda.body() {
         if let Some(shape) = source_method_reference_output_shape(target, method, param_shape, ctx)
         {
             return Some(shape);
@@ -3483,7 +3480,7 @@ fn emit_stream_method_reference_body_expr(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<RustExpr> {
-    let StreamLambdaBody::MethodReference { target, method } = lambda.body() else {
+    let StreamLambdaBody::MethodReference { target, method, .. } = lambda.body() else {
         return None;
     };
     if method != "new"

@@ -563,7 +563,12 @@ pub(crate) fn program_projects_java_enum_bound(
 
 /// `Comparable` maps to `Ord`; the generated support library blanket-implements
 /// `JavaComparable` (and therefore `compare_to`) for every `T: Ord`.
-fn jdk_type_param_bound_rust_bounds(bound: &str, args: &[JavaType]) -> Vec<String> {
+pub(crate) fn jdk_type_param_bound_rust_bounds(bound: &str, args: &[JavaType]) -> Vec<String> {
+    if args.is_empty()
+        && let Some(protocol) = crate::stdlib::NativePrimitiveConsumerBound::for_name(bound)
+    {
+        return vec![protocol.trait_name()];
+    }
     match bound.rsplit('.').next().unwrap_or(bound) {
         "Comparable" => vec!["Ord".to_string()],
         "Cloneable" => vec!["Clone".to_string()],
@@ -2206,6 +2211,10 @@ fn expr_delegates_type_param_to_clone_requiring_method(
             })
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
@@ -2719,7 +2728,12 @@ fn expr_type_param_collection_bulk_copy_needs_clone(
                     expr_type_param_collection_bulk_copy_needs_clone(type_param, arg, locals)
                 })
         }
-        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
+        | Expr::Unary { expr: receiver, .. } => {
             expr_type_param_collection_bulk_copy_needs_clone(type_param, receiver, locals)
         }
         Expr::ArrayAccess(array, index)
@@ -5984,6 +5998,26 @@ fn callable_type_param_reaches_source_capability<'a>(
         for stmt in &body.statements {
             conversion_types.learn_stmt(stmt);
         }
+        if capability == SourceCallableCapability::JavaAny
+            && let Some(context) = search.storage_context
+            && callable_source_conversion_boundary_matches(
+                body,
+                return_type,
+                &conversion_types,
+                support_programs,
+                |expr, target| {
+                    crate::source_interface_refs::capture_requires_any(
+                        expr,
+                        target,
+                        type_param,
+                        &conversion_types,
+                        context.representations,
+                    )
+                },
+            )
+        {
+            return true;
+        }
         if let Some(trait_capability) = capability
             .trait_impl_capability()
             .filter(|capability| *capability != TraitImplCapability::Clone)
@@ -7668,7 +7702,12 @@ class SortUse {
                 .iter()
                 .find(|param| param.name.contains("comparator"))
                 .map(|param| &param.ty),
-            Some(&RustType::Named("Comparator".into()))
+            // A value ABI still retains its instantiated Java parameter.
+            // Bare Comparator selects its erased default Object carrier.
+            Some(&RustType::Generic {
+                base: "Comparator".into(),
+                args: vec![RustType::String]
+            })
         );
     }
 
@@ -7730,6 +7769,32 @@ class SortUse {
                 params: vec![canonical.clone()],
                 return_type: Some(Box::new(canonical)),
             })
+        );
+    }
+
+    #[test]
+    fn callback_inputs_keep_the_solved_retained_argument_carrier() {
+        let facts = FactSet::default();
+        let array = JavaType::Array(Box::new(JavaType::Primitive(
+            crate::java_ir::PrimitiveType::Int,
+        )));
+        let mut callback = RustSlotShape::for_storage(JavaType::Named {
+            name: "Consumer".into(),
+            args: vec![array],
+        });
+        callback.require_native_allocation_at(
+            &[0],
+            crate::storage_strategy::StoragePlacement::new(true, true, false),
+        );
+        let rendered = functional_callback_param_type_for_slot(
+            &callback,
+            &facts,
+            Some(&crate::representation::RepresentationPlan::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::emit::emit_type(&rendered),
+            "impl FnMut(std::rc::Rc<std::cell::RefCell<Vec<i32>>>)"
         );
     }
 
@@ -10144,10 +10209,13 @@ fn callable_source_interface_conversion_requires_capability(
     capability: TraitImplCapability,
     search: &mut CloneRequirementSearch,
 ) -> bool {
-    let mut required = false;
-    let mut boundary = |expr: &Expr, target: &JavaType| {
-        if !required {
-            required = source_interface_conversion_requires_capability(
+    callable_source_conversion_boundary_matches(
+        body,
+        return_type,
+        types,
+        support_programs,
+        |expr, target| {
+            source_interface_conversion_requires_capability(
                 expr,
                 target,
                 type_param,
@@ -10156,7 +10224,23 @@ fn callable_source_interface_conversion_requires_capability(
                 support_programs,
                 capability,
                 search,
-            );
+            )
+        },
+    )
+}
+
+/// One inventory of contextual conversion boundaries for capability analyses.
+fn callable_source_conversion_boundary_matches(
+    body: &Block,
+    return_type: Option<&JavaType>,
+    types: &TypeEnv,
+    support_programs: &[&Program],
+    mut matches_boundary: impl FnMut(&Expr, &JavaType) -> bool,
+) -> bool {
+    let mut required = false;
+    let mut boundary = |expr: &Expr, target: &JavaType| {
+        if !required {
+            required = matches_boundary(expr, target);
         }
     };
     crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| match stmt {
@@ -11112,9 +11196,13 @@ fn struct_fields_for_type(
         .iter()
         .any(|member| matches!(member, Member::Type(_)));
     let source_field_rust_names = crate::java_naming::source_instance_field_rust_names(ty);
-    fields.extend(ty.members.iter().filter_map(|member| {
-        match member {
-            Member::Field(field) if !is_static_field(field) => Some(RustField {
+    fields.extend(ty.members.iter().filter_map(|member| match member {
+        Member::Field(field) if !is_static_field(field) => {
+            let (is_pub, is_pub_crate) = source_field_visibility(
+                field,
+                upcast_visible_fields || carrier_visible_fields || nestmate_visible_fields,
+            );
+            Some(RustField {
                 name: source_field_rust_names
                     .get(&field.name)
                     .cloned()
@@ -11126,28 +11214,30 @@ fn struct_fields_for_type(
                     facts,
                     representations,
                 ),
-                is_pub: source_field_is_public(field),
-                is_pub_crate: !source_field_is_public(field)
-                    && (!source_field_is_private(field)
-                        || upcast_visible_fields
-                        || carrier_visible_fields
-                        || nestmate_visible_fields),
-            }),
-            _ => None,
+                is_pub,
+                is_pub_crate,
+            })
         }
+        _ => None,
     }));
     fields.extend(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
             .into_iter()
-            .map(|inherited| RustField {
-                name: inherited.rust_name().to_string(),
-                ty: rust_type_for_slot_maybe_with_representations(
-                    &signatures.required_field_shape(&ty.name, inherited.rust_name()),
-                    facts,
-                    representations,
-                ),
-                is_pub: false,
-                is_pub_crate: upcast_visible_fields || carrier_visible_fields,
+            .map(|inherited| {
+                let (is_pub, is_pub_crate) = source_field_visibility(
+                    inherited.field(),
+                    upcast_visible_fields || carrier_visible_fields,
+                );
+                RustField {
+                    name: inherited.rust_name().to_string(),
+                    ty: rust_type_for_slot_maybe_with_representations(
+                        &signatures.required_field_shape(&ty.name, inherited.rust_name()),
+                        facts,
+                        representations,
+                    ),
+                    is_pub,
+                    is_pub_crate,
+                }
             }),
     );
     fields.extend(
@@ -11636,6 +11726,17 @@ fn box_recursive_field_type(rust_ty: RustType) -> RustType {
     }
 }
 
+/// Flattened storage retains the visibility of its declaring Java field.
+/// Internal object-model access can widen a private slot to crate visibility,
+/// but does not turn a Java private field into a public Rust field.
+fn source_field_visibility(field: &FieldDecl, internal_access: bool) -> (bool, bool) {
+    let is_pub = source_field_is_public(field);
+    (
+        is_pub,
+        !is_pub && (!source_field_is_private(field) || internal_access),
+    )
+}
+
 fn source_field_is_public(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Public)
 }
@@ -11843,7 +11944,11 @@ fn assigned_instance_field_name(expr: &Expr) -> Option<&str> {
 fn constructor_expr_reads_self(expr: &Expr) -> bool {
     match expr {
         Expr::This | Expr::Super => true,
-        Expr::FieldAccess(receiver, _) => constructor_expr_reads_self(receiver),
+        Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => constructor_expr_reads_self(receiver),
         Expr::Call { receiver, args, .. } => {
             receiver.as_deref().is_some_and(constructor_expr_reads_self)
                 || args.iter().any(constructor_expr_reads_self)
@@ -13104,18 +13209,13 @@ fn method_params_with_optional_lifetime(
                 .cloned()
                 .unwrap_or_else(|| param.name().to_string());
             if callback_param {
-                let java_ty = method
-                    .params
-                    .get(index)
-                    .map(|param| &param.ty)
-                    .unwrap_or_else(|| param.java_ty());
                 return RustParam {
                     name: format!("mut {name}"),
                     ty: source_method_callback_param_type(
                         callback_owner,
                         callback_method,
                         index,
-                        java_ty,
+                        param.shape(),
                         signatures,
                         facts,
                         representations,
@@ -13334,6 +13434,10 @@ fn collect_mutable_array_target_params_in_expr(expr: &Expr, names: &mut HashSet<
             collect_array_target_root_name(expr, names);
         }
         Expr::FieldAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        }
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
         | Expr::InstanceOf { expr: receiver, .. } => {
@@ -13448,12 +13552,28 @@ fn array_access_root_var(expr: &Expr) -> Option<&str> {
 /// became `impl FnMut()` and its `-> String` vanished (`E0308`), and every name
 /// missing from the shorter match stayed an opaque struct with no methods —
 /// `Comparator<T>` reached `.compare(..)` on `pub struct Comparator;` (`E0599`).
+#[cfg(test)]
 fn functional_callback_param_type(
     java_ty: &JavaType,
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> Option<RustType> {
-    let JavaType::Named { name, args } = java_ty else {
+    functional_callback_param_type_for_slot(
+        &RustSlotShape::for_storage(java_ty.clone()),
+        facts,
+        representations,
+    )
+}
+
+fn functional_callback_param_type_for_slot(
+    parent: &RustSlotShape,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> Option<RustType> {
+    let java_ty = parent
+        .optional_element_type()
+        .unwrap_or_else(|| parent.java_ty.clone());
+    let JavaType::Named { name, args } = &java_ty else {
         return None;
     };
     let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
@@ -13463,11 +13583,12 @@ fn functional_callback_param_type(
     let inputs = shape
         .input_types(args)?
         .iter()
-        .map(|ty| {
+        .zip(shape.inputs())
+        .map(|(ty, source)| {
             // A SAM input is a Java reference value, not an ordinary source
             // method's borrowed receiver view. Match stored native SAMs and
             // typed invocation/lambda lowering through the storage projection.
-            let shape = representations.map_or_else(
+            let mut value = representations.map_or_else(
                 || crate::shape_projection::project_java_value_shape(None, ty.clone()),
                 |representations| {
                     crate::shape_projection::storage_shape_for_java_type(
@@ -13476,19 +13597,37 @@ fn functional_callback_param_type(
                     )
                 },
             );
-            rust_type_for_slot_with_optional_representations(&shape, facts, representations)
+            crate::shape_projection::inherit_native_functional_value_domain(
+                &mut value, parent, *source,
+            );
+            rust_type_for_slot_with_optional_representations(&value, facts, representations)
         })
         .collect();
     // A missing result *type argument* means the source did not spell the
     // generic out; keep the previous behaviour rather than guess.
     let return_type = match shape.returns() {
-        Some(_) => Some(Box::new(
-            rust_type_for_java_type_with_optional_representations(
-                &shape.return_type(args)?,
+        Some(source) => {
+            let ty = shape.return_type(args)?;
+            let mut result = representations.map_or_else(
+                || crate::shape_projection::project_java_value_shape(None, ty.clone()),
+                |representations| {
+                    crate::shape_projection::storage_shape_for_java_type(
+                        representations,
+                        ty.clone(),
+                    )
+                },
+            );
+            crate::shape_projection::inherit_native_functional_value_domain(
+                &mut result,
+                parent,
+                source,
+            );
+            Some(Box::new(rust_type_for_slot_with_optional_representations(
+                &result,
                 facts,
                 representations,
-            ),
-        )),
+            )))
+        }
         None => None,
     };
     Some(RustType::ImplFnTrait {
@@ -13504,7 +13643,7 @@ pub(crate) fn source_method_callback_param_type(
     owner: &TypeDecl,
     method: &MethodDecl,
     index: usize,
-    java_ty: &JavaType,
+    parent: &RustSlotShape,
     signatures: &SignaturePlan,
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
@@ -13515,7 +13654,7 @@ pub(crate) fn source_method_callback_param_type(
         return None;
     }
     let ty = maybe_add_lifetime_to_refs(
-        functional_callback_param_type(java_ty, facts, representations)?,
+        functional_callback_param_type_for_slot(parent, facts, representations)?,
         lifetime,
     );
     let name = crate::java_signature::source_method_rust_name(method);

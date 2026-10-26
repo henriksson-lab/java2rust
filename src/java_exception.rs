@@ -1,6 +1,6 @@
 // Java exception state and logical message API. The producer selects the
 // text alias and explicit formatter adapter; no scalar projection lives here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct JavaException {
     class_name: &'static str,
     binary_name: &'static str,
@@ -8,6 +8,34 @@ pub struct JavaException {
     cause: Option<std::boxed::Box<JavaException>>,
     suppressed: Vec<JavaException>,
     null_callback_receiver: bool,
+}
+
+impl JavaAppendValue for JavaException {
+    fn into_java_append_string(self) -> JavaUtf16 {
+        JavaTextView::java_text_view(&self.to_string()).into_owned()
+    }
+}
+
+impl JavaAppendValue for &JavaException {
+    fn into_java_append_string(self) -> JavaUtf16 {
+        JavaTextView::java_text_view(&self.to_string()).into_owned()
+    }
+}
+
+impl std::fmt::Debug for JavaException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep the lossless stored state available to diagnostics, together
+        // with the existing Java text formatter's readable exception text.
+        f.debug_struct("JavaException")
+            .field("class_name", &self.class_name)
+            .field("binary_name", &self.binary_name)
+            .field("text", &format_args!("{}", self))
+            .field("message", &self.message)
+            .field("cause", &self.cause)
+            .field("suppressed", &self.suppressed)
+            .field("null_callback_receiver", &self.null_callback_receiver)
+            .finish()
+    }
 }
 
 impl JavaException {

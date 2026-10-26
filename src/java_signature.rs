@@ -2,6 +2,30 @@ use crate::java_ir::{
     CallKind, ConstructorDecl, JavaType, MethodDecl, Modifier, Param, Program, TypeDecl,
 };
 
+/// Map an actual argument to the selected formal's physical storage domain.
+/// Resolution retains formal array types and per-actual conversion targets;
+/// their difference proves variable-arity packing without guessing from syntax.
+pub(crate) fn resolved_argument_storage_projection(
+    call: &crate::java_ir::ResolvedCall,
+    actual_index: usize,
+) -> Option<(usize, Vec<usize>, JavaType, JavaType)> {
+    let last = call.arg_target_types.len().checked_sub(1)?;
+    if actual_index >= last
+        && let JavaType::Array(element) = &call.arg_target_types[last]
+        && crate::call_plan::resolved_call_arg_target_type(call, actual_index)
+            == Some(element.as_ref())
+    {
+        return Some((
+            last,
+            vec![0],
+            *element.clone(),
+            call.arg_target_types[last].clone(),
+        ));
+    }
+    let ty = call.arg_target_types.get(actual_index)?.clone();
+    Some((actual_index, vec![], ty.clone(), ty))
+}
+
 /// Recover the exact source declaration behind a resolved Rust member name.
 /// Shared by invocation graphs and source callback contracts: lexical owner
 /// lookup must not select a same-leaf declaration from another package.
@@ -68,6 +92,26 @@ pub(crate) fn source_constructor_rust_name_with_count(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JavaOwnerKey(String);
 
+#[cfg(test)]
+mod owner_identity_tests {
+    #[test]
+    fn merged_program_owner_uses_retained_compilation_unit_identity() {
+        let mut parsed = crate::parser::parse_java_source("package origin; class Value<T> {}");
+        parsed.program.package = Some("unrelated".into());
+        let ty = &parsed.program.types[0];
+        assert_eq!(
+            super::JavaOwnerKey::source_type_in_program(&parsed.program, ty).as_str(),
+            "origin.Value"
+        );
+        let mut renamed = ty.clone();
+        renamed.name = "origin.JavaType.Value".into();
+        assert_eq!(
+            super::JavaOwnerKey::source_type_in_program(&parsed.program, &renamed).as_str(),
+            "origin.JavaType.Value"
+        );
+    }
+}
+
 impl JavaOwnerKey {
     /// The canonical source owner includes the compilation unit package.
     ///
@@ -81,6 +125,11 @@ impl JavaOwnerKey {
         // (which would turn `b.Item` into `a.b.Item`).
         if ty.name.contains('.') {
             return Self(ty.name.clone());
+        }
+        // A merged program retains just one package field. Non-colliding
+        // declarations still keep their original per-file source identity.
+        if let Some(names) = &ty.source_names {
+            return Self(names.canonical.clone());
         }
         match &program.package {
             Some(package) if !package.is_empty() => Self(format!("{package}.{}", ty.name)),
@@ -292,12 +341,25 @@ pub(crate) fn erased_type_names_match_with_aliases(left: &str, right: &str) -> b
     if source_name_has_package_prefix(left_base) && source_name_has_package_prefix(right_base) {
         return false;
     }
+    // External API aliases intentionally include the leaf of a nested name.
+    // Source slots must retain both explicit owners: A.Builder and B.Builder
+    // cannot become one declaration merely because each has a Builder leaf.
+    // Reuse the same source suffix normalization for dotted, binary and
+    // already-flattened nested identities.
+    let left_source = flattened_source_type_suffix(left_base);
+    let right_source = flattened_source_type_suffix(right_base);
+    if left_source.contains('_') && right_source.contains('_') {
+        return left_source == right_source;
+    }
     crate::facts::external_type_name_matches(left_base, right_base)
         || nested_source_type_suffix_alias_matches(left_base, right_base)
 }
 
-fn nested_source_type_suffix_alias_matches(left: &str, right: &str) -> bool {
-    if source_name_has_package_prefix(left) && source_name_has_package_prefix(right) {
+pub(crate) fn nested_source_type_suffix_alias_matches(left: &str, right: &str) -> bool {
+    if source_name_has_package_prefix(left)
+        && source_name_has_package_prefix(right)
+        && source_type_package_prefix(left) != source_type_package_prefix(right)
+    {
         return false;
     }
     flattened_source_type_suffix(left) == flattened_source_type_suffix(right)
@@ -308,6 +370,13 @@ fn source_name_has_package_prefix(name: &str) -> bool {
         .next()
         .and_then(|segment| segment.chars().next())
         .is_some_and(char::is_lowercase)
+}
+
+fn source_type_package_prefix(name: &str) -> String {
+    name.split(['.', '$'])
+        .take_while(|segment| !segment.chars().next().is_some_and(char::is_uppercase))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn flattened_source_type_suffix(name: &str) -> String {
@@ -360,6 +429,32 @@ mod erased_alias_tests {
     }
 
     #[test]
+    fn nested_source_aliases_preserve_owners_and_array_rank() {
+        for (left, right) in [
+            ("First.Builder", "Second.Builder"),
+            ("First_Builder", "Second.Builder"),
+            ("p.First.Builder[]", "Second$Builder[]"),
+            ("First.Builder[]", "First_Builder[][]"),
+        ] {
+            assert!(
+                !erased_type_names_match_with_aliases(left, right),
+                "{left} vs {right}"
+            );
+        }
+        for (left, right) in [
+            ("First.Builder", "First_Builder"),
+            ("p.First$Builder[]", "First_Builder[]"),
+            ("p.First.Builder", "First.Builder"),
+            ("First.Builder", "Builder"),
+        ] {
+            assert!(
+                erased_type_names_match_with_aliases(left, right),
+                "{left} vs {right}"
+            );
+        }
+    }
+
+    #[test]
     fn flattened_nested_source_name_matches_qualified_java_name() {
         assert!(crate::facts::external_type_name_matches(
             "org.biojava.nbio.alignment.routines.AlignerHelper",
@@ -381,6 +476,38 @@ pub(crate) fn erased_param_types(params: &[Param]) -> Vec<String> {
         .iter()
         .map(|param| erased_type_name(&param.ty, param.is_varargs))
         .collect()
+}
+
+/// Erase scoped binders through their declared upper bounds. The caller's
+/// map already applies method-over-owner shadowing; F-bounds and cycles must
+/// not turn binder spelling into an overload identity.
+pub(crate) fn erased_type_name_with_bounds(
+    ty: &JavaType,
+    bounds: &std::collections::HashMap<String, JavaType>,
+) -> String {
+    fn erase(
+        ty: &JavaType,
+        bounds: &std::collections::HashMap<String, JavaType>,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> String {
+        match ty {
+            JavaType::Named { name, args } if args.is_empty() && bounds.contains_key(name) => {
+                if !visiting.insert(name.clone()) {
+                    return "java.lang.Object".into();
+                }
+                let out = erase(&bounds[name], bounds, visiting);
+                visiting.remove(name);
+                out
+            }
+            JavaType::Array(inner) => format!("{}[]", erase(inner, bounds, visiting)),
+            JavaType::Intersection(items) => items
+                .first()
+                .map(|ty| erase(ty, bounds, visiting))
+                .unwrap_or_else(|| "java.lang.Object".into()),
+            _ => erased_type_name(ty, false),
+        }
+    }
+    erase(ty, bounds, &mut std::collections::HashSet::new())
 }
 
 pub(crate) fn erased_type_name(ty: &JavaType, is_varargs: bool) -> String {
@@ -436,4 +563,48 @@ pub(crate) fn source_method_overload_rust_name(method: &MethodDecl) -> String {
         .collect::<Vec<_>>()
         .join("_");
     format!("{base}_{suffix}")
+}
+
+#[cfg(test)]
+mod bound_erasure_tests {
+    use super::*;
+    use std::collections::HashMap;
+    fn named(name: &str) -> JavaType {
+        JavaType::Named {
+            name: name.into(),
+            args: Vec::new(),
+        }
+    }
+    #[test]
+    fn bound_erasure_handles_arrays_alpha_binders_and_cycles() {
+        let mut bounds = HashMap::from([
+            ("T".into(), named("IntConsumer")),
+            ("U".into(), named("IntConsumer")),
+            ("A".into(), named("B")),
+            ("B".into(), named("A")),
+        ]);
+        assert_eq!(
+            erased_type_name_with_bounds(&named("T"), &bounds),
+            erased_type_name_with_bounds(&named("U"), &bounds)
+        );
+        assert_eq!(
+            erased_type_name_with_bounds(&JavaType::Array(Box::new(named("T"))), &bounds),
+            "IntConsumer[]"
+        );
+        assert_eq!(
+            erased_type_name_with_bounds(&named("A"), &bounds),
+            "java.lang.Object"
+        );
+        bounds.insert(
+            "T".into(),
+            JavaType::Named {
+                name: "Comparable".into(),
+                args: vec![named("T")],
+            },
+        );
+        assert_eq!(
+            erased_type_name_with_bounds(&named("T"), &bounds),
+            "Comparable"
+        );
+    }
 }

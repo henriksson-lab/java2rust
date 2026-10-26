@@ -128,7 +128,7 @@ impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self
 #[test] fn source_dispatch() { assert_eq!(LabelUse::run().value(), 0); }
 #[test] fn rust_interface_bridge() {
     let mut value = LabelUse::make();
-    assert_eq!(Labelled::to_string(&*value), "label:1");
+    assert_eq!(Labelled::to_string(&*value), "label:1".into());
     assert_eq!(Labelled::id(&*value).value(), 1);
 }
 #[derive(Clone)] struct ForeignLabel;
@@ -137,10 +137,10 @@ impl Labelled for ForeignLabel {
     fn as_any(&self) -> &dyn std::any::Any { self }
     fn clone_any(&self) -> Box<dyn std::any::Any> { Box::new(self.clone()) }
     fn clone_box(&self) -> Box<dyn Labelled> { Box::new(self.clone()) }
-    fn to_string(&self) -> String { "foreign".to_string() }
+    fn to_string(&self) -> JavaLogicalString { "foreign".into() }
 }
 #[test] fn foreign_interface_override() {
-    assert_eq!(LabelUse::describe(&ForeignLabel).unwrap().as_deref(), Some("foreign"));
+    assert_eq!(LabelUse::describe(&ForeignLabel).unwrap(), Some("foreign".into()));
 }
 "#,
     );

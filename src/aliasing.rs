@@ -247,6 +247,16 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
         return false;
     }
     let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    if effective.native_shared_reference_carrier(alias.aliased_ty())
+        && alias.original_ty.as_ref().is_some_and(|original| {
+            effective.native_shared_reference_carrier(original)
+                && facts
+                    .hierarchy_subtype_policy(original, alias.aliased_ty())
+                    .reaches()
+        })
+    {
+        return true;
+    }
     if effective
         .native_list_cursor_element_type(alias.aliased_ty())
         .is_some()
@@ -273,16 +283,6 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
     let JavaType::Named { name, .. } = alias.aliased_ty() else {
         return false;
     };
-    if effective.native_text_reference_carrier(alias.aliased_ty())
-        && alias.original_ty.as_ref().is_some_and(|original| {
-            effective.native_text_reference_carrier(original)
-                && facts
-                    .hierarchy_subtype_policy(original, alias.aliased_ty())
-                    .reaches()
-        })
-    {
-        return true;
-    }
     let placement = facts.storage_placement_for(name);
     if placement.shared() && placement.interior_mutable() && placement.is_implemented() {
         return true;
@@ -330,17 +330,20 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
 }
 
 #[derive(Default)]
-struct NativeAliasStorage {
+struct NativeAliasStorage<'a> {
     allocations: HashMap<crate::binding_id::BindingId, crate::storage_strategy::StoragePlacement>,
+    shapes: HashMap<crate::binding_id::BindingId, &'a crate::slot_shape::RustSlotShape>,
     params: HashMap<String, crate::binding_id::BindingId>,
     fields: HashMap<String, crate::storage_strategy::StoragePlacement>,
+    signatures: Option<&'a crate::signature::SignaturePlan>,
+    owner: Option<String>,
 }
 
-impl NativeAliasStorage {
+impl<'a> NativeAliasStorage<'a> {
     fn from_slots(
         params: &[crate::java_ir::Param],
-        slots: &[crate::signature::ParamPlan],
-        locals: &[crate::signature::LocalPlan],
+        slots: &'a [crate::signature::ParamPlan],
+        locals: &'a [crate::signature::LocalPlan],
         facts: &FactSet,
     ) -> Self {
         let mut result = Self::default();
@@ -359,9 +362,11 @@ impl NativeAliasStorage {
     fn with_fields(
         mut self,
         owner: &TypeDecl,
-        signatures: &crate::signature::SignaturePlan,
+        signatures: &'a crate::signature::SignaturePlan,
         facts: &FactSet,
     ) -> Self {
+        self.signatures = Some(signatures);
+        self.owner = Some(owner.name.clone());
         for member in &owner.members {
             if let Member::Field(field) = member
                 && let Some(shape) = signatures.field_shape_for_declared_field(owner, field)
@@ -376,11 +381,47 @@ impl NativeAliasStorage {
     fn record(
         &mut self,
         binding: &crate::binding_id::BindingId,
-        shape: &crate::slot_shape::RustSlotShape,
+        shape: &'a crate::slot_shape::RustSlotShape,
         facts: &FactSet,
     ) {
+        self.shapes.insert(binding.clone(), shape);
         if let Some(placement) = Self::native_placement(shape, facts) {
             self.allocations.insert(binding.clone(), placement);
+        }
+    }
+
+    fn place_shape<'b>(
+        &self,
+        place: &Expr,
+        binding_at: &impl Fn(&str) -> Option<&'b crate::binding_id::BindingId>,
+        facts: &FactSet,
+    ) -> Option<crate::slot_shape::RustSlotShape> {
+        match place {
+            Expr::Var(name) => match binding_at(name) {
+                Some(binding) => self.shapes.get(binding).copied().cloned(),
+                // A lexical binding shadows a same-named instance field even
+                // when that binding has no supported storage witness.
+                None => self
+                    .signatures?
+                    .field_shape(self.owner.as_deref()?, name)
+                    .cloned(),
+            },
+            Expr::This => Some(crate::slot_shape::RustSlotShape::for_storage(
+                JavaType::Named {
+                    name: self.owner.clone()?,
+                    args: vec![],
+                },
+            )),
+            Expr::FieldAccess(receiver, field) => {
+                let parent = self.place_shape(receiver, binding_at, facts)?;
+                self.signatures?
+                    .field_shape_for_receiver_type(&parent.java_ty, field)
+            }
+            Expr::ArrayAccess(receiver, _) => {
+                let parent = self.place_shape(receiver, binding_at, facts)?;
+                crate::shape_projection::indexed_read_shape_for_access_with_facts(&parent, facts)
+            }
+            _ => None,
         }
     }
 
@@ -546,7 +587,7 @@ fn collect_in_body(
             }
             let other = if site.handle == point.original {
                 point.alias.clone()
-            } else if point.alias.local_name() == Some(site.handle.as_str()) {
+            } else if point.alias.display() == site.handle {
                 AliasHandle::Local(point.original.clone())
             } else {
                 return None;
@@ -570,9 +611,7 @@ fn collect_in_body(
             point.original_is_live_native_map_entry,
             site.kind.clone(),
         );
-        if (!native_storage.allocations.is_empty() || !native_storage.fields.is_empty())
-            && let Some(alias_name) = point.alias.local_name()
-        {
+        if !native_storage.allocations.is_empty() || !native_storage.fields.is_empty() {
             let binding_at = |name: &str| {
                 if let Some(site) = liveness.declaration_site_at(point.stmt, name) {
                     statements.iter().find_map(|stmt| {
@@ -594,9 +633,22 @@ fn collect_in_body(
                 Some(binding) => native_storage.allocations.get(binding),
                 None => native_storage.fields.get(name),
             };
-            alias.native_allocation_preserved = placement_at(&point.original)
-                .zip(placement_at(alias_name))
-                .is_some_and(|(original, alias)| original == alias);
+            alias.native_allocation_preserved = matches!(point.stmt, Stmt::VarDecl { .. })
+                && point.alias.local_name().is_some_and(|name| {
+                    placement_at(&point.original)
+                        .zip(placement_at(name))
+                        .is_some_and(|(original, alias)| original == alias)
+                });
+            if let Stmt::Assign { target, .. } = point.stmt {
+                // The receiving place can be a nested array slot or an object
+                // field, not merely a local root. Compare the actual stored
+                // carrier, using the same field/index projections as emission.
+                alias.native_allocation_preserved |= native_storage
+                    .place_shape(target, &binding_at, facts)
+                    .and_then(|shape| NativeAliasStorage::native_placement(&shape, facts))
+                    .zip(placement_at(&point.original).copied())
+                    .is_some_and(|(target, source)| target == source);
+            }
         }
         found.push(alias);
     }
@@ -621,13 +673,14 @@ struct AliasPoint<'a> {
 enum AliasHandle {
     Local(String),
     ThisField(String),
+    ObjectField { owner: String, field: String },
 }
 
 impl AliasHandle {
     fn local_name(&self) -> Option<&str> {
         match self {
             AliasHandle::Local(name) => Some(name),
-            AliasHandle::ThisField(_) => None,
+            AliasHandle::ThisField(_) | AliasHandle::ObjectField { .. } => None,
         }
     }
 
@@ -635,6 +688,7 @@ impl AliasHandle {
         match self {
             AliasHandle::Local(name) => name.clone(),
             AliasHandle::ThisField(field) => format!("this.{field}"),
+            AliasHandle::ObjectField { owner, field } => format!("{owner}.{field}"),
         }
     }
 }
@@ -767,12 +821,12 @@ fn native_live_map_entry_initializer(
 
 fn alias_storage_receiver(target: &Expr) -> Option<AliasHandle> {
     match target {
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
-            Some(AliasHandle::ThisField(field.clone()))
-        }
-        Expr::ArrayAccess(receiver, _) | Expr::FieldAccess(receiver, _) => {
-            alias_handle_for_storage_receiver(receiver)
-        }
+        Expr::FieldAccess(_, _) => alias_handle_for_storage_receiver(target),
+        Expr::ArrayAccess(receiver, _)
+        | Expr::MethodReference {
+            receiver: Some(receiver),
+            ..
+        } => alias_handle_for_storage_receiver(receiver),
         _ => None,
     }
 }
@@ -783,6 +837,23 @@ fn alias_handle_for_storage_receiver(receiver: &Expr) -> Option<AliasHandle> {
         Expr::This => None,
         Expr::FieldAccess(inner, field) if matches!(inner.as_ref(), Expr::This) => {
             Some(AliasHandle::ThisField(field.clone()))
+        }
+        Expr::FieldAccess(inner, field) => Some(AliasHandle::ObjectField {
+            owner: reference_place_name(inner)?,
+            field: field.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// A stable field slot is distinct from the object containing it. This is a
+/// diagnostic place identity, not a claim that either reference can be copied.
+fn reference_place_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::This => Some("this".into()),
+        Expr::FieldAccess(owner, field) => {
+            Some(format!("{}.{field}", reference_place_name(owner)?))
         }
         _ => None,
     }
@@ -802,7 +873,15 @@ fn alias_handle_is_observed_after(
             .is_some_and(|index| {
                 statements[index + 1..]
                     .iter()
-                    .any(|stmt| stmt_reads_this_field(stmt, field))
+                    .any(|stmt| stmt_reads_field_place(stmt, None, field))
+            }),
+        AliasHandle::ObjectField { owner, field } => statements
+            .iter()
+            .position(|stmt| std::ptr::eq(*stmt, after))
+            .is_some_and(|index| {
+                statements[index + 1..]
+                    .iter()
+                    .any(|stmt| stmt_reads_field_place(stmt, Some(owner), field))
             }),
     }
 }
@@ -1031,9 +1110,9 @@ fn collect_expr_mutations(
             resolved,
             ..
         } => {
-            if let Expr::Var(handle) = receiver.as_ref() {
+            if let Some(handle) = reference_place_name(receiver) {
                 if lambda_invocation_name(name)
-                    && let Some(mutations) = stored_lambdas.get(handle)
+                    && let Some(mutations) = stored_lambdas.get(&handle)
                 {
                     out.extend(mutations.iter().cloned());
                 }
@@ -1041,7 +1120,7 @@ fn collect_expr_mutations(
                     resolved.as_ref(),
                     name,
                     args.len(),
-                    receiver_java_type_for_handle(handle, method_usage).as_ref(),
+                    receiver_java_type_for_handle(&handle, method_usage).as_ref(),
                     usage,
                     facts,
                     type_env,
@@ -1099,7 +1178,7 @@ fn lambda_invocation_name(name: &str) -> bool {
 fn push_write_target(target: &Expr, out: &mut Vec<(String, MutationKind)>) {
     match target {
         Expr::FieldAccess(receiver, field) => {
-            if let Expr::Var(handle) = receiver.as_ref() {
+            if let Some(handle) = reference_place_name(receiver) {
                 out.push((
                     handle.clone(),
                     MutationKind::FieldWrite {
@@ -1109,7 +1188,7 @@ fn push_write_target(target: &Expr, out: &mut Vec<(String, MutationKind)>) {
             }
         }
         Expr::ArrayAccess(receiver, _) => {
-            if let Expr::Var(handle) = receiver.as_ref() {
+            if let Some(handle) = reference_place_name(receiver) {
                 out.push((handle.clone(), MutationKind::ElementWrite));
             }
         }
@@ -1266,7 +1345,12 @@ fn visit_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
 
 fn visit_subexpressions(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     match expr {
-        Expr::FieldAccess(inner, _) | Expr::Cast { expr: inner, .. } => visit(inner),
+        Expr::FieldAccess(inner, _)
+        | Expr::MethodReference {
+            receiver: Some(inner),
+            ..
+        }
+        | Expr::Cast { expr: inner, .. } => visit(inner),
         Expr::Unary { expr: inner, .. } | Expr::InstanceOf { expr: inner, .. } => visit(inner),
         Expr::ArrayAccess(receiver, index) => {
             visit(receiver);
@@ -1341,33 +1425,36 @@ fn visit_subexpressions(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
-fn stmt_reads_this_field(stmt: &Stmt, field: &str) -> bool {
+fn stmt_reads_field_place(stmt: &Stmt, receiver_name: Option<&str>, field: &str) -> bool {
     match stmt {
         Stmt::VarDecl { initializer, .. } => initializer
             .as_ref()
-            .is_some_and(|expr| expr_reads_this_field(expr, field)),
-        Stmt::Assign { value, .. } => expr_reads_this_field(value, field),
-        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_reads_this_field(expr, field),
+            .is_some_and(|expr| expr_reads_field_place(expr, receiver_name, field)),
+        Stmt::Assign { value, .. } => expr_reads_field_place(value, receiver_name, field),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_reads_field_place(expr, receiver_name, field),
         Stmt::Return(expr) => expr
             .as_ref()
-            .is_some_and(|expr| expr_reads_this_field(expr, field)),
+            .is_some_and(|expr| expr_reads_field_place(expr, receiver_name, field)),
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            expr_reads_this_field(condition, field)
-                || block_reads_this_field(then_block, field)
+            expr_reads_field_place(condition, receiver_name, field)
+                || block_reads_field_place(then_block, receiver_name, field)
                 || else_block
                     .as_ref()
-                    .is_some_and(|block| block_reads_this_field(block, field))
+                    .is_some_and(|block| block_reads_field_place(block, receiver_name, field))
         }
         Stmt::While {
             condition, body, ..
         }
         | Stmt::DoWhile {
             condition, body, ..
-        } => expr_reads_this_field(condition, field) || block_reads_this_field(body, field),
+        } => {
+            expr_reads_field_place(condition, receiver_name, field)
+                || block_reads_field_place(body, receiver_name, field)
+        }
         Stmt::For {
             init,
             condition,
@@ -1375,28 +1462,32 @@ fn stmt_reads_this_field(stmt: &Stmt, field: &str) -> bool {
             body,
             ..
         } => {
-            init.iter().any(|stmt| stmt_reads_this_field(stmt, field))
+            init.iter()
+                .any(|stmt| stmt_reads_field_place(stmt, receiver_name, field))
                 || condition
                     .as_ref()
-                    .is_some_and(|expr| expr_reads_this_field(expr, field))
-                || update.iter().any(|expr| expr_reads_this_field(expr, field))
-                || block_reads_this_field(body, field)
+                    .is_some_and(|expr| expr_reads_field_place(expr, receiver_name, field))
+                || update
+                    .iter()
+                    .any(|expr| expr_reads_field_place(expr, receiver_name, field))
+                || block_reads_field_place(body, receiver_name, field)
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_reads_this_field(iterable, field) || block_reads_this_field(body, field)
+            expr_reads_field_place(iterable, receiver_name, field)
+                || block_reads_field_place(body, receiver_name, field)
         }
         Stmt::Switch { selector, cases } => {
-            expr_reads_this_field(selector, field)
+            expr_reads_field_place(selector, receiver_name, field)
                 || cases.iter().any(|case| {
                     case.labels.iter().any(|label| match label {
                         crate::java_ir::SwitchLabel::Expr(expr) => {
-                            expr_reads_this_field(expr, field)
+                            expr_reads_field_place(expr, receiver_name, field)
                         }
                         _ => false,
                     }) || case
                         .statements
                         .iter()
-                        .any(|stmt| stmt_reads_this_field(stmt, field))
+                        .any(|stmt| stmt_reads_field_place(stmt, receiver_name, field))
                 })
         }
         Stmt::Try {
@@ -1407,50 +1498,56 @@ fn stmt_reads_this_field(stmt: &Stmt, field: &str) -> bool {
         } => {
             resources
                 .iter()
-                .any(|stmt| stmt_reads_this_field(stmt, field))
-                || block_reads_this_field(body, field)
+                .any(|stmt| stmt_reads_field_place(stmt, receiver_name, field))
+                || block_reads_field_place(body, receiver_name, field)
                 || catches
                     .iter()
-                    .any(|catch| block_reads_this_field(&catch.body, field))
+                    .any(|catch| block_reads_field_place(&catch.body, receiver_name, field))
                 || finally_block
                     .as_ref()
-                    .is_some_and(|block| block_reads_this_field(block, field))
+                    .is_some_and(|block| block_reads_field_place(block, receiver_name, field))
         }
-        Stmt::ConstructorInvocation { args, .. } => {
-            args.iter().any(|arg| expr_reads_this_field(arg, field))
-        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|arg| expr_reads_field_place(arg, receiver_name, field)),
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            block_reads_this_field(block, field)
+            block_reads_field_place(block, receiver_name, field)
         }
         Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
     }
 }
 
-fn block_reads_this_field(block: &Block, field: &str) -> bool {
+fn block_reads_field_place(block: &Block, receiver_name: Option<&str>, field: &str) -> bool {
     block
         .statements
         .iter()
-        .any(|stmt| stmt_reads_this_field(stmt, field))
+        .any(|stmt| stmt_reads_field_place(stmt, receiver_name, field))
 }
 
-fn expr_reads_this_field(expr: &Expr, field: &str) -> bool {
+fn expr_reads_field_place(expr: &Expr, receiver_name: Option<&str>, field: &str) -> bool {
     match expr {
         Expr::FieldAccess(receiver, name)
-            if name == field && matches!(receiver.as_ref(), Expr::This) =>
+            if name == field
+                && match receiver_name {
+                    Some(owner) => reference_place_name(receiver).as_deref() == Some(owner),
+                    None => matches!(receiver.as_ref(), Expr::This),
+                } =>
         {
             true
         }
         Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => expr_reads_this_field(expr, field),
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                expr_reads_field_place(expr, receiver_name, field)
+            }
             crate::java_ir::LambdaBody::Block(block) => block
                 .statements
                 .iter()
-                .any(|stmt| stmt_reads_this_field(stmt, field)),
+                .any(|stmt| stmt_reads_field_place(stmt, receiver_name, field)),
         },
         _ => {
             let mut found = false;
             visit_subexpressions(expr, &mut |inner| {
-                if expr_reads_this_field(inner, field) {
+                if expr_reads_field_place(inner, receiver_name, field) {
                     found = true;
                 }
             });
@@ -1464,6 +1561,50 @@ mod tests {
     use super::*;
     use crate::facts::{ExternalApiEffectFact, ExternalApiRole, FactProvenance, NullabilityState};
     use crate::parser::parse_java_source;
+
+    #[test]
+    fn stored_reference_alias_does_not_alias_the_containing_object() {
+        let aliases = aliases_in(
+            r#"
+            class Cell { int x; }
+            class Holder { Cell value; int noise; }
+            class Audit { int run() {
+                Cell c = new Cell(); Holder h = new Holder();
+                h.value = c; h.noise = 7; return c.x;
+            } }
+        "#,
+        );
+        assert!(
+            aliases.is_empty(),
+            "owner mutation is not referent mutation: {aliases:?}"
+        );
+    }
+
+    #[test]
+    fn stored_reference_alias_detects_mutation_through_either_reference() {
+        let aliases = aliases_in(
+            r#"
+            class Cell { int x; }
+            class Holder { Cell value; }
+            class Audit {
+                int original() {
+                    Cell c = new Cell(); Holder h = new Holder();
+                    h.value = c; c.x = 7; return h.value.x;
+                }
+                int stored() {
+                    Cell c = new Cell(); Holder h = new Holder();
+                    h.value = c; h.value.x = 9; return c.x;
+                }
+            }
+        "#,
+        );
+        assert_eq!(aliases.len(), 2, "{aliases:?}");
+        assert!(
+            aliases
+                .iter()
+                .all(|alias| alias.original() == "c" && alias.alias() == "h.value")
+        );
+    }
 
     /// Resolve first: a mutating-call mutation site is only visible once calls
     /// carry their declaring type, which is what the real pipeline feeds in.
@@ -1811,6 +1952,117 @@ mod tests {
         assert!(found.is_empty(), "primitive values copy in Java: {found:?}");
     }
 
+    #[test]
+    fn retained_outer_array_does_not_prove_that_stored_rows_retain_identity() {
+        let parsed = parse_java_source(
+            r#"
+            class Matrix {
+                static int run() {
+                    int[] row = new int[1];
+                    int[][] rows = new int[1][];
+                    rows[0] = row;
+                    row[0] = 9;
+                    return rows[0][0];
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|m| match m {
+                Member::Method(m) => Some(m),
+                _ => None,
+            })
+            .unwrap();
+        let body = method.body.as_ref().unwrap();
+        let facts = FactSet::default();
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let placement = crate::storage_strategy::StoragePlacement::new(true, true, false);
+        for shared_row in [false, true] {
+            let shapes = body
+                .statements
+                .iter()
+                .filter_map(|s| match s {
+                    Stmt::VarDecl {
+                        binding: Some(binding),
+                        ty,
+                        ..
+                    } => {
+                        let mut shape = crate::slot_shape::RustSlotShape::for_storage(ty.clone());
+                        shape.require_native_allocation_at(&[], placement);
+                        if shared_row
+                            && crate::types::two_dimensional_array_element_type(ty).is_some()
+                        {
+                            shape.require_native_allocation_at(&[0], placement);
+                        }
+                        Some((binding, shape))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut storage = NativeAliasStorage::default();
+            for (binding, shape) in &shapes {
+                storage.record(binding, shape, &facts);
+            }
+            let mut found = vec![];
+            collect_in_body(
+                body,
+                "Matrix.run",
+                &usage,
+                &facts,
+                &TypeEnv::new(),
+                usage.source_method_usage(ty, method),
+                &storage,
+                &mut found,
+            );
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].native_allocation_preserved, shared_row);
+        }
+    }
+
+    #[test]
+    fn missing_local_storage_witness_does_not_fall_back_to_a_shadowed_field() {
+        let parsed = parse_java_source(
+            "class Shadow { int[][] rows; int run() { int[][] rows = null; return 0; } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let Stmt::VarDecl {
+            binding: Some(binding),
+            ..
+        } = &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected a bound local");
+        };
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let facts = FactSet::default();
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &RepresentationPlan::default(),
+            &usage,
+            &facts,
+        );
+        let storage = NativeAliasStorage::default().with_fields(ty, &signatures, &facts);
+        let place = Expr::Var("rows".into());
+        assert!(
+            storage
+                .place_shape(&place, &|_| Some(binding), &facts)
+                .is_none()
+        );
+        assert!(storage.place_shape(&place, &|_| None, &facts).is_some());
+    }
+
     /// Storing a reference through a local receiver's field is the same alias
     /// shape as an array element: the receiver local is the later observed
     /// handle.
@@ -1837,9 +2089,9 @@ mod tests {
             "field storage should create an observable alias: {found:?}"
         );
         assert_eq!(found[0].original(), "a");
-        assert_eq!(found[0].alias(), "holder");
+        assert_eq!(found[0].alias(), "holder.node");
         assert_eq!(found[0].mutated_through(), "a");
-        assert_eq!(found[0].observed_through(), "holder");
+        assert_eq!(found[0].observed_through(), "holder.node");
     }
 
     #[test]

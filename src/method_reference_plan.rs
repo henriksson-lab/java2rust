@@ -46,30 +46,49 @@ pub(crate) fn bound_method_reference_receiver(
     target: &str,
     env: &crate::expr_shape::ShapeEnv,
 ) -> Option<BoundMethodReferenceReceiver> {
-    if env.local_type(target).is_some() {
-        return Some(BoundMethodReferenceReceiver::Local(
-            crate::parser::to_snake_case(target),
-        ));
+    use crate::types::MethodReferenceValueBinding;
+    match env
+        .type_env()
+        .method_reference_value_binding(target, false)?
+    {
+        MethodReferenceValueBinding::Local(name, _) => Some(BoundMethodReferenceReceiver::Local(
+            env.binding_access_name(&name)
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::parser::to_snake_case(&name)),
+        )),
+        MethodReferenceValueBinding::Field(name, _) => {
+            Some(BoundMethodReferenceReceiver::InstanceField(name))
+        }
     }
-    if env.field_type(target).is_some() {
-        return Some(BoundMethodReferenceReceiver::InstanceField(
-            target.to_string(),
-        ));
+}
+
+/// Keep frontend receiver calls/casts intact. Ambiguous expression names still
+/// use lexical/type evidence rather than capitalization to distinguish owners.
+pub(crate) fn bound_method_reference_source(
+    target: &str,
+    receiver: Option<&crate::java_ir::Expr>,
+    env: &crate::expr_shape::ShapeEnv,
+) -> Option<crate::java_ir::Expr> {
+    use crate::java_ir::{Expr, JavaType};
+    if let Some(receiver) = receiver {
+        match receiver {
+            Expr::This | Expr::Super | Expr::Var(_) => {}
+            Expr::FieldAccess(_, _) => {
+                let ty = crate::types::infer_expr_type(receiver, env.type_env());
+                if !matches!(ty, JavaType::Unknown(_)) {
+                    return Some(receiver.clone());
+                }
+            }
+            Expr::Unsupported { .. } => return None,
+            _ => return Some(receiver.clone()),
+        }
     }
-    if env.type_env().static_type_alias(target).is_some() {
-        return None;
-    }
-    let normalized = crate::parser::to_snake_case(target);
-    if normalized == target {
-        return None;
-    }
-    if env.local_type(&normalized).is_some() {
-        return Some(BoundMethodReferenceReceiver::Local(normalized));
-    }
-    if env.field_type(&normalized).is_some() {
-        return Some(BoundMethodReferenceReceiver::InstanceField(normalized));
-    }
-    None
+    bound_method_reference_receiver(target, env).map(|receiver| match receiver {
+        BoundMethodReferenceReceiver::InstanceField(ref name) if env.is_static_field(name) => {
+            Expr::Var(name.clone())
+        }
+        receiver => receiver.source_expr(),
+    })
 }
 
 pub(crate) fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {
@@ -129,6 +148,53 @@ fn source_owner_key(target: &str) -> JavaOwnerKey {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn static_bound_reference_uses_the_ordinary_static_value_producer() {
+        let mut env = crate::expr_shape::ShapeEnv::new();
+        env.insert_static_field_shape(
+            "target",
+            crate::slot_shape::RustSlotShape::for_storage(crate::java_ir::JavaType::Named {
+                name: "Worker".into(),
+                args: vec![],
+            }),
+        );
+        assert_eq!(
+            super::bound_method_reference_source("target", None, &env),
+            Some(crate::java_ir::Expr::Var("target".into()))
+        );
+    }
+
+    #[test]
+    fn type_owner_is_not_a_normalized_field_but_exact_field_can_shadow_it() {
+        let mut env = crate::expr_shape::ShapeEnv::new();
+        let ty = crate::java_ir::JavaType::Named {
+            name: "Callback".into(),
+            args: vec![],
+        };
+        env.insert_field_shape(
+            "sumOfLogs",
+            crate::slot_shape::RustSlotShape::for_storage(ty.clone()),
+        );
+        env.insert_static_type_alias("SumOfLogs", "SumOfLogs");
+        assert_eq!(
+            super::bound_method_reference_receiver("SumOfLogs", &env),
+            None
+        );
+        assert_eq!(
+            super::bound_method_reference_receiver("sumOfLogs", &env),
+            Some(super::BoundMethodReferenceReceiver::InstanceField(
+                "sumOfLogs".into()
+            ))
+        );
+        env.insert_field("SumOfLogs", ty);
+        assert_eq!(
+            super::bound_method_reference_receiver("SumOfLogs", &env),
+            Some(super::BoundMethodReferenceReceiver::InstanceField(
+                "SumOfLogs".into()
+            ))
+        );
+    }
+
     #[test]
     fn type_owner_is_not_a_normalized_lexical_binding() {
         let mut env = crate::expr_shape::ShapeEnv::new();

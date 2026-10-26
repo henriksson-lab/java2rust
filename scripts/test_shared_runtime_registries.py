@@ -9,6 +9,104 @@ SCRIPT = Path(__file__).with_name("merge-shared-support-facades.py")
 merge = runpy.run_path(str(SCRIPT))["merge_additive_runtime_registries"]
 
 
+class AssociatedConstantTests(unittest.TestCase):
+    def test_private_and_restricted_constants_keep_complete_initializers(self):
+        extract = runpy.run_path(str(SCRIPT))["extract_consts"]
+        constants = dict(extract('''impl Kernel {
+    const SEED: u64 = 17;
+    pub(crate) const TABLE: [u64; 2] = [
+        3, 5,
+    ];
+    const BLOCK: u64 = {
+        const INNER: u64 = 7;
+        INNER + 2
+    }; // trailing comment
+    pub const TEXT: &str = "; {}";
+    pub const fn value() -> u64 {
+        const LOCAL: u64 = 1;
+        Self::SEED + LOCAL
+    }
+}'''))
+        self.assertEqual(set(constants), {'SEED', 'TABLE', 'BLOCK', 'TEXT'})
+        self.assertTrue(constants['TABLE'].endswith('];'))
+        self.assertIn('INNER + 2', constants['BLOCK'])
+        self.assertTrue(constants['BLOCK'].endswith('};'))
+
+    def test_promoted_methods_keep_their_private_constant_contract(self):
+        runtime = '''
+pub struct Kernel;
+impl Kernel {
+    const BASE: u64 = 17;
+    pub(crate) const TABLE: [u64; 2] = [
+        3, 5,
+    ];
+    pub fn value() -> u64 {
+        const LOCAL: u64 = 1;
+        Self::BASE + Self::TABLE[1] + LOCAL
+    }
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='java-private-constants-') as temp:
+            root = Path(temp)
+            generated = root / 'generated'
+            generated.mkdir()
+            for name in ('A', 'B'):
+                (generated / f'{name}.rs').write_text(runtime + f'\npub struct {name};\n')
+            shared = root / 'shared.rs'
+            result = subprocess.run([
+                'python3', str(SCRIPT), '--generated-dir', str(generated),
+                '--shared-support', str(shared), '--shared-types', str(root / 'types.tsv'),
+                '--conflicts', str(root / 'conflicts.tsv'),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = shared.read_text()
+            self.assertIn('const BASE: u64 = 17;', text)
+            self.assertNotIn('const LOCAL: u64 = 1;\n}', text)
+            source = root / 'check.rs'
+            source.write_text(text + '\nfn main() { assert_eq!(Kernel::value(), 23); }\n')
+            binary = root / 'check'
+            compiled = subprocess.run(['rustc', '--edition=2021', str(source), '-o', str(binary)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            subprocess.run([str(binary)], check=True)
+
+
+    def test_promoted_methods_keep_qualified_thread_local_value_groups(self):
+        runtime = """
+std::thread_local! {
+    static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+pub struct Kernel;
+impl Kernel {
+    pub fn visit() -> u32 {
+        assert!(!ACTIVE.with(|s| s.replace(true)));
+        let n = COUNT.with(|s| { s.set(s.get() + 1); s.get() });
+        ACTIVE.with(|s| s.set(false));
+        n
+    }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix='java-thread-local-support-') as temp:
+            root = Path(temp)
+            generated = root / 'generated'
+            generated.mkdir()
+            for name in ('A', 'B'):
+                (generated / f'{name}.rs').write_text(runtime + f'\npub struct {name};\n')
+            shared = root / 'shared.rs'
+            result = subprocess.run([
+                'python3', str(SCRIPT), '--generated-dir', str(generated),
+                '--shared-support', str(shared), '--shared-types', str(root / 'types.tsv'),
+                '--conflicts', str(root / 'conflicts.tsv'),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            source = root / 'check.rs'
+            source.write_text(shared.read_text() + '\nmod child { pub fn read() -> u32 { crate::Kernel::visit() } }\nfn main() { assert_eq!(child::read(), 1); assert_eq!(Kernel::visit(), 2); }\n')
+            binary = root / 'check'
+            compiled = subprocess.run(['rustc', '--edition=2021', str(source), '-o', str(binary)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            subprocess.run([str(binary)], check=True)
+
+
 def registry(arm):
     return f"""impl JavaReferenceIdentity for dyn std::any::Any {{
     fn java_reference_identity(&self) -> *const () {{
@@ -89,7 +187,7 @@ fn main() {
         self.assertEqual(merge([merged, left]), merged)
 
     def test_object_equality_and_optional_identity_registries_are_additive(self):
-        for marker in ("object_equals", "optional_reference_identity", "runtime_class", "reference_copy"):
+        for marker in ("object_equals", "object_hash", "optional_reference_identity", "runtime_class", "reference_copy"):
             left = registry("A").replace("registry-begin reference_identity", f"registry-begin {marker}").replace("registry-end reference_identity", f"registry-end {marker}")
             right = registry("B").replace("registry-begin reference_identity", f"registry-begin {marker}").replace("registry-end reference_identity", f"registry-end {marker}")
             merged = merge([left, right, left])

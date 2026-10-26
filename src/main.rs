@@ -17,8 +17,45 @@ fn main() -> ExitCode {
         eprintln!(
             "       new-java2rust emit-runtime-support <floating-point-display|lossless-java-text>"
         );
+        eprintln!(
+            "       new-java2rust representation-cost <rust-file|src-directory|-> [--baseline path] [--weights file] [--sites]"
+        );
         return ExitCode::from(2);
     };
+
+    if let Args::RepresentationCost {
+        path,
+        baseline,
+        weights,
+        sites,
+    } = args
+    {
+        let run = || -> Result<String, String> {
+            let weights = if let Some(path) = weights {
+                new_java2rust::representation_cost::CostWeights::default().with_overrides(
+                    &fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?,
+                )?
+            } else {
+                new_java2rust::representation_cost::CostWeights::default()
+            };
+            let report = new_java2rust::representation_cost::analyze_path(Path::new(&path))?;
+            let previous = baseline
+                .as_deref()
+                .map(|path| new_java2rust::representation_cost::analyze_path(Path::new(path)))
+                .transpose()?;
+            Ok(report.render(&weights, previous.as_ref(), sites))
+        };
+        return match run() {
+            Ok(report) => {
+                print!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("representation-cost: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
 
     if let Args::EmitRuntimeSupport { kind } = args {
         print!("{}", kind.emit_rust());
@@ -187,6 +224,12 @@ fn main() -> ExitCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Args {
+    RepresentationCost {
+        path: String,
+        baseline: Option<String>,
+        weights: Option<String>,
+        sites: bool,
+    },
     EmitRuntimeSupport {
         kind: new_java2rust::RuntimeSupport,
     },
@@ -263,6 +306,33 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     let mut context_dir_packages = Vec::new();
     let mut context_dirs_are_emitted = false;
     let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "representation-cost") {
+        args.next();
+        let path = args.next()?;
+        if path.starts_with('-') && path != "-" {
+            return None;
+        }
+        let mut baseline = None;
+        let mut weights = None;
+        let mut sites = false;
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--baseline" if baseline.is_none() => baseline = Some(args.next()?),
+                "--weights" if weights.is_none() => weights = Some(args.next()?),
+                "--sites" if !sites => sites = true,
+                _ => return None,
+            }
+        }
+        if path == "-" && baseline.as_deref() == Some("-") {
+            return None;
+        }
+        return Some(Args::RepresentationCost {
+            path,
+            baseline,
+            weights,
+            sites,
+        });
+    }
     if args.peek().is_some_and(|arg| arg == "emit-runtime-support") {
         args.next();
         let kind = new_java2rust::RuntimeSupport::from_name(&args.next()?)?;

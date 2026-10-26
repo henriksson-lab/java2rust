@@ -39,6 +39,9 @@ external-pack-field jdk.big_decimal java.math.RoundingMode UNNECESSARY mapped ty
 external-pack jdk.big_integer java.math.BigInteger rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=.. rust-type=BigInteger string-abi=utf16 reference-identity=java_identity_eq
 external-pack-constructor jdk.big_integer java.math.BigInteger 1 mapped rust-type=BigInteger rust=new rust-result=true
 external-pack-constructor-argument jdk.big_integer java.math.BigInteger 1 0 definitely-non-null read-only borrowed type=String
+external-pack-constructor jdk.big_integer java.math.BigInteger 2 mapped rust-type=BigInteger rust=from_sign_magnitude rust-result=true
+external-pack-constructor-argument jdk.big_integer java.math.BigInteger 2 0 definitely-non-null read-only no-alias type=int
+external-pack-constructor-argument jdk.big_integer java.math.BigInteger 2 1 definitely-non-null read-only borrowed type=byte[]
 external-pack jdk.big_integer java.lang.ArithmeticException rust-crate-mapping mapped target=java_math_runtime package=java-math-runtime path=..
 external-pack-exception jdk.big_integer java.lang.ArithmeticException unchecked
 external-pack-capability jdk.big_integer java.math.BigInteger clone=true final=true
@@ -80,3 +83,10 @@ external-pack-api jdk.big_integer java.math.BigInteger gcd mapped getter read-on
 external-pack-argument jdk.big_integer java.math.BigInteger gcd 0 definitely-non-null read-only borrowed type=java.math.BigInteger
 external-pack-api jdk.big_integer java.math.BigInteger flipBit mapped getter read-only definitely-non-null params=int return=java.math.BigInteger throws=java.lang.ArithmeticException rust=flip_bit rust-result=true
 external-pack-argument jdk.big_integer java.math.BigInteger flipBit 0 definitely-non-null read-only no-alias type=int
+
+external-pack-api jdk.big_integer java.math.BigInteger doubleValue mapped getter read-only definitely-non-null args=0 return=double rust=double_value
+external-pack-api jdk.big_integer java.math.BigInteger intValueExact mapped getter read-only definitely-non-null args=0 return=int throws=java.lang.ArithmeticException rust=int_value_exact rust-result=true
+external-pack-api jdk.big_integer java.math.BigInteger longValueExact mapped getter read-only definitely-non-null args=0 return=long throws=java.lang.ArithmeticException rust=long_value_exact rust-result=true
+external-pack-api jdk.big_integer java.math.BigInteger shiftLeft mapped getter read-only definitely-non-null params=int return=java.math.BigInteger throws=java.lang.ArithmeticException rust=shift_left rust-result=true
+external-pack-argument jdk.big_integer java.math.BigInteger shiftLeft 0 definitely-non-null read-only no-alias type=int
+external-pack-api jdk.big_decimal java.math.BigDecimal toBigInteger mapped getter read-only definitely-non-null args=0 return=java.math.BigInteger throws=java.lang.ArithmeticException rust=decimal_to_big_integer rust-result=true

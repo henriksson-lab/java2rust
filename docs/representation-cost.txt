@@ -1,0 +1,82 @@
+Representation cost audit (representation-cost-v1)
+
+Purpose
+
+Measure avoidable representation machinery in emitted Rust, independently of
+semantic correctness. Lower scores express a preference only among semantically
+admissible alternatives. This report neither proves admissibility nor selects
+representations; it supplies a stable, inspectable objective for that work.
+
+The score is sum(metric occurrence count * metric weight), using integer policy
+units, not time estimates. Ordinary owned values have no representation surcharge.
+Borrowed types cost 1, Box 8, Rc 16, Arc 64, RefCell 12, Mutex/RwLock 128 and dyn 16.
+Nested types add their components: Arc<Mutex<T>> costs 192 per declared type site,
+versus 28 for Rc<RefCell<T>>. These are preferences, never permission to change
+Java sharing, identity, mutation, escape or synchronization semantics.
+
+Operations are separate: Box/Rc/Arc allocations cost 24/48/128, RefCell/Mutex/
+RwLock construction 8/96/96; Rc/Arc/Box clone sites 12/48/64; exclusive lock 192,
+read lock 160, write lock 192; dynamic borrow/borrow_mut 2/4. Downcast and erased
+retargeting sites cost 12, collect and to_owned/to_vec 24, vec!/format! 16.
+Unresolved clone sites cost 64 and unresolved lock sites 192, with coverage flags.
+The weight table is in src/representation_cost.rs and can be overridden per report.
+
+Use
+
+  cargo run -- representation-cost path/to/generated-crate/src > costs.tsv
+  cargo run -- representation-cost new/src --baseline old/src --sites > diff.tsv
+  cargo run -- representation-cost output.rs --weights weights.txt
+  cat output.rs | cargo run -- representation-cost -
+
+Weights files contain known metric=nonnegative_integer lines; # starts a comment.
+For example:
+
+  type.arc=128
+  type.mutex=256
+  op.lock=384
+
+The same weights apply to both sides of a comparison. TOTAL rows show per-metric
+counts and costs, including metrics removed since baseline. Scope rows are sorted
+by current cost and show current definitions, with old counts where scopes match.
+Optional site comments identify source lines and enclosing loop depth. Directory
+scopes include relative filenames. Audit an assembled crate's src directory;
+auditing all per-unit translation files would also count duplicated helper copies.
+Directories skip target, .git and symlink entries and otherwise include all .rs
+files; cfg, tests and unused definitions are not filtered.
+
+Model and limits
+
+The current final Rust IR has many Raw snippets. The audit therefore uses the
+Rust tree-sitter grammar after rendering, including runtime/helper definitions.
+The library exposes analyze_ir as well as analyze_rust and analyze_path. This is
+opt-in: ordinary translation does not reparse output or pay analysis overhead.
+A later structured representation planner can reuse the same additive objective
+before emission, with output auditing as an independent cross-check.
+
+Each type occurrence is a declaration/signature site, not an object instance or
+byte footprint. Type aliases and simple single-field wrappers are expanded at
+use sites, with generic substitution; alias definitions themselves are not charged.
+Operations count once per source site. Loop depth is reported, not multiplied into
+the score. Moving a definition into a helper does not remove its operation cost;
+execution frequency, helper call frequency, recursion and reachability are not
+modeled. Use profiles only when choosing between candidates requires dynamic cost.
+
+This is a syntax audit with conservative file-local name/type inference, not a
+Rust resolver/typechecker. Module shadowing, cross-file aliases, generic trait
+calls, associated types, destructuring, inferred return types and external types
+can remain unresolved or ambiguous. Even fully qualified method spellings do not
+prove that every method is the standard operation implied by its name. A score
+must not be used as a CI improvement gate without examining changed sites and
+coverage. Do not compare outputs with materially different included support code.
+
+Common builtin macro expression arguments are inspected where they can be parsed.
+Other macro invocations and definitions are reported as opaque; no expansion is
+attempted. Comments and literals do not contribute false operations. Parse errors,
+compile_error markers and unresolved clones/locks are reported separately from the
+score; setting a weight to zero cannot erase those coverage flags. An incomplete
+or invalid output can have a low score: compilation, parity tests and semantic
+facts remain independent acceptance requirements.
+
+The first intended use is to identify high-cost representation families and check
+whether a general translator rewrite removed machinery or merely moved it. This
+is not a claim that the translator already optimizes the global objective.

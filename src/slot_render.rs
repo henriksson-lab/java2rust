@@ -49,6 +49,25 @@ pub(crate) fn rust_source_static_owner_type(
     }
 }
 
+pub(crate) fn reference_trait_type_name(trait_path: &str) -> String {
+    let (base, suffix) = trait_path
+        .find('<')
+        .map_or((trait_path, ""), |index| trait_path.split_at(index));
+    let (prefix, leaf) = base
+        .rsplit_once("::")
+        .map_or((String::new(), base), |(prefix, leaf)| {
+            (format!("{prefix}::"), leaf)
+        });
+    format!("{prefix}__JavaReference{leaf}{suffix}")
+}
+
+pub(crate) fn rust_reference_dyn_trait_type(
+    trait_name: impl Into<String>,
+    _sync: bool,
+) -> RustType {
+    RustType::Named(reference_trait_type_name(&trait_name.into()))
+}
+
 pub(crate) fn rust_boxed_dyn_trait_type(trait_name: impl Into<String>) -> RustType {
     rust_generic_type("Box", vec![RustType::DynTrait(trait_name.into())])
 }
@@ -106,6 +125,11 @@ pub enum SlotValueRustTypePolicy {
     BoxedDynTrait {
         trait_name: String,
         java_ty: JavaType,
+    },
+    ReferenceDynTrait {
+        trait_name: String,
+        java_ty: JavaType,
+        sync: bool,
     },
     ErasedObject,
     DynTrait {
@@ -580,6 +604,17 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 )
             }
         }
+        (_, DispatchShape::ReferenceDynTrait { trait_name, sync }) => {
+            rust_reference_dyn_trait_type(
+                parameterized_dyn_trait_path(
+                    trait_name,
+                    &shape.java_ty,
+                    &effective_facts,
+                    representations,
+                ),
+                *sync,
+            )
+        }
         (_, DispatchShape::BoxedDynTrait { trait_name }) if matches!(nominal_dispatch_type(&shape.java_ty), JavaType::Named { args, .. } if !args.is_empty()) => {
             rust_boxed_dyn_trait_type(parameterized_dyn_trait_path(
                 trait_name,
@@ -713,6 +748,29 @@ pub fn rust_type_for_slot_with_effective_facts(
     shared_handle_slot_rust_type(shape, facts, rendered)
 }
 
+/// Native SAM facts prove platform identity before canonicalizing its Rust
+/// name. Qualified declarations and captures must use the imported carrier.
+fn native_functional_rust_type(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    render_argument: impl FnMut(&JavaType) -> RustType,
+) -> Option<RustType> {
+    facts.native_functional_carrier(java_ty)?;
+    let (name, args) = match java_ty {
+        JavaType::Named { name, args } => (name, args.as_slice()),
+        JavaType::Unknown(name) => (name, &[][..]),
+        _ => return None,
+    };
+    let name = rust_name_for_java_named_type(crate::stdlib::native_functional_owner(
+        &crate::stdlib::canonical_external_receiver_type_key(name),
+    ));
+    Some(if args.is_empty() {
+        RustType::Named(name)
+    } else {
+        rust_generic_type(name, args.iter().map(render_argument).collect())
+    })
+}
+
 pub(crate) fn functional_slot_carrier_name(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
@@ -725,7 +783,9 @@ pub(crate) fn functional_slot_carrier_name(
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
         _ => return None,
     };
-    let local = rust_name_for_java_named_type(name);
+    let local = rust_name_for_java_named_type(crate::stdlib::native_functional_owner(
+        &crate::stdlib::canonical_external_receiver_type_key(name),
+    ));
     Some(if shape.native_allocation.sync() {
         crate::stdlib::synchronized_functional_carrier_name(&local)
     } else {
@@ -801,7 +861,9 @@ fn project_nested_native_allocations(
                 .unwrap_or_else(|| shape.java_ty.clone());
             return RustType::Option(Box::new(wrap_child(&element, facts, *inner)));
         }
-        native_allocation_slot_rust_type(shape, facts, |_| rendered.clone()).unwrap_or(rendered)
+        synchronized_functional_slot_rust_type(shape, facts, |_| rendered.clone())
+            .or_else(|| native_allocation_slot_rust_type(shape, facts, |_| rendered.clone()))
+            .unwrap_or(rendered)
     }
     if shape.nested_native_allocations.is_empty() {
         return rendered;
@@ -857,6 +919,7 @@ fn project_nested_native_allocations(
             if crate::stdlib::java_collection_kind_for_type(&java_ty).is_some()
                 || facts.native_iterable_element_type(&java_ty).is_some()
                 || facts.native_list_cursor_element_type(&java_ty).is_some()
+                || facts.native_functional_carrier(&java_ty).is_some()
                 || facts.native_map_entry_type_args(&java_ty).is_some() =>
         {
             args.clone()
@@ -867,7 +930,9 @@ fn project_nested_native_allocations(
         let Some(java_child) = children.get(index) else {
             return child;
         };
-        let mut slot = RustSlotShape::for_storage(crate::types::generic_read_type(java_child));
+        let mut slot = RustSlotShape::for_storage(
+            crate::types::generic_read_type_preserving_optional(java_child),
+        );
         slot.inherit_native_collection_child(shape, index);
         let child = project_nested_native_allocations(&slot, facts, child);
         wrap_child(&slot, facts, child)
@@ -897,6 +962,18 @@ fn project_nested_native_allocations(
 /// A native allocation's handle is its physical value, not a view of its
 /// payload. In particular, a borrowed slot is `&Rc<RefCell<Vec<T>>>`, not a
 /// long-lived `&[T]` which would keep a borrow active during callback writes.
+/// Root allocation wrappers exist only for native array/container payloads.
+/// Generic qualifier markers on scalar/source values do not add such a layer.
+pub(crate) fn native_allocation_has_outer_carrier(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    let base = optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    !facts.parsed_source_controls_native_carrier(&base)
+        && (matches!(base, JavaType::Array(_))
+            || crate::stdlib::java_collection_kind_for_type(&base).is_some())
+}
+
 fn native_allocation_slot_rust_type(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
@@ -904,9 +981,7 @@ fn native_allocation_slot_rust_type(
 ) -> Option<RustType> {
     if !shape.native_allocation.shared()
         || shape.optional_element_type().is_some()
-        || facts.parsed_source_controls_native_carrier(&shape.java_ty)
-        || !(matches!(shape.java_ty, JavaType::Array(_))
-            || crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some())
+        || !native_allocation_has_outer_carrier(&shape.java_ty, facts)
     {
         return None;
     }
@@ -1229,6 +1304,13 @@ fn slot_dispatch_rust_type_policy(shape: &RustSlotShape) -> SlotValueRustTypePol
         DispatchShape::ClosedEnum { enum_name } => SlotValueRustTypePolicy::ClosedEnum {
             enum_name: parameterized_closed_enum_type_name(enum_name, &shape.java_ty),
         },
+        DispatchShape::ReferenceDynTrait { trait_name, sync } => {
+            SlotValueRustTypePolicy::ReferenceDynTrait {
+                trait_name: trait_name.clone(),
+                java_ty: shape.java_ty.clone(),
+                sync: *sync,
+            }
+        }
         DispatchShape::BoxedDynTrait { trait_name } => SlotValueRustTypePolicy::BoxedDynTrait {
             trait_name: trait_name.clone(),
             java_ty: shape.java_ty.clone(),
@@ -1265,6 +1347,14 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
                 trait_name, java_ty, facts,
             ))
         }
+        SlotValueRustTypePolicy::ReferenceDynTrait {
+            trait_name,
+            java_ty,
+            sync,
+        } => rust_reference_dyn_trait_type(
+            parameterized_dyn_trait_path_with_effective_facts(trait_name, java_ty, facts),
+            *sync,
+        ),
         SlotValueRustTypePolicy::ErasedObject => erased_object_rust_type(),
         SlotValueRustTypePolicy::DynTrait {
             trait_name,
@@ -1292,6 +1382,11 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
                 && let Some(ty) = external_crate_mapped_named_rust_type(name, &[], facts)
             {
                 ty
+            } else if facts.native_functional_carrier(java_ty).is_some() {
+                // Executable native SAM facades retain their instantiated
+                // arguments. The legacy opaque-interface fallback below
+                // erases them to the facade's default Object parameters.
+                rust_type_for_java_type_with_effective_facts(java_ty, facts)
             } else if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
                 && let JavaType::Named { name, .. } = java_ty
             {
@@ -1651,7 +1746,8 @@ pub fn slot_default_policy_with_effective_facts(
                 trait_name: trait_name.clone(),
             };
         }
-        DispatchShape::BoxedDynTrait { trait_name } => {
+        DispatchShape::BoxedDynTrait { trait_name }
+        | DispatchShape::ReferenceDynTrait { trait_name, .. } => {
             return SlotDefaultPolicy::NoDefaultForBoxedDynTrait {
                 trait_name: trait_name.clone(),
             };
@@ -2001,6 +2097,11 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
                 .collect(),
         );
     }
+    if let Some(carrier) = native_functional_rust_type(ty, &effective_facts, |arg| {
+        rust_type_for_java_generic_arg_with_representations(arg, &effective_facts, representations)
+    }) {
+        return carrier;
+    }
     if let JavaType::Named { name, args } = ty
         && crate::stdlib::canonical_external_receiver_type_key(name) == "Class"
     {
@@ -2327,8 +2428,11 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
         return rust_generic_type(
             rust_name_for_java_named_type(name),
             args.iter()
-                .map(|arg| {
-                    rust_type_for_java_generic_arg_with_representations(
+                .enumerate()
+                .map(|(index, arg)| {
+                    rust_type_for_source_generic_argument(
+                        name,
+                        index,
                         arg,
                         &effective_facts,
                         representations,
@@ -2443,6 +2547,11 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                     .collect(),
             ),
         };
+    }
+    if let Some(carrier) = native_functional_rust_type(ty, facts, |arg| {
+        rust_type_for_java_generic_arg_with_effective_facts(arg, facts)
+    }) {
+        return NativeJavaRustTypePolicy::Direct { ty: carrier };
     }
     if let JavaType::Named { name, args } = ty
         && args.is_empty()
@@ -3007,9 +3116,7 @@ pub(crate) fn rust_type_for_java_generic_arg_with_effective_facts(
 }
 
 fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
-    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
-        return rust_type_for_java_generic_arg_unwrapped(bound, facts);
-    }
+    let ty = crate::types::generic_read_type_ref(ty);
     if let Some(element_ty) = optional_element_type(ty) {
         return RustType::Option(Box::new(rust_type_for_optional_element_arg(
             &element_ty,
@@ -3090,9 +3197,7 @@ fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFact
 }
 
 fn rust_type_for_optional_element_arg(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
-    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
-        return rust_type_for_optional_element_arg(bound, facts);
-    }
+    let ty = crate::types::generic_read_type_ref(ty);
     if let JavaType::Named { name, args } = ty
         && args.is_empty()
         && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
@@ -3202,6 +3307,7 @@ pub(crate) fn rust_type_for_java_generic_arg_with_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    let ty = crate::types::generic_read_type_ref(ty);
     if let Some(instantiated) = raw_generic_instantiation_for_rendering(ty, representations) {
         return rust_type_for_java_generic_arg_with_representations(
             &instantiated,
@@ -3211,9 +3317,6 @@ pub(crate) fn rust_type_for_java_generic_arg_with_representations(
     }
     if let Some(carrier) = map_entry_rust_type_with_representations(ty, facts, representations) {
         return carrier;
-    }
-    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
-        return rust_type_for_java_generic_arg_with_representations(bound, facts, representations);
     }
     if let Some(element_ty) = optional_element_type(ty) {
         return RustType::Option(Box::new(
@@ -3326,16 +3429,10 @@ fn rust_type_for_optional_element_arg_with_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    let ty = crate::types::generic_read_type_ref(ty);
     if let Some(instantiated) = raw_generic_instantiation_for_rendering(ty, representations) {
         return rust_type_for_optional_element_arg_with_representations(
             &instantiated,
-            facts,
-            representations,
-        );
-    }
-    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
-        return rust_type_for_optional_element_arg_with_representations(
-            bound,
             facts,
             representations,
         );
@@ -3432,6 +3529,12 @@ fn rust_type_for_representation_dispatch(
             ),
         )),
         DispatchShape::ErasedObject => Some(erased_object_rust_type()),
+        DispatchShape::ReferenceDynTrait { trait_name, sync } => {
+            Some(rust_reference_dyn_trait_type(
+                parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
+                sync,
+            ))
+        }
         DispatchShape::BoxedDynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(
             parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
         )),
@@ -3543,7 +3646,9 @@ fn parameterized_closed_enum_type_name_with_effective_representations(
                 }
                 _ => arg,
             };
-            crate::emit::emit_type(&rust_type_for_java_generic_arg_with_representations(
+            crate::emit::emit_type(&rust_type_for_source_generic_argument(
+                name,
+                index,
                 effective,
                 facts,
                 representations,
@@ -3643,7 +3748,9 @@ pub(crate) fn parameterized_dyn_trait_path(
                 }
                 _ => arg,
             };
-            crate::emit::emit_type(&rust_type_for_java_generic_arg_with_representations(
+            crate::emit::emit_type(&rust_type_for_source_generic_argument(
+                name,
+                index,
                 arg,
                 facts,
                 representations,
@@ -3652,6 +3759,38 @@ pub(crate) fn parameterized_dyn_trait_path(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{trait_path}<{args}>")
+}
+
+fn rust_type_for_source_generic_argument(
+    owner: &str,
+    index: usize,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
+    let rendered =
+        rust_type_for_java_generic_arg_with_representations(java_ty, facts, representations);
+    let Some(required) = representations
+        .source_generic_allocations
+        .argument(owner, index)
+    else {
+        return rendered;
+    };
+    let mut shape = RustSlotShape::for_storage(java_ty.clone());
+    shape.native_allocation = required.native_allocation;
+    shape.nested_native_allocations = required.nested_native_allocations.clone();
+    fn wrap(shape: &RustSlotShape, facts: &EffectiveFacts<'_>, rendered: RustType) -> RustType {
+        if let RustType::Option(inner) = rendered {
+            let mut element = shape.clone();
+            element.java_ty = shape
+                .optional_element_type()
+                .unwrap_or_else(|| shape.java_ty.clone());
+            return RustType::Option(Box::new(wrap(&element, facts, *inner)));
+        }
+        let rendered = project_nested_native_allocations(shape, facts, rendered);
+        native_allocation_slot_rust_type(shape, facts, |_| rendered.clone()).unwrap_or(rendered)
+    }
+    wrap(&shape, facts, rendered)
 }
 
 pub(crate) fn parameterized_dyn_trait_path_with_facts(
@@ -3710,6 +3849,12 @@ fn rust_type_for_facade_aware_representation_dispatch(
     }
     let dispatch = representations.dispatch_for(ty);
     match dispatch {
+        DispatchShape::ReferenceDynTrait { trait_name, sync } => {
+            Some(rust_reference_dyn_trait_type(
+                parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
+                sync,
+            ))
+        }
         DispatchShape::DynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(
             parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
         )),
@@ -4088,6 +4233,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_callback_slots_select_their_canonical_synchronized_facades() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        let callback = JavaType::Named {
+            name: "IntConsumer".into(),
+            args: vec![],
+        };
+        let mut array = RustSlotShape::for_storage(JavaType::Array(Box::new(callback.clone())));
+        array.require_native_allocation_at(&[0], StoragePlacement::new(true, true, true));
+        let mut function = RustSlotShape::for_storage(JavaType::Named {
+            name: "Function".into(),
+            args: vec![JavaType::String, callback],
+        });
+        function.require_native_allocation_at(&[1], StoragePlacement::new(true, true, true));
+        for (shape, expected) in [
+            (array, "Vec<Option<__JavaSyncIntConsumer>>"),
+            (function, "Function<String, __JavaSyncIntConsumer>"),
+        ] {
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, &facts)),
+                expected
+            );
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn retained_list_defaults_match_local_sync_and_nullable_slot_payloads() {
         let facts = FactSet::default();
         for name in [
@@ -4134,6 +4313,39 @@ mod tests {
             crate::emit::emit_expr(&default_expr_for_slot_with_facts(&array, &facts)),
             "std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))"
         );
+    }
+
+    #[test]
+    fn nullable_covariant_native_children_keep_their_solved_allocation() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        for sync in [false, true] {
+            let row = JavaType::Named {
+                name: "List".into(),
+                args: vec![JavaType::Primitive(PrimitiveType::Int)],
+            };
+            let row = crate::types::optional_java_type(JavaType::Wildcard(Some(
+                crate::java_ir::WildcardBound::Extends(Box::new(row)),
+            )));
+            let mut shape = RustSlotShape::for_storage(JavaType::Named {
+                name: "List".into(),
+                args: vec![row],
+            });
+            shape.require_native_allocation_at(&[0], StoragePlacement::new(true, true, sync));
+            let expected = if sync {
+                "Vec<Option<std::sync::Arc<std::sync::Mutex<JavaSyncNativeCollection<i32>>>>>"
+            } else {
+                "Vec<Option<std::rc::Rc<std::cell::RefCell<JavaNativeCollection<i32>>>>>"
+            };
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -5247,6 +5459,29 @@ class ConcreteReader extends Reader<Item> {}
                 &FactSet::default(),
             )),
             "JavaCodeUnit(0u16)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod qualified_native_sam_tests {
+    #[test]
+    fn qualified_native_sam_declarations_and_capture_constructors_share_the_carrier() {
+        let facts = crate::facts::FactSet::default();
+        let effective = crate::effective_facts::EffectiveFacts::new(&facts);
+        let ty = crate::java_ir::JavaType::Named {
+            name: "java.util.function.Consumer".into(),
+            args: vec![crate::java_ir::JavaType::String],
+        };
+        let shape = crate::slot_shape::RustSlotShape::for_storage(ty.clone());
+        assert_eq!(
+            super::functional_slot_carrier_name(&shape, &effective).as_deref(),
+            Some("Consumer")
+        );
+        let rendered = super::rust_type_for_java_type_with_effective_facts(&ty, &effective);
+        assert!(
+            matches!(rendered, crate::rust_ir::RustType::Generic { ref base, ref args } if base == "Consumer" && args.len() == 1),
+            "{rendered:?}"
         );
     }
 }
