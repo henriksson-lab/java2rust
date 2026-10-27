@@ -781,21 +781,9 @@ fn plan_storage_strategies_with_facts(
         types.insert(name.clone(), TypeStorageFacts::default());
     }
 
-    // A Java type *parameter* and a source class can share a name, and
-    // `JavaType::Named` cannot tell them apart -- there is no type-variable
-    // variant, and slot rendering has no type-parameter scope to consult. A name
-    // used as a type parameter anywhere is therefore removed from the plan:
-    // wrapping it would put a handle on the parameter (`input: Rc<ELEM>`) rather
-    // than on the class. Conservative in the safe direction -- the type keeps
-    // today's by-value behaviour, which is wrong in the known and reported way
-    // rather than wrong in a way that does not compile.
-    // See [0002b](../claude_audits/0002b-shared-representation-design.md).
-    let type_param_names = program_type_param_names(program);
-    for name in &type_param_names {
-        types.remove(name);
-        declared.remove(name);
-    }
-
+    // Resolved source binders have capture-avoiding identities assigned by
+    // scoped_type_parameters before usage/facts are collected. An unrelated
+    // generic declaration must never remove a nominal class from this plan.
     let threaded = threaded_type_names(program, &declared);
     let static_reachable = static_reachable_type_names(program, &declared);
     let all_static_reachable = statically_reachable_source_type_names(program);
@@ -1617,25 +1605,6 @@ pub fn interface_surface_is_handle_forwardable(
 /// cost 27 `idiom_gaps` tests, almost all of them enum or equality tests
 /// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
 /// Every name bound as a type parameter anywhere in the program.
-fn program_type_param_names(program: &Program) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for ty in &program.types {
-        collect_type_param_names(ty, &mut names);
-    }
-    names
-}
-
-fn collect_type_param_names(ty: &TypeDecl, into: &mut BTreeSet<String>) {
-    into.extend(ty.type_params.iter().cloned());
-    for member in &ty.members {
-        match member {
-            Member::Method(method) => into.extend(method.type_params.iter().cloned()),
-            Member::Type(nested) => collect_type_param_names(nested, into),
-            _ => {}
-        }
-    }
-}
-
 fn collect_declared_types(ty: &TypeDecl, into: &mut BTreeSet<String>) {
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
         into.insert(ty.name.clone());

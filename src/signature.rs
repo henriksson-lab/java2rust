@@ -49,6 +49,10 @@ pub type SolvedSlotShape = RustSlotShape;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SignaturePlan {
+    native_contracts: crate::plan_contracts::NativeContractInventory,
+    native_contract_report: Option<Arc<crate::plan_contracts::NativeContractReport>>,
+    transport_optimization: crate::canonical_transport_optimizer::TransportOptimizationReport,
+    source_param_abi_finalizations: Vec<SourceParamAbiFinalization>,
     source_callbacks: crate::source_callbacks::SourceCallbackPlan,
     pub(crate) source_generic_allocations:
         crate::source_generic_allocations::SourceGenericAllocationPlan,
@@ -61,6 +65,17 @@ pub struct SignaturePlan {
     interface_return_shapes: HashMap<MethodKey, Option<RustSlotShape>>,
     solve_iterations: usize,
     diagnostics: Vec<SignatureDiagnostic>,
+}
+
+/// A deterministic projection from semantic/fallback shape to the existing
+/// emitted ABI, before cost selection. This is not new alias/escape evidence
+/// and must not constrain a later admitted canonical-carrier loan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceParamAbiFinalization {
+    pub method: MethodKey,
+    pub parameter: usize,
+    pub semantic_shape: RustSlotShape,
+    pub physical_shape: RustSlotShape,
 }
 
 /// Store source signatures by owner, with the same leaf/snake aliases used by
@@ -1663,9 +1678,12 @@ pub struct SignatureConstraintState {
     methods: HashMap<MethodKey, MethodConstraintSet>,
     constructors: HashMap<ConstructorKey, ConstructorConstraintSet>,
     fields: HashMap<FieldKey, Vec<SignatureConstraint>>,
+    generic_binders: HashMap<(JavaOwnerKey, usize), Vec<SignatureConstraint>>,
     method_lookup_index: Option<Arc<SignatureMethodLookupIndex>>,
     initializer_storage_edges: Vec<(SignatureDependencyNode, SignatureDependencyNode)>,
     generic_allocation_edges: Arc<Vec<crate::source_generic_allocations::GenericAllocationEdge>>,
+    generic_allocation_schedule:
+        Option<crate::generic_allocation_schedule::GenericAllocationSchedule>,
 }
 
 impl PartialEq for SignatureConstraintState {
@@ -1673,6 +1691,7 @@ impl PartialEq for SignatureConstraintState {
         self.methods == other.methods
             && self.constructors == other.constructors
             && self.fields == other.fields
+            && self.generic_binders == other.generic_binders
     }
 }
 
@@ -2233,6 +2252,11 @@ pub enum SignatureCallableKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignatureDependencyNode {
+    /// Lexically scoped source owner binder, independent of any occurrence.
+    GenericParameter {
+        owner: JavaOwnerKey,
+        index: usize,
+    },
     MethodParam {
         method: MethodKey,
         name: String,
@@ -2405,10 +2429,7 @@ pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
     );
     let owner_alias_topology = build_source_owner_alias_receiver_topology(&constraints);
     constraints.rebuild_method_lookup_index();
-    constraints.generic_allocation_edges = Arc::new(source_generic_allocation_edges(
-        support_program,
-        &constraints,
-    ));
+    install_source_generic_allocation_edges(support_program, &mut constraints);
     let collect_constraints_ms = collect_start.elapsed().as_millis();
     emit_signature_solver_progress(
         progress_sink,
@@ -2689,15 +2710,43 @@ fn collect_signature_constraints_with_optional_representations(
     constraints.initializer_storage_edges = initializer_storage_edges(program, &constraints);
     seed_native_list_projection_slots(&mut constraints, usage);
     seed_native_external_returns(program, &mut constraints, usage, facts);
-    constraints.generic_allocation_edges =
-        Arc::new(source_generic_allocation_edges(program, &constraints));
+    install_source_generic_allocation_edges(program, &mut constraints);
     constraints
+}
+
+fn install_source_generic_allocation_edges(
+    program: &Program,
+    constraints: &mut SignatureConstraintState,
+) {
+    let edges = source_generic_allocation_edges(program, constraints);
+    for edge in &edges {
+        for node in [&edge.source, &edge.target] {
+            if let SignatureDependencyNode::GenericParameter { owner, index } = node {
+                constraints
+                    .generic_binders
+                    .entry((owner.clone(), *index))
+                    .or_default();
+            }
+        }
+    }
+    constraints.generic_allocation_edges = Arc::new(edges);
+    constraints.generic_allocation_schedule = None;
 }
 
 fn source_generic_allocation_edges(
     program: &Program,
     constraints: &SignatureConstraintState,
 ) -> Vec<crate::source_generic_allocations::GenericAllocationEdge> {
+    crate::source_generic_allocations::constraint_edges(
+        program,
+        &source_generic_allocation_slots(program, constraints),
+    )
+}
+
+fn source_generic_allocation_slots(
+    program: &Program,
+    constraints: &SignatureConstraintState,
+) -> Vec<crate::source_generic_allocations::GenericAllocationSlot> {
     use crate::source_generic_allocations::GenericAllocationSlot;
     fn collect(
         ty: &TypeDecl,
@@ -2811,7 +2860,7 @@ fn source_generic_allocation_edges(
     for ty in &program.types {
         collect(ty, constraints, &mut slots);
     }
-    crate::source_generic_allocations::constraint_edges(program, &slots)
+    slots
 }
 
 /// Native views have no source callee node to join. Seed their physical
@@ -3536,6 +3585,7 @@ fn signature_dependency_node_stores_constraints(node: &SignatureDependencyNode) 
             | SignatureDependencyNode::ConstructorParam { .. }
             | SignatureDependencyNode::ConstructorLocal { .. }
             | SignatureDependencyNode::Field { .. }
+            | SignatureDependencyNode::GenericParameter { .. }
     )
 }
 
@@ -3633,6 +3683,15 @@ fn add_signature_slot_nodes(
                 SignatureDependencyEdgeKind::LocalAlias,
             );
         }
+    }
+    for (owner, index) in constraints.generic_binders.keys() {
+        add_signature_dependency_node(
+            graph,
+            SignatureDependencyNode::GenericParameter {
+                owner: owner.clone(),
+                index: *index,
+            },
+        );
     }
     for field in constraints.fields.keys() {
         add_signature_dependency_node(
@@ -5163,6 +5222,7 @@ fn signature_constraint_slots(
         slots.extend(constructor.locals.iter().map(|local| &local.constraints));
     }
     slots.extend(constraints.fields.values());
+    slots.extend(constraints.generic_binders.values());
     slots
 }
 
@@ -8193,6 +8253,24 @@ fn add_collection_storage_constraint_scoped(
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     match target {
+        SignatureDependencyNode::GenericParameter { owner, index } => {
+            if scope.is_some_and(|scope| !scope.permits(target)) {
+                return false;
+            }
+            let Some(items) = constraints
+                .generic_binders
+                .get_mut(&(owner.clone(), *index))
+            else {
+                return false;
+            };
+            if items.contains(&requirement) {
+                false
+            } else {
+                items.push(requirement);
+                true
+            }
+        }
+
         SignatureDependencyNode::MethodReturn { method } => {
             add_method_return_constraint_scoped(constraints, method, requirement, scope)
         }
@@ -8278,47 +8356,52 @@ fn native_array_row_nullability_requirement(
         .then(|| nullable_storage_requirement(root, path.to_vec()))
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static REFERENCE_GENERIC_ALLOCATION_ARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn use_reference_generic_allocation_arm() -> bool {
+    #[cfg(test)]
+    {
+        return REFERENCE_GENERIC_ALLOCATION_ARM.with(std::cell::Cell::get);
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 fn propagate_source_generic_allocations(
     constraints: &mut SignatureConstraintState,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
-    let mut pending = Vec::new();
-    for edge in constraints.generic_allocation_edges.iter() {
-        for requirement in
-            collection_storage_node_constraints(constraints, &edge.source).unwrap_or_default()
-        {
-            let (path, placement) = match requirement {
-                SignatureConstraint::RequiredNativeAllocation(placement) => (&[][..], *placement),
-                SignatureConstraint::RequiredNestedNativeAllocation { path, placement } => {
-                    (path.as_slice(), *placement)
-                }
-                _ => continue,
-            };
-            let Some(suffix) = path.strip_prefix(edge.source_path.as_slice()) else {
-                continue;
-            };
-            if edge.source_argument.as_ref().is_some_and(|argument| {
-                !crate::source_generic_allocations::native_argument_allocation_target(
-                    argument, suffix,
+    let pending = if scope.is_some() || use_reference_generic_allocation_arm() {
+        crate::generic_allocation_schedule::reference_pending(
+            &constraints.generic_allocation_edges,
+            |node| {
+                collection_storage_node_constraints(constraints, node)
+                    .unwrap_or_default()
+                    .to_vec()
+            },
+        )
+    } else {
+        let mut schedule = constraints
+            .generic_allocation_schedule
+            .take()
+            .filter(|schedule| schedule.matches_edges(&constraints.generic_allocation_edges))
+            .unwrap_or_else(|| {
+                crate::generic_allocation_schedule::GenericAllocationSchedule::new(
+                    constraints.generic_allocation_edges.clone(),
                 )
-            }) {
-                continue;
-            }
-            if edge.target_argument.as_ref().is_some_and(|argument| {
-                !crate::source_generic_allocations::native_argument_allocation_target(
-                    argument, suffix,
-                )
-            }) {
-                continue;
-            }
-            let mut path = edge.target_path.clone();
-            path.extend_from_slice(suffix);
-            pending.push((
-                edge.target.clone(),
-                native_allocation_requirement(path, placement),
-            ));
-        }
-    }
+            });
+        let pending = schedule.pending(|node| {
+            collection_storage_node_constraints(constraints, node)
+                .unwrap_or_default()
+                .to_vec()
+        });
+        constraints.generic_allocation_schedule = Some(schedule);
+        pending
+    };
     let mut changed = false;
     for (target, requirement) in pending {
         changed |=
@@ -8660,6 +8743,11 @@ fn collection_storage_node_constraints<'a>(
     node: &SignatureDependencyNode,
 ) -> Option<&'a [SignatureConstraint]> {
     match node {
+        SignatureDependencyNode::GenericParameter { owner, index } => constraints
+            .generic_binders
+            .get(&(owner.clone(), *index))
+            .map(Vec::as_slice),
+
         SignatureDependencyNode::MethodReturn { method } => {
             Some(&constraints.methods.get(method)?.return_constraints)
         }
@@ -12196,6 +12284,7 @@ fn build_signature_plan_from_constraints(
             plan.type_params_by_owner.entry(owner).or_insert(params);
         }
     }
+    plan.native_contracts = native_contract_inventory(support_program, constraints);
     reconcile_inherited_field_storage_shapes(program, support_program, &mut plan);
     plan.source_callbacks =
         crate::source_callbacks::SourceCallbackPlan::build(support_program, facts);
@@ -12208,13 +12297,130 @@ fn build_signature_plan_from_constraints(
         }
     }
     plan.source_generic_allocations =
-        crate::source_generic_allocations::SourceGenericAllocationPlan::build(
+        crate::source_generic_allocations::SourceGenericAllocationPlan::from_solved_binders(
             support_program,
-            &plan,
+            |owner, index| {
+                constraints
+                    .generic_binders
+                    .get(&(owner.clone(), index))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|requirement| match requirement {
+                        SignatureConstraint::RequiredNativeAllocation(placement) => {
+                            Some((vec![], *placement))
+                        }
+                        SignatureConstraint::RequiredNestedNativeAllocation { path, placement } => {
+                            Some((path.clone(), *placement))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            },
         );
-    project_source_generic_allocations_into_signatures(&mut plan);
     project_source_interface_references_into_signatures(&mut plan, representations);
+    finalize_source_method_parameter_abis(program, support_program, representations, &mut plan);
+    verify_source_generic_allocations_finalized(&mut plan);
+    plan.transport_optimization = crate::canonical_transport_optimizer::optimize(
+        support_program,
+        representations,
+        facts,
+        &mut plan,
+    );
+    let report = plan.resolved_native_contracts(facts).check();
+    for issue in report
+        .diagnostics
+        .iter()
+        .filter(|issue| report.invalid_nodes.contains(&issue.source.node))
+    {
+        plan.diagnostics.push(SignatureDiagnostic::new(
+            issue.code,
+            format!(
+                "{}: {:?} -> {:?}: {}",
+                issue.rule, issue.source, issue.target, issue.message
+            ),
+        ));
+    }
+    plan.native_contract_report = Some(Arc::new(report));
     plan
+}
+
+/// Publish the same physical parameter ABI that source emission already used.
+/// Both indices are updated together; the optimizer's incumbent is therefore
+/// actual emitted Rust, rather than a semantic payload-borrow fallback.
+fn finalize_source_method_parameter_abis(
+    program: &Program,
+    support_program: &Program,
+    representations: &RepresentationPlan,
+    plan: &mut SignaturePlan,
+) {
+    fn visit(
+        ty: &TypeDecl,
+        representations: &RepresentationPlan,
+        plan: &mut SignaturePlan,
+        seen: &mut HashSet<MethodKey>,
+    ) {
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    let key = MethodKey::source_method(ty, method);
+                    if !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    let java_key = JavaCallableKey::source_method_for_type(ty, method);
+                    for (index, param) in method.params.iter().enumerate() {
+                        let Some(solved) = plan
+                            .methods
+                            .get(&key)
+                            .and_then(|m| m.params.get(index))
+                            .map(|param| param.shape.clone())
+                        else {
+                            continue;
+                        };
+                        let physical = crate::lower::emitted_source_method_param_shape(
+                            method,
+                            param,
+                            &ty.name,
+                            &solved,
+                            representations,
+                        );
+                        if physical == solved {
+                            continue;
+                        }
+                        match plan.install_param_shape_before_freeze(
+                            &key,
+                            &java_key,
+                            index,
+                            physical.clone(),
+                        ) {
+                            Ok(()) => plan.source_param_abi_finalizations.push(
+                                SourceParamAbiFinalization {
+                                    method: key.clone(),
+                                    parameter: index,
+                                    semantic_shape: solved,
+                                    physical_shape: physical,
+                                },
+                            ),
+                            Err(reason) => plan.diagnostics.push(SignatureDiagnostic::new(
+                                "native_contract_parameter_index_disagreement",
+                                format!("{}::{} parameter {index}: {reason}", ty.name, method.name),
+                            )),
+                        }
+                    }
+                }
+                Member::Type(nested) => visit(nested, representations, plan, seen),
+                _ => {}
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    for ty in &program.types {
+        visit(ty, representations, plan, &mut seen);
+    }
+    if !std::ptr::eq(program, support_program) {
+        for ty in &support_program.types {
+            visit(ty, representations, plan, &mut seen);
+        }
+    }
 }
 
 fn project_source_interface_references_into_signatures(
@@ -12266,40 +12472,294 @@ fn project_source_interface_references_into_signatures(
     }
 }
 
-fn project_source_generic_allocations_into_signatures(plan: &mut SignaturePlan) {
-    let allocations = &plan.source_generic_allocations;
-    let project_method = |method: &mut MethodSignaturePlan| {
-        for param in &mut method.params {
-            allocations.project(&mut param.shape);
+/// Allocation requirements belong to the saturated declaration/use edges.
+/// Finalization may verify that closure, but must not add qualifiers behind
+/// producers and consumers that have already selected their contracts.
+fn verify_source_generic_allocations_finalized(plan: &mut SignaturePlan) {
+    let mut missing = Vec::new();
+    plan.for_each_contract_shape(|shape| {
+        let mut projected = shape.clone();
+        plan.source_generic_allocations.project(&mut projected);
+        if projected != *shape {
+            missing.push(format!(
+                "{:?}: {:?} -> {:?}",
+                shape.java_ty, shape.native_allocation, projected.native_allocation
+            ));
         }
-        for local in &mut method.locals {
-            allocations.project(&mut local.shape);
-        }
-        if let Some(shape) = &mut method.return_shape {
-            allocations.project(shape);
-        }
+    });
+    for message in missing {
+        plan.diagnostics.push(SignatureDiagnostic::new(
+            "native_contract_late_generic_obligation",
+            format!("generic allocation edge closure did not establish final contract: {message}"),
+        ));
+    }
+}
+
+fn native_contract_inventory(
+    program: &Program,
+    constraints: &SignatureConstraintState,
+) -> crate::plan_contracts::NativeContractInventory {
+    use crate::plan_contracts::{NativeContractInventory, NativeRequirement, NativeSlotKey};
+    let mut inventory = NativeContractInventory {
+        generic_edges: constraints.generic_allocation_edges.clone(),
+        initializer_edges: constraints.initializer_storage_edges.clone(),
+        ..NativeContractInventory::default()
     };
-    for method in plan.methods.values_mut() {
-        project_method(method);
-    }
-    for methods in plan.methods_by_java_key.by_owner.values_mut() {
-        for method in methods.values_mut() {
-            project_method(method);
+    let slots = source_generic_allocation_slots(program, constraints);
+    inventory.symbolic_occurrences =
+        crate::source_generic_allocations::symbolic_occurrence_paths(program, &slots);
+    for slot in slots {
+        for requirement in
+            collection_storage_node_constraints(constraints, &slot.node).unwrap_or_default()
+        {
+            let (path, placement) = match requirement {
+                SignatureConstraint::RequiredNativeAllocation(placement) => (vec![], *placement),
+                SignatureConstraint::RequiredNestedNativeAllocation { path, placement } => {
+                    (path.clone(), *placement)
+                }
+                _ => continue,
+            };
+            inventory.requirements.push(NativeRequirement {
+                slot: NativeSlotKey {
+                    node: slot.node.clone(),
+                    path,
+                },
+                placement,
+            });
         }
     }
-    for ctor in plan.constructors.values_mut() {
-        for param in &mut ctor.params {
-            allocations.project(&mut param.shape);
-        }
-        for local in &mut ctor.locals {
-            allocations.project(&mut local.shape);
+    let mut binders = constraints.generic_binders.iter().collect::<Vec<_>>();
+    binders.sort_by(|(left, _), (right, _)| {
+        (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1))
+    });
+    for ((owner, index), requirements) in binders {
+        for requirement in requirements {
+            let (path, placement) = match requirement {
+                SignatureConstraint::RequiredNativeAllocation(placement) => (vec![], *placement),
+                SignatureConstraint::RequiredNestedNativeAllocation { path, placement } => {
+                    (path.clone(), *placement)
+                }
+                _ => continue,
+            };
+            inventory.requirements.push(NativeRequirement {
+                slot: NativeSlotKey {
+                    node: SignatureDependencyNode::GenericParameter {
+                        owner: owner.clone(),
+                        index: *index,
+                    },
+                    path,
+                },
+                placement,
+            });
         }
     }
-    for field in plan.fields.values_mut() {
-        allocations.project(field);
+    inventory
+        .requirements
+        .sort_by_cached_key(|requirement| format!("{requirement:?}"));
+    inventory.requirements.dedup();
+    inventory
+}
+
+impl SignaturePlan {
+    pub(crate) fn source_param_abi_finalizations(&self) -> &[SourceParamAbiFinalization] {
+        &self.source_param_abi_finalizations
     }
-    for shape in plan.interface_return_shapes.values_mut().flatten() {
-        allocations.project(shape);
+    fn install_param_shape_before_freeze(
+        &mut self,
+        method: &MethodKey,
+        java_key: &JavaCallableKey,
+        index: usize,
+        shape: RustSlotShape,
+    ) -> Result<(), &'static str> {
+        if self.native_contract_report.is_some() {
+            return Err("signature contracts are frozen");
+        }
+        let Some(existing) = self.methods.get(method).and_then(|m| m.params.get(index)) else {
+            return Err("missing method parameter");
+        };
+        let Some(indexed) = self
+            .methods_by_java_key
+            .by_owner
+            .get(java_key.owner())
+            .and_then(|methods| methods.get(java_key))
+            .and_then(|m| m.params.get(index))
+        else {
+            return Err("missing canonical Java parameter index");
+        };
+        if indexed.shape != existing.shape {
+            return Err("signature indices disagree before parameter selection");
+        }
+        self.methods.get_mut(method).unwrap().params[index].shape = shape.clone();
+        self.methods_by_java_key
+            .by_owner
+            .get_mut(java_key.owner())
+            .unwrap()
+            .get_mut(java_key)
+            .unwrap()
+            .params[index]
+            .shape = shape;
+        Ok(())
+    }
+    pub(crate) fn native_contract_report(
+        &self,
+    ) -> Option<&crate::plan_contracts::NativeContractReport> {
+        self.native_contract_report.as_deref()
+    }
+    pub(crate) fn transport_optimization_report(
+        &self,
+    ) -> &crate::canonical_transport_optimizer::TransportOptimizationReport {
+        &self.transport_optimization
+    }
+    fn for_each_contract_shape(&self, mut visit: impl FnMut(&RustSlotShape)) {
+        for method in self.methods.values().chain(
+            self.methods_by_java_key
+                .by_owner
+                .values()
+                .flat_map(|methods| methods.values()),
+        ) {
+            for param in &method.params {
+                visit(param.shape());
+            }
+            for local in &method.locals {
+                visit(local.shape());
+            }
+            if let Some(shape) = method.return_shape() {
+                visit(shape);
+            }
+        }
+        for ctor in self.constructors.values() {
+            for param in &ctor.params {
+                visit(param.shape());
+            }
+            for local in &ctor.locals {
+                visit(local.shape());
+            }
+        }
+        for shape in self
+            .fields
+            .values()
+            .chain(self.interface_return_shapes.values().flatten())
+        {
+            visit(shape);
+        }
+    }
+    pub(crate) fn set_param_transport_shape(
+        &mut self,
+        method: &MethodKey,
+        index: usize,
+        shape: RustSlotShape,
+    ) -> Result<(), &'static str> {
+        if self.native_contract_report.is_some() {
+            return Err("signature contracts are frozen");
+        }
+        let Some(existing) = self.methods.get(method).and_then(|m| m.params.get(index)) else {
+            return Err("missing method parameter");
+        };
+        if existing.shape.java_ty != shape.java_ty
+            || existing.shape.native_allocation != shape.native_allocation
+            || existing.shape.nested_native_allocations != shape.nested_native_allocations
+            || existing.shape.dispatch != shape.dispatch
+        {
+            return Err("transport selection changed allocation or dispatch");
+        }
+        let keys = self
+            .rust_method_names_by_java_key
+            .iter()
+            .filter_map(|(key, rust_name)| {
+                (key.owner() == method.type_name() && rust_name == &method.rust_name)
+                    .then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        if keys.len() != 1 {
+            return Err("ambiguous or missing Java callable identity");
+        }
+        self.install_param_shape_before_freeze(method, &keys[0], index, shape)
+    }
+    pub(crate) fn native_contract_inventory(
+        &self,
+    ) -> &crate::plan_contracts::NativeContractInventory {
+        &self.native_contracts
+    }
+    pub(crate) fn resolved_native_contracts<'a>(
+        &'a self,
+        facts: &'a FactSet,
+    ) -> crate::plan_contracts::ResolvedNativeContracts<'a> {
+        crate::plan_contracts::ResolvedNativeContracts::new(self, facts)
+    }
+    pub(crate) fn native_contract_shape(
+        &self,
+        node: &SignatureDependencyNode,
+    ) -> crate::plan_contracts::SlotResolution<'_> {
+        use crate::plan_contracts::SlotResolution;
+        fn local<'a>(
+            locals: &'a [LocalPlan],
+            name: &str,
+            binding: Option<&BindingId>,
+        ) -> SlotResolution<'a> {
+            let mut matches = locals.iter().filter(|local| {
+                binding.map_or_else(
+                    || local.name() == name,
+                    |binding| local.binding() == binding,
+                )
+            });
+            let Some(found) = matches.next() else {
+                return SlotResolution::Missing;
+            };
+            if matches.next().is_some() {
+                SlotResolution::Ambiguous
+            } else {
+                SlotResolution::Resolved(found.shape())
+            }
+        }
+        let shape = match node {
+            SignatureDependencyNode::GenericParameter { owner, index } => self
+                .source_generic_allocations
+                .argument(owner.as_str(), *index),
+
+            SignatureDependencyNode::MethodParam { method, index, .. } => self
+                .methods
+                .get(method)
+                .and_then(|m| m.params.get(*index))
+                .map(|p| &p.shape),
+            SignatureDependencyNode::MethodReturn { method } => self
+                .methods
+                .get(method)
+                .and_then(|m| m.return_shape.as_ref()),
+            SignatureDependencyNode::ConstructorParam {
+                constructor, index, ..
+            } => self
+                .constructors
+                .get(constructor)
+                .and_then(|m| m.params.get(*index))
+                .map(|p| &p.shape),
+            SignatureDependencyNode::Field { field } => self.fields.get(field),
+            SignatureDependencyNode::MethodLocal {
+                method,
+                name,
+                binding,
+            } => {
+                return self
+                    .methods
+                    .get(method)
+                    .map_or(SlotResolution::Missing, |m| {
+                        local(&m.locals, name, binding.as_ref())
+                    });
+            }
+            SignatureDependencyNode::ConstructorLocal {
+                constructor,
+                name,
+                binding,
+            } => {
+                return self
+                    .constructors
+                    .get(constructor)
+                    .map_or(SlotResolution::Missing, |m| {
+                        local(&m.locals, name, binding.as_ref())
+                    });
+            }
+            _ => None,
+        };
+        shape.map_or(SlotResolution::Missing, SlotResolution::Resolved)
     }
 }
 
@@ -12380,6 +12840,14 @@ fn reconcile_inherited_field_storage_shapes_for_type(
             continue;
         };
         if best.next().is_some() {
+            plan.native_contracts.ambiguous_inherited_fields.push(
+                crate::plan_contracts::NativeSlotKey {
+                    node: SignatureDependencyNode::Field {
+                        field: FieldKey::rust_identity(&ty.name, inherited.rust_name()),
+                    },
+                    path: vec![],
+                },
+            );
             continue;
         }
         let Some(declaring_field) = declaring_ty.members.iter().find_map(|member| {
@@ -13063,6 +13531,10 @@ impl SignaturePlan {
 
     pub fn required_declared_field_shape(&self, ty: &TypeDecl, field: &FieldDecl) -> RustSlotShape {
         let key = FieldKey::source_field(ty, field);
+        let node = SignatureDependencyNode::Field { field: key.clone() };
+        if let Some(frozen) = crate::plan_contracts::FrozenNativeSlot::from_checked(self, &node) {
+            return frozen.shape().clone();
+        }
         self.fields.get(&key).cloned().unwrap_or_else(|| {
             panic!(
                 "signature solver must plan every declared field: missing {}::{}, available for type: [{}], nearby types: [{}]",
@@ -37769,4 +38241,563 @@ fn method_rust_name(method: &MethodDecl) -> String {
 
 fn constructor_rust_name(ctor: &ConstructorDecl) -> String {
     ctor.rust_name.clone().unwrap_or_else(|| "new".to_string())
+}
+
+#[cfg(test)]
+mod native_contract_tests {
+    use super::*;
+    use crate::plan_contracts::{NativeRequirement, NativeSlotKey, SlotResolution};
+    use crate::source_generic_allocations::GenericAllocationEdge;
+    use crate::storage_strategy::StoragePlacement;
+
+    fn slot(name: &str) -> NativeSlotKey {
+        NativeSlotKey {
+            node: SignatureDependencyNode::Field {
+                field: FieldKey::rust_identity("Owner", name),
+            },
+            path: vec![],
+        }
+    }
+    fn insert(
+        plan: &mut SignaturePlan,
+        slot: &NativeSlotKey,
+        ty: &str,
+        placement: StoragePlacement,
+    ) {
+        let SignatureDependencyNode::Field { field } = &slot.node else {
+            panic!()
+        };
+        let mut shape = RustSlotShape::for_storage(crate::parser::parse_hierarchy_type(ty));
+        shape.native_allocation = placement;
+        plan.fields.insert(field.clone(), shape);
+    }
+    #[test]
+    fn native_contract_instantiation_preserves_qualifiers_and_explains_premises() {
+        let mut plan = SignaturePlan::default();
+        let source = slot("declaration");
+        let target = slot("instantiation");
+        let shared = StoragePlacement::new(true, true, false);
+        insert(&mut plan, &source, "T", shared);
+        insert(&mut plan, &target, "int[]", shared);
+        plan.native_contracts.generic_edges = Arc::new(vec![GenericAllocationEdge {
+            source: source.node.clone(),
+            source_path: vec![],
+            source_argument: None,
+            target: target.node.clone(),
+            target_path: vec![],
+            target_argument: Some(crate::parser::parse_hierarchy_type("int[]")),
+        }]);
+        let facts = FactSet::default();
+        let checked = plan
+            .resolved_native_contracts(&facts)
+            .validate()
+            .expect("same canonical allocation");
+        assert_eq!(checked.placement(&target), Some(shared));
+        assert_eq!(checked.report().coverage.checked, 1);
+        assert_eq!(checked.report().reasons[0].premise.slot, source);
+        assert_eq!(checked.report().reasons[0].conclusion.slot, target);
+        let SignatureDependencyNode::Field { field } = &target.node else {
+            panic!()
+        };
+        plan.fields.get_mut(field).unwrap().native_allocation = StoragePlacement::default();
+        let failure = match plan.resolved_native_contracts(&facts).validate() {
+            Err(report) => report,
+            Ok(_) => panic!("detached target admitted"),
+        };
+        assert!(
+            failure
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "native_contract_generic_obligation")
+        );
+    }
+    #[test]
+    fn concrete_nonnative_leaf_cannot_be_certified_as_native_allocation() {
+        for ty in ["String", "Node", "int"] {
+            let mut plan = SignaturePlan::default();
+            let source = slot("not_native");
+            let shared = StoragePlacement::new(true, true, false);
+            insert(&mut plan, &source, ty, shared);
+            plan.native_contracts.requirements.push(NativeRequirement {
+                slot: source.clone(),
+                placement: shared,
+            });
+            let facts = FactSet::default();
+            let report = plan.resolved_native_contracts(&facts).check();
+            assert!(
+                report
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "native_contract_non_native_position"),
+                "{ty}: {report:?}"
+            );
+            assert!(report.invalid_nodes.contains(&source.node));
+            assert!(!report.checked_nodes.contains(&source.node));
+            assert!(plan.resolved_native_contracts(&facts).validate().is_err());
+        }
+        // Root T is symbolic even though the structural projection can return T.
+        let mut plan = SignaturePlan::default();
+        let source = slot("symbolic");
+        let shared = StoragePlacement::new(true, true, false);
+        insert(&mut plan, &source, "T", shared);
+        plan.native_contracts
+            .symbolic_occurrences
+            .push(source.clone());
+        plan.native_contracts.requirements.push(NativeRequirement {
+            slot: source,
+            placement: shared,
+        });
+        let facts = FactSet::default();
+        let report = plan.resolved_native_contracts(&facts).check();
+        assert!(report.diagnostics.is_empty(), "{report:?}");
+        assert_eq!(report.coverage.symbolic, 1);
+        assert_eq!(report.coverage.checked, 0);
+    }
+
+    #[test]
+    fn invalid_native_contract_rejects_lowering_with_error_without_panicking() {
+        let parsed = crate::parser::parse_java_source("class Bad { int[] values; }");
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let mut plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let field = plan
+            .fields
+            .keys()
+            .find(|field| field.field_name == "values")
+            .unwrap()
+            .clone();
+        plan.fields.get_mut(&field).unwrap().native_allocation = StoragePlacement::default();
+        plan.native_contracts.requirements.push(NativeRequirement {
+            slot: NativeSlotKey {
+                node: SignatureDependencyNode::Field { field },
+                path: vec![],
+            },
+            placement: StoragePlacement::new(true, true, false),
+        });
+        let report = plan.resolved_native_contracts(&semantic.facts).check();
+        for issue in &report.diagnostics {
+            if report.invalid_nodes.contains(&issue.source.node) {
+                plan.diagnostics
+                    .push(SignatureDiagnostic::new(issue.code, issue.message.clone()));
+            }
+        }
+        assert!(!report.invalid_nodes.is_empty());
+        plan.native_contract_report = Some(Arc::new(report));
+        let lowered = crate::lower::lower_program_with_plans(
+            &resolved.program,
+            crate::diagnostics::DiagnosticBag::new(),
+            &semantic.facts,
+            &semantic.usage,
+            &representations,
+            &plan,
+        );
+        assert!(lowered.diagnostics().has_errors());
+        assert!(
+            lowered
+                .diagnostics()
+                .iter()
+                .any(|d| d.severity() == crate::diagnostics::Severity::Error
+                    && d.code() == "native_contract_missing_requirement")
+        );
+        let rust = crate::emit::emit_file(lowered.file());
+        assert!(rust.contains("compile_error!"), "{rust}");
+        assert!(
+            rust.contains("native_contract_missing_requirement"),
+            "{rust}"
+        );
+        assert!(
+            !rust.contains("struct Bad"),
+            "invalid source field must not reach rendering: {rust}"
+        );
+    }
+
+    #[test]
+    fn frozen_initializer_boundary_rejects_tampered_selected_endpoint() {
+        let parsed = crate::parser::parse_java_source(
+            "class FrozenInitializer { int[] values = make(); FrozenInitializer() {} static int[] make() { return new int[] { 4 }; } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let mut plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let report = plan.native_contract_report().unwrap();
+        let recipe = report
+            .initializer_boundaries
+            .first()
+            .expect("resolved factory-to-field initializer must be checked");
+        let source = recipe.source.clone();
+        let target = recipe.target.clone();
+        assert!(
+            crate::plan_contracts::FrozenNativeBoundary::for_initializer(&plan, &source, &target)
+                .unwrap()
+                .is_some()
+        );
+        let SignatureDependencyNode::Field { field } = &target.node else {
+            panic!()
+        };
+        let shape = plan.fields.get_mut(field).unwrap();
+        shape.native_allocation = StoragePlacement::new(
+            !shape.native_allocation.shared(),
+            shape.native_allocation.interior_mutable(),
+            shape.native_allocation.sync(),
+        );
+        assert!(
+            crate::plan_contracts::FrozenNativeBoundary::for_initializer(&plan, &source, &target)
+                .is_err(),
+            "cached conversion must not survive an endpoint rewrite"
+        );
+    }
+
+    #[test]
+    fn source_parameter_abi_is_finalized_before_canonical_transport_selection() {
+        let parsed = crate::parser::parse_java_source(
+            "class Node { int value; Node(int v) { value=v; } void set(int v) { value=v; } } class Use { private static int read(Node node) { return node.value; } static int run() { Node n = new Node(1); Node alias=n; alias.set(2); return read(n)+read(n)-4; } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "read" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let key = MethodKey::source_method(owner, method);
+        let finalization = plan
+            .source_param_abi_finalizations()
+            .iter()
+            .find(|change| change.method == key && change.parameter == 0)
+            .expect("old emitted owned-handle ABI must be installed before optimization");
+        assert_eq!(
+            finalization.semantic_shape.ownership,
+            OwnershipShape::SharedBorrow
+        );
+        assert_eq!(finalization.physical_shape.ownership, OwnershipShape::Owned);
+        assert_eq!(
+            crate::lower::emitted_source_method_param_shape(
+                method,
+                &method.params[0],
+                &owner.name,
+                &finalization.physical_shape,
+                &representations
+            ),
+            finalization.physical_shape,
+            "physical incumbent must be an emission fixed point"
+        );
+        let selected = plan.method_signature(owner, method).unwrap().params()[0].shape();
+        assert_eq!(selected.ownership, OwnershipShape::SharedBorrow);
+        assert_eq!(
+            selected.borrow_target,
+            crate::slot_shape::BorrowTarget::Carrier
+        );
+        assert!(
+            plan.transport_optimization_report()
+                .decisions
+                .iter()
+                .any(|decision| decision.method == key && decision.borrowed)
+        );
+        assert_eq!(
+            plan.methods_by_java_key
+                .get(&JavaCallableKey::source_method_for_type(owner, method))
+                .unwrap()
+                .params()[0]
+                .shape(),
+            selected
+        );
+        assert_eq!(
+            crate::lower::emitted_source_method_param_shape(
+                method,
+                &method.params[0],
+                &owner.name,
+                selected,
+                &representations
+            ),
+            *selected,
+            "selected carrier loan must survive source emission unchanged"
+        );
+    }
+
+    #[test]
+    fn native_contract_invalid_nested_path_cannot_freeze() {
+        let mut plan = SignaturePlan::default();
+        let mut source = slot("array");
+        insert(&mut plan, &source, "int[]", StoragePlacement::default());
+        source.path = vec![1];
+        plan.native_contracts.requirements.push(NativeRequirement {
+            slot: source,
+            placement: StoragePlacement::new(true, true, false),
+        });
+        let facts = FactSet::default();
+        let report = plan.resolved_native_contracts(&facts).check();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "native_contract_invalid_path")
+        );
+        assert!(plan.resolved_native_contracts(&facts).validate().is_err());
+    }
+    #[test]
+    fn native_contract_local_identity_does_not_merge_shadowed_bindings() {
+        let mut plan = SignaturePlan::default();
+        let method = MethodKey::rust_identity("Owner", "run");
+        let ty = crate::parser::parse_hierarchy_type("int[]");
+        let locals = (0..2)
+            .map(|occurrence| {
+                LocalPlan::new(
+                    BindingId::new(crate::binding_id::BindingKind::Local, "value", occurrence),
+                    "value".into(),
+                    ty.clone(),
+                    RustSlotShape::for_storage(ty.clone()),
+                    false,
+                )
+            })
+            .collect();
+        plan.methods.insert(
+            method.clone(),
+            MethodSignaturePlan::new(vec![], None, locals, ReceiverPlan::None),
+        );
+        let identity = SignatureDependencyNode::MethodLocal {
+            method: method.clone(),
+            name: "value".into(),
+            binding: Some(BindingId::new(
+                crate::binding_id::BindingKind::Local,
+                "value",
+                1,
+            )),
+        };
+        assert!(matches!(
+            plan.native_contract_shape(&identity),
+            SlotResolution::Resolved(_)
+        ));
+        let compatibility = SignatureDependencyNode::MethodLocal {
+            method,
+            name: "value".into(),
+            binding: None,
+        };
+        assert!(matches!(
+            plan.native_contract_shape(&compatibility),
+            SlotResolution::Ambiguous
+        ));
+    }
+    #[test]
+    fn generic_allocation_finalization_adds_no_requirement_after_saturation() {
+        let parsed = crate::parser::parse_java_source(
+            "class Holder<T> { T value; Holder(T value) { this.value = value; } T get() { return value; } } class Use { static int[] keep(int[] input) { Holder<int[]> h = new Holder<int[]>(input); input[0]++; return h.get(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let reps = crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan =
+            solve_signatures_with_facts(&resolved.program, &reps, &semantic.usage, &semantic.facts);
+        assert!(
+            !plan
+                .diagnostics()
+                .iter()
+                .any(|d| d.code() == "native_contract_late_generic_obligation"),
+            "{:?}",
+            plan.diagnostics()
+        );
+        let report = plan.resolved_native_contracts(&semantic.facts).check();
+        assert_eq!(
+            crate::source_generic_allocations::SourceGenericAllocationPlan::build(
+                &resolved.program,
+                &plan
+            ),
+            plan.source_generic_allocations,
+            "solver-derived binder artifact must match independent declaration/ancestor oracle"
+        );
+        assert!(
+            report.reasons.len() > 0,
+            "no instantiated allocation evidence exercised"
+        );
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "native_contract_generic_obligation"),
+            "{report:?}"
+        );
+    }
+    #[test]
+    fn declaration_free_generic_alias_has_a_solver_owned_binder() {
+        let parsed = crate::parser::parse_java_source(
+            "class Parent<T> { T saved; void keep(T value) { saved = value; } T get() { return saved; } } class Alias<A> extends Parent<A> {} class Use { static int[] run(int[] values) { Alias<int[]> alias = new Alias<int[]>(); alias.keep(values); values[0]++; return alias.get(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let reps = crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan =
+            solve_signatures_with_facts(&resolved.program, &reps, &semantic.usage, &semantic.facts);
+        let alias = plan
+            .source_generic_allocations
+            .argument("Alias", 0)
+            .unwrap();
+        assert!(alias.native_allocation.shared(), "{alias:?}");
+        assert!(
+            !plan
+                .diagnostics()
+                .iter()
+                .any(|d| d.code() == "native_contract_late_generic_obligation"),
+            "{:?}",
+            plan.diagnostics()
+        );
+        assert_eq!(
+            crate::source_generic_allocations::SourceGenericAllocationPlan::build(
+                &resolved.program,
+                &plan
+            ),
+            plan.source_generic_allocations
+        );
+        assert!(plan.native_contract_inventory().generic_edges.iter().any(|edge| matches!(&edge.source, SignatureDependencyNode::GenericParameter { owner, index: 0 } if owner.as_str() == "Alias")));
+    }
+    fn with_reference_generic_arm<T>(run: impl FnOnce() -> T) -> T {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                REFERENCE_GENERIC_ALLOCATION_ARM.with(|value| value.set(self.0));
+            }
+        }
+        let previous = REFERENCE_GENERIC_ALLOCATION_ARM.with(|value| value.replace(true));
+        let _reset = Reset(previous);
+        run()
+    }
+    fn normalized_constraints(mut state: SignatureConstraintState) -> SignatureConstraintState {
+        fn normalize(items: &mut Vec<SignatureConstraint>) {
+            items.sort_by_cached_key(|item| format!("{item:?}"));
+            items.dedup();
+        }
+        for method in state.methods.values_mut() {
+            for items in &mut method.params {
+                normalize(items);
+            }
+            normalize(&mut method.return_constraints);
+            for local in &mut method.locals {
+                normalize(&mut local.constraints);
+            }
+        }
+        for ctor in state.constructors.values_mut() {
+            for items in &mut ctor.params {
+                normalize(items);
+            }
+            for local in &mut ctor.locals {
+                normalize(&mut local.constraints);
+            }
+        }
+        for items in state
+            .fields
+            .values_mut()
+            .chain(state.generic_binders.values_mut())
+        {
+            normalize(items);
+        }
+        state
+    }
+    #[test]
+    fn indexed_generic_arm_matches_complete_reference_closure_and_final_plans() {
+        for source in [
+            "class Holder<T> { T value; void keep(T v) { value = v; } T get() { return value; } } class Use { static int[] run(int[] values) { Holder<int[]> h = new Holder<int[]>(); h.keep(values); values[0]++; return h.get(); } }",
+            "class Parent<T> { T saved; void keep(T v) { saved = v; } T get() { return saved; } } class Alias<A> extends Parent<A> {} class Use { static final int[] GLOBAL = {1}; static int[] run() { Alias<int[]> h = new Alias<int[]>(); h.keep(GLOBAL); return h.get(); } }",
+            "interface Range<T,R> { R apply(T values,int from,int to); } class Factory { static int[] keep(int[] v,int f,int t) { return v; } static class Builder { static final int[] EMPTY = {}; Range<int[],int[]> factory; void select() { factory = Factory::keep; } int[] build() { return create(factory,EMPTY,0,0); } static <S,T> T create(Range<S,T> f,S v,int from,int to) { return f.apply(v,from,to); } } }",
+        ] {
+            let parsed = crate::parser::parse_java_source(source);
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let semantic = crate::semantic_analysis::analyze_program(
+                &resolved.program,
+                &resolved.facts,
+                &FactSet::default(),
+            );
+            let representations =
+                crate::representation::plan_representations(&resolved.program, &semantic.facts);
+            let initial = collect_signature_constraints_with_representations(
+                &resolved.program,
+                &representations,
+                &semantic.usage,
+                &semantic.facts,
+            );
+            let indexed =
+                solve_signature_constraints_to_fixpoint_result(initial.clone(), &semantic.usage);
+            let reference = with_reference_generic_arm(|| {
+                solve_signature_constraints_to_fixpoint_result(initial, &semantic.usage)
+            });
+            assert_eq!(
+                normalized_constraints(indexed.constraints().clone()),
+                normalized_constraints(reference.constraints().clone()),
+                "{source}"
+            );
+            assert_eq!(indexed.diagnostics(), reference.diagnostics());
+            let mut indexed_plan = solve_signatures_with_facts(
+                &resolved.program,
+                &representations,
+                &semantic.usage,
+                &semantic.facts,
+            );
+            let mut reference_plan = with_reference_generic_arm(|| {
+                solve_signatures_with_facts(
+                    &resolved.program,
+                    &representations,
+                    &semantic.usage,
+                    &semantic.facts,
+                )
+            });
+            indexed_plan.diagnostics.sort_by(|left, right| {
+                (left.code(), left.message()).cmp(&(right.code(), right.message()))
+            });
+            reference_plan.diagnostics.sort_by(|left, right| {
+                (left.code(), left.message()).cmp(&(right.code(), right.message()))
+            });
+            assert_eq!(
+                indexed_plan, reference_plan,
+                "complete selected plan differs for {source}"
+            );
+        }
+    }
 }

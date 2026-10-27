@@ -3974,18 +3974,35 @@ class GenericClassLoopMove<K> {
             && translation.rust.contains("where K: Clone")
             && translation
                 .rust
-                .matches("consume(value.clone()/* TODO(translation): validate added clone */)")
+                .matches("consume(std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */)")
                 .count()
                 == 2,
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "loop_body_reuses_owned_generic_value_with_clone_bound",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[derive(Clone)]
+struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+impl GenericLoopConsumer<String> for Recorder {
+    fn consume(&self, value: String) { self.0.borrow_mut().push(value); }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn clone_any(&self) -> Box<dyn std::any::Any> { Box::new(self.clone()) }
+    fn clone_box(&self) -> Box<dyn GenericLoopConsumer<String>> { Box::new(self.clone()) }
+}
+#[test]
+fn non_copy_values_are_available_on_every_loop_back_edge() {
+    let values = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorder = Recorder(values.clone());
+    GenericLoopMove::run(String::from("method"), &recorder, 3);
+    GenericClassLoopMove::<String>::new().run(String::from("class"), &recorder, 2);
+    assert_eq!(*values.borrow(), vec!["method", "method", "method", "class", "class"]);
+}
+"#,
         }],
     );
 }
@@ -4012,7 +4029,9 @@ class LoopNullableCollectionMove {
     );
 
     assert!(
-        translation.rust.contains("Batch::new(values.clone()"),
+        translation
+            .rust
+            .contains("Batch::new(std::clone::Clone::clone(&values)"),
         "{}",
         translation.rust
     );
@@ -8793,30 +8812,38 @@ class ReusedStringSourceAssignments {
 
     assert!(
         translation.rust.contains(
-            "let mut father: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+            "let mut father: JavaString = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;"
         ) && translation.rust.contains(
-            "let mut mother: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+            "let mut mother: JavaString = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;"
         ) && translation.rust.contains(
-            "let mut child: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+            "let mut child: JavaString = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;"
         ) && translation
             .rust
-            .contains("father = ref_base.clone()/* TODO(translation): validate added clone */;")
+            .contains("father = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;")
             && translation.rust.contains(
-                "mother = ref_base.clone()/* TODO(translation): validate added clone */;"
+                "mother = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;"
             )
             && translation
                 .rust
-                .contains("child = ref_base.clone()/* TODO(translation): validate added clone */;"),
+                .contains("child = std::clone::Clone::clone(&ref_base)/* TODO(translation): validate added clone */;"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "reused_string_source_assignments",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn repeated_string_assignments_keep_the_source_available_in_both_branches() {
+    let input = JavaString::from(" seed ");
+    let owner = ReusedStringSourceAssignments::new();
+    assert_eq!(owner.trio(&input, false).scalar_string().unwrap(), "seedseedseedseed");
+    assert_eq!(owner.trio(&input, true).scalar_string().unwrap(), "seedseedseedseed");
+}
+"#,
         }],
     );
 }
@@ -8849,7 +8876,7 @@ class CastedBorrowedMapArgument {
 
     assert!(
         translation.rust.contains(
-            "self.parallel(paths.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<std::collections::BTreeMap<_, _>>(), batch)"
+            "self.parallel(paths.iter().map(|(key, value)| (std::clone::Clone::clone(&*key), std::clone::Clone::clone(&*value))).collect::<std::collections::BTreeMap<_, _>>(), batch)"
         ) && translation.rust.contains("self.serial(paths, batch)")
             && translation.rust.contains(".into_iter().collect::<std::collections::HashMap<_, _>>()"),
         "{}",
@@ -10128,19 +10155,29 @@ class ReusedOptionalErasedObjectCastClone {
     );
 
     assert!(
-        translation.rust.contains(
-            "maybe.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
-        ) && !translation.rust.contains("maybe.unwrap().downcast::<String>()")
-            && !translation.rust.contains("maybe.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"),
+        translation.rust.contains("maybe.as_ref().map(|value| value.downcast_ref::<JavaString>().cloned().ok_or_else(")
+            && translation.rust.contains(".transpose()?.as_ref()")
+            && !translation.rust.contains("maybe.map(")
+            && !translation.rust.contains("maybe.unwrap().downcast::<")
+            && !translation.rust.contains("maybe.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "reused_optional_erased_object_cast_clone",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn nullable_cast_preserves_later_object_use_and_checked_failure() {
+    let owner = ReusedOptionalErasedObjectCastClone::new();
+    owner.run(None).unwrap();
+    owner.run(Some(Box::new(JavaString::from("preserved")))).unwrap();
+    let error = owner.run(Some(Box::new(7_i32))).unwrap_err();
+    assert_eq!(error.class_name(), "ClassCastException");
+}
+"#,
         }],
     );
 }

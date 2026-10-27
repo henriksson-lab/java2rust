@@ -1,0 +1,202 @@
+Restart handover — constraint/optimization refactor
+Saved: 2026-10-26 22:50 CET (Europe/Stockholm)
+Repository: /data/henriksson/github/claude/new_java2rust
+
+Current status
+
+The goal to implement docs/constraint-optimization-refactor-plan.txt was marked
+COMPLETE after the scoped acceptance audit. No active implementation goal remains.
+The user requested this handover because a restart is pending. Do not automatically
+resume the old Jahmm campaign or start a CSV repair campaign after restarting.
+No unfinished background work is intentionally left running; old tool/agent
+handles are not restart state.
+
+Read first
+
+- docs/constraint-optimization-execution.txt: detailed implementation, acceptance
+  evidence, actual scope and limitations.
+- docs/constraint-optimization-refactor-plan.txt: accepted plan, status updated.
+- docs/transport-refactor-witnesses.txt: concrete baseline failures and repairs.
+- docs/scoped-storage-identity-witnesses.txt: nominal/binder alias bug, proof and
+  normalization details.
+- AGENTS.md: repository rules, especially whole-path corpus audits and batching.
+
+What changed
+
+1. Unified move/copy decisions around tri-state liveness in MoveUseContext.
+   Unknown evidence is not permission to move. Removed obsolete emitted-text
+   constructor clone deletion. Required reference copies happen before consuming
+   nullable/upcast conversions; canonical copies remain separate from Java clone.
+
+2. Added scoped native contract inventory, coverage, causal edges and frozen
+   tokens in src/plan_contracts.rs. Invalid modeled obligations become Errors
+   and compile_error artifacts before rendering, not accepted guesses or panics.
+   A real primitive-array factory-to-field initializer consumes its stored
+   SlotConversionPlan and selected target through a frozen boundary.
+
+3. Added solver-owned GenericParameter slots even for owners with no direct
+   declaration occurrence. Generic qualifiers saturate through existing edges;
+   artifact construction reads the solved result. Removed the production second
+   ancestor fixedpoint and post-saturation qualifier repair.
+
+4. Added src/generic_allocation_schedule.rs: indexed, stable, synchronous
+   execution of one existing allocation propagation arm. Watches destination
+   normalization prerequisites too; other arms still use global saturation.
+   Complete closure/final-plan equivalence against the reference arm is tested.
+
+5. Added src/representation_solver.rs: bounded deterministic heuristic CSP with
+   hard compatibility tables, additive costs, pruning, component-local search
+   and a feasible incumbent. No ILP/CSP dependency added. Real production pilot
+   in src/canonical_transport_optimizer.rs borrows canonical handles for proved
+   private static scalar observers, keeping storage/dispatch/results fixed.
+   Existing physical parameter ABI is finalized in SignaturePlan before search;
+   both indices, body inference, emission and calls agree on selected loans.
+
+6. Fixed scoped nominal/binder identity using existing binder-aware substitution
+   and a shared capture-avoiding catalog (src/scoped_type_parameters.rs). An
+   unrelated Unrelated<Cell> previously made aliased nominal Cell use payload
+   copies: baseline Rust printed0, Java7. The global storage exclusion is gone.
+   Primary/context/summary/resolver copies use consistent identities before facts.
+   Exact value method references follow lexical namespace precedence.
+
+7. Repairs exposed by verification:
+   - All nine Rc/Arc/Weak copies in java_native_reference.rs use typed Rust Clone
+     UFCS, avoiding Java interfaces' clone() ambiguity and preserving owners.
+   - Nullable erased Object-to-String casts use the existing borrowed checked
+     canonical-reference conversion, with the actual String runtime type.
+   - Nullable source upcasts copy a later-used canonical handle BEFORE .map/Into.
+   - Shared/mutable optional local loans from proved owned temporaries retain
+     the backing owner, including receiver-only uses. This fixes a dangling
+     Option<&mut dyn Trait> into a dropped Box; no staging reborrow workaround.
+
+Verification — accepted, do not rerun without a reason
+
+56 focused checks passed across the accepted batches:
+29 library checks, 5 heuristic transport, 5 idiom preservation, 2 generic producer,
+2 scoped identity/production assembly, 4 receiver identity, 3 shared interface/
+assembly/reentry, 1 shared return, 1 reference transport, 1 frozen initializer,
+and 3 selected staging checks. The first broad 21-test staging run also passed.
+Later fixes reran affected cases; not every check was redundantly rerun after
+changes to unrelated functions. The execution record maps accepted logs.
+
+Full pinned Apache Commons Numbers1.3 core gate PASSED:
+all11 production files + existing contract client; 12 emitted files; zero failed
+translations, invalid-pattern files or Rust compilation errors. Original Java
+and generated Rust both print:
+  contract=0
+  oracle=ok
+No generated implementation was manually repaired. Rust launcher only calls the
+generated Java main. Pinned source staging is byte-checked by existing scripts.
+
+Accepted corpus artifact directory:
+  .tmp/constraint-refactor/core/run.rv8EDZ/
+Latest-run pointer:
+  .tmp/constraint-refactor/core/latest-run.txt
+Producer SHA256 (matches final target/debug/new-java2rust):
+  7b4b55dde23a86b383c4f5680fde476f65fe2b1d0b43fcac16236da82872c236
+One debug run: translation111673ms, assembly15067ms, driver132656ms.
+
+Reproduction script:
+  scripts/verify-constraint-refactor-core.sh
+Example, reusing a fresh compiled translator:
+  NEW_JAVA2RUST_BIN="$PWD/target/debug/new-java2rust" JOBS=4 \
+    scripts/verify-constraint-refactor-core.sh
+The script now creates a fresh run directory for each invocation. Reusing an old
+output directory after changing the translator correctly triggered runtime
+snapshot provenance rejection during development; do not bypass that check.
+
+Formatting: cargo fmt --check, git diff --check, and script bash syntax pass.
+No full thousands-test repository run or speculative FP benchmark campaign.
+
+Known failed corpus — do not call it passing
+
+A full Commons CSV1.10.0 attempt FAILED with100 Rust errors. These span text/
+character runtime operations and native conversions; no native_contract invariant
+error was reported. Examples: JavaCodeUnit whitespace/display, JavaUtf16String
+array traits, retained native allocation adapters, and mismatched types.
+Historical v101 passed with earlier pipeline output, but that is not a verified
+passing baseline for the current checkpoint. We did NOT prove all100 failures
+predate this refactor. Do not claim CSV support or zero CSV regressions.
+
+CSV artifacts (ephemeral across restart or /tmp cleanup):
+  /tmp/new-java2rust-commons-csv.QukkuG/translation/
+  summary.tsv, top-compile-errors.tsv, compile.log, generated-crate/
+Project log:
+  .tmp/constraint-refactor/commons-csv.log
+Before attempting fixes, establish a current baseline and audit representative
+required Rust rewrites, following AGENTS.md. Do not start another incremental
+100-error campaign based only on diagnostic counts.
+
+Other artifact locations
+
+Project-local .tmp/constraint-refactor/ holds build JSON/logs, focused test logs,
+round1/round2/round3 preserved failures and successes, provenance, and corpus runs.
+Accepted last repair logs:
+  reference_transport.last.log
+  source_call_staging.last.log
+  native_frozen_initializer.final.log
+  results3.log (one old authored-fixture stdout failure subsequently fixed)
+  core-last.log
+Do not mistake preserved historical failures for the final accepted result.
+.tmp/scoped-storage-entry/ contains the independently executed Rust0/Java7
+baseline. These untracked scratch artifacts are evidence, not deliverable source.
+
+Build environment
+
+Global Cargo cache was readable but unpacking into it was sandbox-restricted.
+For this session Cargo used an offline scratch home:
+  /tmp/java2rust-cost-cargo-4ybl55z2
+It links existing registry cache/index and uses a writable source unpack area.
+Path also saved in .tmp/representation-cost-cargo-home-path. It may disappear on
+restart. Prefer normal Cargo if available; otherwise recreate an equivalent
+writable cache arrangement instead of assuming this path exists. No repository
+vendoring or dependency changes were required by this refactor.
+
+Workspace — uncommitted, preserve it
+
+No commit or staging was performed for this goal. Modified tracked files:
+  docs/constraint-optimization-refactor-plan.txt
+  src/java_native_reference.rs, java_type_substitution.rs, lib.rs, lower.rs,
+  lowering_diagnostics.rs, resolve.rs, signature.rs,
+  source_generic_allocations.rs, storage_strategy.rs
+  tests/idiom_gaps.rs
+
+New deliverables (must be preserved/added with the change, not only tracked diff):
+  docs/constraint-optimization-execution.txt
+  docs/transport-refactor-witnesses.txt
+  docs/scoped-storage-identity-witnesses.txt
+  docs/handover-2026-10-26-constraint-optimization.txt (this file)
+  scripts/verify-constraint-refactor-core.sh
+  src/canonical_transport_optimizer.rs, generic_allocation_schedule.rs,
+  plan_contracts.rs, representation_solver.rs, scoped_type_parameters.rs
+  tests/canonical_transport_optimization.rs, native_frozen_initializer.rs,
+  reference_transport.rs, scoped_storage_identity.rs
+  tests/fixtures/NativeInitializerProbe.java, ReferenceTransportProbe.java
+  tests/fixtures/scoped_storage/{Cell,Unrelated,ScopedStorageProbe}.java
+
+Other preexisting untracked notes include AGENTS.md, AUDIT-BACKLOG.md,
+CONCURRENCY-SCOPE.md, FROMCLAUDE.md, GOAL-0028-IDENTITY-LOWERING.md,
+NEXT-ISSUES-HANDOFF.md, OVERNIGHT.md, PLANNING.md, SEMANTIC-COVERAGE.md and TODO2.md.
+Do not delete or accidentally commit unrelated notes or the whole .tmp tree.
+Inspect git status after restart rather than assuming the workspace was committed.
+
+Architectural limits / possible next work
+
+This was the initial bounded refactor, not a universal Java-to-Rust CSP engine.
+Frozen coverage includes generic qualifier relations and selected initializer
+boundaries. Arbitrary assignments/calls/returns, virtual adapters and every local
+physical refinement are not globally frozen. Heuristic candidates remain narrow
+and admitted by existing implementations; lower source score alone proves nothing.
+
+Conditional extensions from the plan remain conditional: reusable callback/
+reentry effects before guard coalescing, live generic collection/array view
+protocols before admitting retained retargeting, and escape/flow proofs before
+nominal allocation-context splitting. No such new transformations were attempted.
+Type-only method references through a renamed binder are explicitly unsupported;
+proven value-qualified references are preserved. Existing JavaMonitor reentrancy
+is distinct from payload Mutex behavior and remains unchanged.
+
+After restart: read this file and the execution record, inspect the dirty tree,
+and take the user's next direction. Do not recreate or resume a completed goal
+just because some scratch log contains a failure. Older Jahmm status is recorded
+separately in docs/jahmm-generated-code-efficiency.txt; it was not resumed here.

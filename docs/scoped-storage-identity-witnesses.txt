@@ -1,0 +1,104 @@
+Scoped nominal storage versus unrelated generic binders
+Date: 2026-10-26
+
+Baseline reproduction
+
+Saved source, generated Rust, direct rustc harness/log and Java oracle:
+  .tmp/scoped-storage-entry/
+
+Source declares class Cell { int value; }, an unrelated Unrelated<Cell> generic
+class, and run(): construct Cell original; Cell alias=original; alias.value=7;
+return original.value. The pre-change translator removes Cell from storage when
+it sees any same-spelled class/method type parameter anywhere in the program.
+Output uses plain Cell and clones its payload for alias. The generated binary
+prints0, while javac/java prints7. Translator diagnostics also report the
+observable_alias error. This is a reproduced semantic defect, not a diagnostic
+count estimate. The diagnostic harness only adds a main entry; no generated
+translation correction was used as a deliverable.
+
+Smallest correct Rust rewrite and whole path
+
+Use Rc<RefCell<Cell>> consistently for the mutable aliased source class. Copying
+a reference preserves one allocation; field writes and later reads project the
+same payload. Unrelated's type variable stays an unconstrained generic carrier,
+not Rc<RefCell<Cell>>. Field/parameter/return rendering cannot identify these two
+entities merely from their old identical spelling. Removing the global storage
+filter alone would wrap the generic binder and introduce another wrong ABI.
+
+Implementation
+
+src/scoped_type_parameters.rs assigns capture-avoiding names only to source
+binders that collide with nominal declarations. It reuses the existing class,
+method and constructor alpha-renaming helpers in java_type_substitution.rs,
+rather than adding another JavaType variant or competing storage rule.
+
+The catalog sees all primary/context/summary declarations together before facts
+are collected. SourceSymbols retains the immutable catalog and applies it to
+symbol and resolved primary/support copies before resolution. Summary-only
+support receives the same normalization. Single-file resolution entry points and
+declaration-fact collection also normalize their input copies. The single-file
+support pipeline now reuses the same SourceSymbols instead of independently
+building symbol/collision contexts for primary, semantics and support.
+
+Existing source runtime names and nominal owner names remain untouched. New
+binder identities derive from source owner plus lexical class/callable/local
+scope and parameter position, using injective identifier encoding. Fresh names
+avoid nominal names and other lexical binders. Rebuilding a catalog on normalized
+support recognizes the same own-scope identity, so an unresolved primary copy
+receives the same binder spelling. Class/method/constructor/nested shadowing,
+local classes and anonymous generic methods participate in the traversal.
+
+The existing substitution helper now rewrites explicit call type_args and walks
+method-reference receiver expressions as well as ordinary type positions, bodies,
+bounds, hierarchy strings, resolved type metadata, arrays and nullable nesting.
+The storage planner no longer removes nominal classes based on a global set of
+binder spellings. No change to its sharing/mutation/synchronization rule is needed.
+
+External facts about nominal classes keep their original names. Source facts
+are collected after normalization; no alpha rename is applied to arbitrary
+externally supplied nominal facts or guessed textual source type names.
+
+Explicit admission limit
+
+A bare method-reference target can name a type variable or a same-spelled Java
+value. Binder-aware substitution now carries a lexical TypeEnv namespace and
+reuses method_reference_value_binding(target,true): exact value declarations
+beat type owners, while compatibility snake-case spellings cannot manufacture a
+value shadow for a known type. Scoped parameters (both source and emitted names),
+fields, block locals, anonymous/nested declarations, lambdas, for/enhanced-for,
+try resources, catches and switch cases preserve value-reference targets.
+Namespace overlays are restored on leaving a scope. The earlier shadowing/
+primitive-wrapper rename preparation uses the same scoped helpers.
+
+A renamed-binder method reference lacking a proven lexical value target remains
+an explicit Unsupported expression requiring a type/value target proof and an
+admitted generic-bound callable recipe. This does not reject a proven parameter
+value named Cell in <Cell> IntSupplier forward(IntSupplier Cell): Cell::getAsInt
+keeps its original value target. No blanket generic-bound method-reference
+support is claimed.
+
+Verification authored, root owns execution
+
+scoped_type_parameters module tests:
+- distinct class/method/constructor/nested binders and idempotence;
+- separate primary/support copies, rebuilt catalog and explicit method witnesses;
+- local and anonymous generic binders before capture-type lifting;
+- explicit rejection of unproved type-only method-reference targets, preservation
+  of proved value targets, and namespace non-leakage across nested scopes.
+
+tests/scoped_storage_identity.rs:
+- actual javac/Rust alias parity with generic field/constructor/getter transport
+  and same-spelled generic-binder/value-parameter native method reference;
+- separate Cell.java, Unrelated.java and ScopedStorageProbe.java through real
+  production batch crate assembly and a consumer.
+
+Formatting and diff checks pass. No cargo/build run by this lane; root owns the
+batched compilation and test gates. No full corpus translation was performed.
+
+First batched verification (before value-target extension)
+
+Root reported build2 success. Nominal alias/generic transport Java/Rust gate
+passed; unit batch had one assertion failure solely because concatenated source
+spans differ from standalone source offsets. The comparison now aligns source
+locations before requiring full normalized declaration/member/body equality.
+Root owns verification of the value-target follow-up and production assembly.

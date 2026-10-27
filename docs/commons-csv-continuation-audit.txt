@@ -1,0 +1,434 @@
+Commons CSV 1.10.0 continuation audit
+Date: 2026-10-27
+Status: baseline and architectural entry audit complete; no translator fixes made.
+
+Purpose and scope
+
+Choose an architectural repair campaign from current generated code after the
+completed constraint/optimization refactor. No translator repair belongs to this
+audit. Pinned production Java and the previous uncommitted work stay untouched.
+Generated-code rewrites below are diagnostic designs, not repaired deliverables.
+
+Baseline provenance
+
+Pinned checkout: .tmp/commons-csv-1.10.0-src
+Commit: 5b99c860986a87f9da664bf47a3a7c0026673123
+12 production Java files; git status/diff clean before the run.
+Fresh offline debug build succeeded with CARGO_HOME=/tmp/java2rust-csv-cargo.
+The normal Cargo home could not unpack tree-sitter-rust on its read-only source
+cache; the scratch home links existing cache/index and existing unpacked crates,
+and unpacks missing crates in writable storage. No dependency changes required.
+Build log: .tmp/csv-continuation/build-scratch.log
+Fixed producer: .tmp/csv-continuation/translator
+SHA256: 566221122f5ef365c18d132631375f1bd95ab9e81b1a305b7d6f7ac00963e411
+
+Authoritative run: /tmp/new-java2rust-commons-csv.6oAtoz/translation
+Preserved copy: .tmp/csv-continuation/accepted-baseline/translation
+Driver log: .tmp/csv-continuation/current-baseline.log
+Invocation (use a freshly built fixed producer for subsequent source changes):
+  CARGO_HOME=/tmp/java2rust-csv-cargo \
+    NEW_JAVA2RUST_BIN="$PWD/.tmp/csv-continuation/translator" \
+    NEW_JAVA2RUST_BUILD_PROFILE=debug KEEP_COMMONS_CSV_GATE=1 JOBS=4 \
+    scripts/verify-commons-csv-1.10.0.sh
+
+An earlier attempt, Cq9Bux, used the handover binary while a freshness rebuild
+changed that path. Its raw output helped discovery; it is not the authoritative
+baseline. Do not bypass producer provenance or reuse it as a successful gate.
+The historical QukkuG artifacts are gone. Its reported 100 errors are historical,
+not a measurement of this current run or proof of regressions/non-regressions.
+
+Independent Java behavior
+
+The existing CommonsCsvOracle compiles and runs against all pinned sources.
+Transcript: .tmp/csv-continuation/java.out (9 lines). It exercises quoting,
+roundtrip, embedded CRLF, delimiter, nulls, headers/comments, named access and
+malformed-input IOException. This proves the Java reference only.
+
+Additional package-local diagnostic client:
+.tmp/csv-continuation/CsvAuditProbe.java and java-audit.out.
+Actual results:
+  Character.isWhitespace: U+001C true; U+0085/U+00A0 false; U+2003 true;
+    U+2007/U+202F and isolated high surrogate false.
+  record.stream(); mutate backing array; collect -> [b, null].
+  record.toList(); mutate backing array -> independent [b, null] list.
+  putIn(existingMap) returns the SAME map and preserves present-null values.
+  parser.stream() reads zero records before traversal; findFirst reads one.
+  printing nested Object[] and List values yields a,b CRLF c,d CRLF.
+These observations define semantic acceptance cases, not optional stress inputs.
+
+Whole-path rewrite register
+
+A. Lossless character predicates and logical array display
+Classification: local emission/runtime fixes, with one shared result contract.
+
+Lexer.nextToken, parseEncapsulatedToken and trimTrailingSpaces call
+Character.isWhitespace on char/code units. call_plan.rs chooses a Rust char
+method and call_lowering.rs sends is_whitespace directly to JavaCodeUnit, whose
+runtime only has integer conversion operations. Required rewrite: dispatch a
+typed Java character predicate accepting the selected char/int overload; preserve
+the original 16-bit value, including isolated surrogates. Do not repair this by
+lossy decoding or merely forwarding Rust char::is_whitespace: observed Java
+U+001C/U+0085/U+00A0 behavior already distinguishes the contracts.
+Producer: literal/cast/charAt -> JavaCodeUnit. Storage and char ABI stay fixed.
+Consumer: predicate -> bool used by tokenization. Use Java-driven BMP regression
+checks and actual whitespace-separated CSV records; versioned Unicode breadth
+outside demonstrated paths is an explicit later question.
+
+CSVRecord.toString and CSVFormat header diagnostics use Arrays.toString.
+stdlib.rs JavaArraysToStringElement currently returns Rust String and lists
+scalar String/char, while production uses JavaUtf16String (JavaString alias)
+and JavaCodeUnit. Required rewrite is logical Java text assembly with preserved
+units and null elements, then explicit native formatting at an I/O boundary.
+Adding Display through lossy scalar conversion would compile some paths but
+lose surrogate data inside Java strings. Reuse JavaAppendValue/JavaLogicalString
+and existing deep-display protocols rather than a competing string identity.
+Audit Arrays.hashCode/equals input adapters against retained array handles in
+the same batch; their scalar/Vec signatures must agree with solved storage.
+In particular, JavaArraysEqualsInput currently returns Option<&[T]>; a shared
+array cannot implement that by returning a slice behind a local lock guard.
+Use a scoped read/cursor protocol rather than fabricate a borrowed slice. For
+reference-element equality/hash, copy each canonical element and release the
+array loan before invoking Java equals/hashCode; preserve sequential reads and
+same-allocation fast paths. Do not lock the same array twice or snapshot every
+element before callbacks. This is an operation protocol change through runtime
+traits and callers, not just another missing trait implementation.
+
+B. Reader native ABI and inherited source dispatch
+Classification: cross-function native contract repair; bounded runtime extension.
+
+ExtendedBufferedReader.lookAhead(char[]) and read(char[],int,int) pass retained
+optional Rc<RefCell<Vec<JavaCodeUnit>>> buffers to BufferedReader.read_3, which
+currently takes &mut [char]. Reader stores u16 and read_0 preserves code units,
+but the bulk scalar API calls read_char and can combine surrogate pairs.
+Required rewrite: a Java-code-unit bulk-read runtime entry point plus a lowering
+adapter that evaluates receiver/buffer/range once, checks Java null/range rules
+at the correct operation, borrows the actual array for the call and writes back
+into the same backing buffer. No detached converted Vec<char>. Preserve EOF,
+zero-length behavior, mark/reset, exception timing, line and position counters.
+Trace through JDK method facts/call selection, native facade signatures,
+super-call emission, optional shape, and every read consumer. Retain explicit
+scalar interop separately for native callers.
+
+The ordinary read_line body emits self.__java_super.read() with no buffer;
+the with_outer body correctly calls ExtendedBufferedReader::read_with_outer.
+Required rewrite: source-declaration overload/receiver selection must reach the
+override for implicit read(), while explicit super.read() selects read_0.
+Changing only the emitted method spelling would bypass position/EOL updates.
+The zero-arg and three-arg overloads need focused generated compile/parity tests.
+
+C. Fresh array producers versus retained allocation boundaries
+Classification: cross-function storage/conversion contracts, not a universal
+permission to wrap or copy at a mismatched boundary.
+
+Lexer constructor takes format.getDelimiterString().toCharArray() (fresh array)
+into a retained delimiter field. CSVParser.nextRecord passes recordList.toArray
+into CSVRecord.values (also a fresh result). Current output explicitly rejects
+unshared-to-shared placement changes. Correct recipe for a proved fresh array:
+evaluate once and allocate the selected canonical Rc/Arc carrier once at birth;
+pass it unchanged through constructor/field/return uses. For a potentially
+aliased parameter, propagate the selected representation to the producer and
+all consumers instead of allocating a second wrapper or cloning the payload.
+Trace native producer result shapes, nested element/nullability shapes,
+constructor parameters, field storage and call conversion plans together.
+The existing frozen direct primitive-array static initializer path does not
+cover these constructor/method-result boundaries. Extend a bounded checked seam
+or explicitly record remaining legacy coverage; do not claim global freezing.
+
+D. Retained arrays, Iterable, Stream and erased Object
+Classification: cross-function projection repair plus a bounded representation
+extension for erased runtime interface capabilities.
+
+CSVPrinter.printRecord(Object...) calls printRecord(Arrays.asList(values));
+printRecords(Object...) similarly passes a backed list as Iterable. Current
+output rejects shared-to-unshared placement changes. Required Rust path:
+retain the array handle -> JavaNativeCollection::from_local_array/from_sync_array
+-> Iterable with a live iterator factory. Existing backed runtime collection
+and Iterable::from_native_collection are reusable. Preserve fixed-size list
+behavior, nullable elements and source aliases. A copied Vec is not an asList
+view. Even a read-only print can invoke Java toString callbacks that mutate an
+alias; drop all allocation/receiver guards before callbacks and fetch subsequent
+elements from the backing store.
+
+CSVRecord.stream() emits JavaStream::from_iter(self.values.iter().cloned()),
+where values is Option<Arc<Mutex<Vec<Option<JavaString>>>>>. This traverses the
+outer Option; moreover from_iter eagerly snapshots. Required rewrite: capture
+the checked array handle now; return JavaStream::from_factory_result over a
+per-element retained array cursor. Read elements at traversal time, clone only
+Java reference handles, release the array lock before user callbacks, preserve
+null elements and stream consumption state. Existing lazy JavaStream factories
+and native cursor machinery cover much of this; confirm array-backed policy
+does not introduce collection structural-modification semantics for plain
+array element writes. toList remains a new container created at its terminal.
+The existing lower.rs stream_of_reference_array test only asserts emitted text
+for a simpler unretained array and currently expects the faulty iter recipe;
+add runtime parity with an escaping stream and alias writes.
+
+Concrete target recipe for this array's current physical carrier, after a
+checked/proved-non-null handle extraction (illustrative, not generated repair):
+  let backing: Arc<Mutex<Vec<Option<JavaString>>>> = canonical_handle_copy;
+  let length = backing.lock().expect("poisoned Java array").len();
+  JavaStream::from_factory_result(move || {
+      Ok((0..length).map(move |index| {
+          let element = {
+              let array = backing.lock().expect("poisoned Java array");
+              std::clone::Clone::clone(&array[index])
+          };
+          Ok(element)
+      }))
+  })
+Java arrays cannot resize, so capturing length is valid; elements remain live.
+No MutexGuard escapes next(), and the closure owns the array beyond the record
+borrow. This recipe fits the existing JavaStream factory signature. General
+Object elements must use their canonical copy protocol rather than assuming
+Box<dyn Any>: Clone. Optional extraction must either consume a non-null proof or
+propagate catchable Java NullPointerException through the caller signature.
+An independently compiled diagnostic using the existing stream runtime and
+this recipe passed late array writes, a callback mutating the same array, and
+shared one-shot consumption (.tmp/csv-continuation/stream-recipe.rs/.out).
+It uses scalar test elements to isolate the cursor/lifetime contract. It proves
+the runtime can express that mechanism, not that current Java lowering does so.
+
+CSVPrinter.printRecordObject tests Object[] then raw Iterable. Current generated
+Object[] test probes a concrete Vec Any payload, while actual arrays can be
+retained handles; raw Iterable instanceof is explicitly unsupported. A correct
+rewrite needs a runtime Java array/interface capability projection that retains
+concrete object identity and can yield a checked iterator. A Rust Any type test
+for one Vec or one Iterable instantiation is insufficient for Java covariance,
+raw erasure and arbitrary source Iterable implementations. Reuse existing Java
+reference identities, JavaErasedValue and interface projection patterns, but
+first define how the erased value carries a raw iterable projection and how
+element reference copies/nulls/runtime array kind remain available. Never infer
+false merely because one optional projection is unclassified. This is the main
+representation gate before a broad CSV repair campaign; it cannot be discharged
+by weight tuning or by making compile_error return false.
+
+E. Inner receiver, generic Map and escaping parser iterator
+Classification: cross-function semantic/signature repair; existing callback
+runtime can express the target once declarations agree.
+
+CSVParser.CSVRecordIterator.getNextRecord is emitted without a receiver, yet its
+body reads self.__outer. Java source is an instance helper whose only object
+access is qualified outer-this. Required rewrite: include enclosing-instance
+capture access in receiver demand. In lower.rs,
+source_method_can_drop_unused_private_receiver delegates to
+source_method_body_is_receiver_independent, whose usage checks miss this access;
+lower_method_with_exception_owner then removes the receiver. Repair that proof
+and its shared usage evidence, then keep the same receiver contract in the
+signature, body and calls from hasNext/next. Borrow the inner object only
+long enough to clone its outer owner, release it before invoking parser methods;
+update current only after the call. Do not fix this by passing an unrelated
+parser or by holding an inner RefMut across callback/reentry.
+
+The generated iterator interface already uses JavaIterator::new_live closures
+owning shared iterator handles. CSVParser.stream itself remains an unimplemented
+StreamSupport.stream/Spliterators.spliteratorUnknownSize call. Lower the resolved
+JDK bridge into a lazy fallible stream owning that checked live iterator, with
+no record reads at creation. Preserve hasNext caching, close behavior, unchecked
+IOException wrapping, ordering and short circuit. Existing JavaStream factory
+state and JavaIterator result operations are the reusable mechanism. Verify
+iterator next nullable/non-null element signatures agree at the bridge.
+The parser owns its iterator and the iterator strongly owns its parser, so a
+reference cycle is visible. Weakening the outer link alone would break an
+escaped iterator's liveness. Resource-cycle reclamation needs a separate lifetime
+design; do not mix an unsound weak-reference shortcut into a compile repair.
+
+CSVRecord.putIn<M extends Map<String,String>> emits JavaMapInsert<String,String>
+using default facts, while its body produces logical JavaString keys and nullable
+values; toMap constructs JavaSemanticHashMap<JavaString,JavaString>. The emitted
+body also unwraps the nullable value, contradicting Java's present-null result.
+Required rewrite: derive bound argument carriers from the same instantiated
+fact/signature context as insert calls, retain Option for nullable map values,
+and preserve the supplied map allocation and returned identity. Trace
+item_assembly.rs rust_type_for_java_type_param_bound_arg/jdk_type_param_bound_*
+through declaration, generic method body, JavaMapInsert implementations and
+toMap/caller instantiations. Do not patch just this bound's String spelling.
+
+F. Temporary owners, optional conversions and fallibility
+Classification: cross-function conversion/staging and native operation contracts.
+
+Current compile.log confirms E0515 in CSVFormat.println and its companion at
+752/764. An Option.map closure returns &Into::<CharSequence>::into(value), a
+reference to a temporary created inside that closure. Smallest valid rewrite:
+  let sequence_owner: Option<CharSequence> = delimiter.map(|text| text.into());
+  append_char_sequence_appendable(sequence_owner.as_ref(), appendable.as_ref())?;
+Stage the converted owner before creating its optional borrow, keep it through
+the call, and preserve Java receiver/argument order. This is a different region
+from the already accepted temporary-backing-local repair in the handover.
+Trace coercion.rs optional MapElement/borrow planning through lower.rs argument
+staging. A conversion returning a new owned carrier cannot certify a loan to it
+inside the mapping closure. Neither extra clones nor an unscoped reborrow fixes
+that lifetime.
+
+Several related diagnostics have concrete native/projection causes: Writer and
+Appendable downcasts already return borrowed native values, but lowering applies
+another optional .as_ref; CharSequence predicates receive &CharSequence where
+the declaration expects &Option<CharSequence>; Reader constructor receives
+Option<Reader> without a null check. Required rewrite: record the actual
+post-cast carrier/nullability and convert exactly once to the selected boundary.
+Optionality, fallibility and Rust borrowing must be independent typed facts.
+
+Builder.setHeader(Class) emits Ok(Ok(Some(enum.name()))) for Arrays.setAll;
+Builder.setHeader(ResultSet) maps/transposes a Result<Result<...>> as if it were
+Option<Result<...>>. CSVFormat.valueOf calls get_format on an unpropagated
+enum valueOf Result. IOUtils applies ? to infallible CharBuffer::allocate.
+Required rewrite: use one result/fallibility contract for the selected native
+operation, lambda result, caller propagation and optional conversion. Preserve
+which Java exceptions can be caught; replacing ? with unwrap is not a repair.
+Arrays.setAll also holds its target MutexGuard across its callback in current
+output. The semantically general target evaluates the generator with no target
+loan, then obtains a short guard to assign that index; on an exception retain
+earlier writes. Use existing array-assignment staging rather than a new callback
+under a long-lived bulk write loan.
+
+G. Copy target, initialization and native map producers
+Classification: cross-function storage/signature repair; initialization requires
+an explicit construction schedule, with representation changes if self escapes.
+
+CSVFormat.Predefined.format accessor emits
+  guard.format.as_ref().map(|value| &**value).cloned()
+for Option<Arc<Mutex<CSVFormat>>>. This clones Mutex payload rather than the Arc
+and cannot compile. enum_lowering.rs routes an optional element borrow through
+slot conversion; make that borrow preserve the actual canonical handle shape.
+Target: guard.format.as_ref().map(<Arc<_> as Clone>::clone). The returned owner
+outlives the enum payload guard and shares the original format, without payload
+Clone. CSVFormat.clone<T>(T[]) instead intentionally creates a new array and
+copies element Java references; infer the correct canonical element-copy
+capability at generic declarations/instantiations. A blanket payload T: Clone
+must not stand in for Java cloning or fail on erased non-Clone objects.
+
+CSVParser constructor creates a shared self containing Lexer::default(), then
+overwrites lexer; Lexer has no Default (142). Java default reference state is
+null, not a fabricated Lexer instance. For this constructor a dependency-checked
+schedule can evaluate field initializers in source order, null-check reader and
+format, copy format and create Lexer from the ORIGINAL format argument, allocate
+the parser with those real fields, then install its outer-capturing iterator,
+createHeaders and trailing counters in Java order. No this-dependent operation
+may run before the shared identity exists. If an earlier expression can publish
+or inspect partially initialized self, use a modeled nullable initialization
+slot and prove later non-null uses instead; do not add Lexer: Default merely to
+silence this error. Inspect constructor field defaulting/dependency lowering
+along with solved field shapes before changing initialization policy.
+
+CSVParser.createEmptyHeaderMap case-insensitive branch returns an unwrapped
+JavaSemanticHashMap<String,_>, where the method requires a retained map of
+JavaString keys. getHeaderMap uses .extend directly on Rc<RefCell<...>> (281/290),
+and CSVRecord.putIn uses .iter directly on the retained map (212).
+Required rewrite: native map factory produces the solved key/carrier contract;
+fresh copies allocate one independent result and copy entries with short loans;
+forEach traversal releases the source loan before map callbacks. Keep Java's
+case-insensitive comparator, ordering and null-key policy distinct from a
+physical String conversion. Header equality/hash/display must share those
+selected logical text and retained-array inputs. Existing map/cursor operations
+are reusable; the compiler errors are not evidence a detached view is allowed.
+
+Residual native facade boundaries and uncertainties
+
+The 100 errors also contain scalar Enum.name/String boundary mismatches, numeric
+char constants in Constants, and SQL ResultSet/Clob conditional arms combining
+Reader, Box<Any> and Option<Box<Any>>. Put the char constants and Enum logical
+text conversion in A; put the SQL cast/conditional erasure in F, using the
+resolved declaration rather than treating one conditional arm as the other's
+physical type. This establishes type/exception contracts, not a JDBC runtime.
+Files.newBufferedWriter and StreamSupport remain explicit unimplemented paths;
+external file/JDBC facade completeness is not proved by compiling production
+or by passing the existing string parser/printer transcript. Record them as
+support limits and add concrete runtime clients when those APIs are admitted.
+Unmodelled counts include generated facade inventories, so they do not directly
+count reachable runtime failures. Compiler cascades may conceal later ownership
+errors; re-audit after the related contract batches rather than promise that
+these seven groups account for every future diagnostic.
+
+Harness limitations
+
+The existing Rust oracle hardcodes scalar String/char, slice/Vec headers and
+values, and expects unwrapped record returns. Current output uses logical text,
+retained array/collection handles and Option-wrapped records. Its
+Arc<Mutex<CSVFormat>> owner does still match; that owner is not a mismatch.
+Once production compiles the adapter may fail independently.
+Refresh this external call adapter against the actual ABI or translate the same
+Java oracle and use a Rust launcher that only invokes generated main. Keep all
+CSV algorithms in generated production code. Production compilation and oracle
+adapter compilation must be reported separately; a failed production gate has
+not performed differential runtime validation.
+
+Prioritized batches and admission gates
+
+Entry decision: most observed rewrites fit existing storage and callback
+machinery, but current contracts cannot express all erased raw Iterable
+projections or borrowed-slice access into retained arrays. Define those bounded
+protocol extensions before committing to the whole implementation campaign.
+The record below orders coherent work once those designs are accepted; it does
+not authorize a diagnostic-count-driven series of isolated fixes.
+
+1. Finish and preserve the current baseline, error census and generated witness
+   locations. This document is the entry audit, not permission to ignore newly
+   exposed families after compiler cascades disappear.
+2. Lossless native text batch: A plus B's bulk-code-unit runtime/signature seam,
+   including numeric char constants and resolved Enum logical text results.
+   Focused generated compile + Java/Rust checks: BMP whitespace, surrogate pair
+   split across reads, isolated units, array offsets, EOF/mark/reset and CSV
+   whitespace/comment/line counters. Reuse java_text_contracts,
+   text_transport_contracts, mapped_text_contracts and format_text_contracts.
+3. Receiver/generic contract batch: E's enclosing-this and map contracts, G's
+   canonical enum accessor/constructor/map producers, and B's source override
+   selection. Tests: outer-only helper, overloaded read, constructor ordering,
+   existing map same identity/present-null, source iterator hasNext/next/close
+   and IOException behavior. Use shared receiver/reentry/staging regressions.
+4. Conversion/region batch: F's optional/fallible conversion contracts and staged
+   owners; tests must cover null/present casts, temporary String-to-CharSequence
+   calls, callback exceptions and partial Arrays.setAll writes with reentry.
+5. Retained flow batch: C and D's typed array/list/stream producers. Prove fresh
+   allocation versus existing alias paths separately; test asList write-through,
+   fixed-size rejection, escaping lazy stream mutation, callback reentry with
+   no live RefCell/Mutex loan, terminal copy independence and null elements.
+6. Define/test D's erased array/Iterable capability protocol before admitting
+   raw Object dispatch. Include custom source Iterable and nested Object[]/List,
+   runtime array identity/kind and negative ClassCastException cases. This may
+   require representation changes across erasure producers and cast consumers;
+   if the protocol cannot represent them, stop and present the concrete redesign.
+7. Wire E's lazy parser StreamSupport bridge, refresh the oracle adapter, then
+   run one full pinned CSV translation/compile/differential gate after the
+   coherent fixes. Re-audit newly exposed failures rather than chasing counts.
+   Reuse the accepted Numbers gate only after translator changes provide a
+   specific regression reason; no rerun is needed for this read-only audit.
+
+Completion measurements and census
+
+Authoritative driver exited 1 after production compilation failed, before its
+Java/Rust runtime phase. All 12 files translated; 0 translation/parse failures,
+0 unsupported statements/members/expressions, 0 stubbed constants. Four files
+contain 16 registry-invalid patterns. Cargo reports exactly 100 Rust errors:
+15 explicit rejections (14 native allocation adapters, one raw Iterable test),
+85 Rust type/trait/lifetime/receiver diagnostics. No native_contract invariant
+failure was observed. No passing CSV or zero-regression claim follows.
+
+Timing: translation 452787ms; assembly 16960ms; cargo check 3307ms;
+whole driver 476324ms. Producer hash in summary/provenance matches the fixed
+rebuilt translator. This is a fresh checkpoint result, numerically equal to the
+historical 100 errors but not evidence each historical failure is identical.
+
+Top families (overlap is why counts are not architectural scope):
+  27 mismatched types + 5 incompatible ? types;
+  10 JavaUtf16String array display trait errors;
+  8 retained-array equality/hash input trait errors;
+  6 missing JavaCodeUnit whitespace methods;
+  7 character/code-unit-vector scalar display errors;
+  2 temporary-lifetime errors.
+The remaining diagnostics and all first locations are preserved in
+.tmp/csv-continuation/error-census.txt and accepted-baseline/translation/compile.log.
+Representative current assembled locations:
+  CSVFormat 154 enum accessor, 752/764 temporary owner, 800 fresh delimiter,
+    1546 generic array clone, 1607 enum Result propagation;
+  CSVParser 41 outer-only helper, 142 constructor default, 187 header map,
+    281 map copy, 387 iterator element optionality, 464 record array producer;
+  CSVPrinter 177 array Iterable projection, 193 raw Iterable test, 219 SQL arms;
+  CSVRecord 207 generic map bound, 212 retained forEach, 228 escaping stream;
+  ExtendedBufferedReader 125 bulk char read, 234 inherited read dispatch;
+  Lexer 64 delimiter initialization, 280 whitespace, 376 char-array append;
+  shared lib.rs 1276 setAll callback, 1302 Result/Option transpose.
+
+Delivery artifacts: this audit plus preserved baseline, Java oracle/client
+transcripts, source/producer checksums, full census and generated witnesses under
+.tmp/csv-continuation. Scratch artifacts are evidence, not source to commit.
+No translator implementation, pinned source, previous deliverable or baseline
+acceptance record was edited. No additional corpus gate was run.

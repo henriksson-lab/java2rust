@@ -1,0 +1,1 @@
+class Cell { int value; }

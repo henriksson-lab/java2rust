@@ -1,0 +1,130 @@
+Canonical reference transport: entry audit and implementation
+Date: 2026-10-26
+Scope: lower.rs transport policy and focused regression fixtures. No heap layout,
+dispatch or signature ABI changes; no live generic collection view admission.
+
+Baseline evidence (existing target/debug/new-java2rust, before edits)
+
+Saved sources/output/logs: .tmp/transport-refactor-before/.
+
+1. TransportWitness.finish: earlier handle reads followed by return.
+   Result: NOT a reproduction. Output already returns cell directly. Do not
+   claim a return-copy improvement from this witness.
+
+2. TransportAssignments.transfer: construct shared TransportItem, call set,
+   assign final local value to result, return result.
+   Result: reproduced redundant copy. Baseline emitted:
+     let result: Arc<Mutex<TransportItem>> =
+       std::clone::Clone::clone(&value)/* TODO... */;
+   The value binding is dead after the assignment. Required Rust rewrite is
+   simply let result = value. Canonical allocation, alias identity, payload and
+   synchronization do not change. Caller ownership and source construction ABI
+   remain unchanged.
+
+3. TransportAssignments.store: construct shared TransportItem, call set,
+   then store its final reference into a nullable static field.
+   Result: reproduced redundant copy. Baseline emitted:
+     Self::__set_static_kept(Some(std::clone::Clone::clone(&value)));
+   Required rewrite moves value into Some after expression evaluation. Static
+   registry storage/locking and the concrete Arc<Mutex<...>> producer remain.
+
+4. GenericPair<T>: one constructor argument assigned to two nullable fields.
+   Result: no use-after-move in this baseline. It emits two qualified Clone
+   calls with T:Clone. recover_single_use_constructor_optional_move only matches
+   old unqualified emitted text, so its removal fixes an unsafe obsolete policy,
+   not a reproduced current failure. No second-store move improvement is claimed.
+
+Shared root cause and changes
+
+MoveUseContext::copy_before_consume retains Option<bool> from analyzed program
+points. Repeated expression reads/materialized argument locals force copying;
+analyzed liveness distinguishes final uses from later/catch/loop reads. Callable
+binding counts remain conservative fallback evidence, not overrides of a final
+use. No statement or an untracked statement alone is not a proof of death; absent
+all use evidence, movement is refused and a consuming supported recovery copies.
+
+General value, argument, subtype/upcast, erased-reference, nullable-source and
+nullable-construction paths use this query while retaining existing conversion
+eligibility/capability checks and CloneRecoveryDecision actions. Copy decisions
+still occur before consuming wrappers/conversions. Source Java clone() lowering
+is untouched. Generic movement fast paths no longer allow missing evidence via
+is_none_or; generic present-value lowering now checks the same move admission.
+
+Removed recover_single_use_constructor_optional_move and both callers. It used
+emit_expr plus an exact Some(name.clone()/* TODO */) text match to delete a clone
+without any final/single-use proof. Existing constructor single-store proof stays:
+constructor_owned_field_has_single_store_use distinguishes one RHS occurrence
+from duplicate ContentRead/StoredInField usage facts, and preserves no-Clone
+single-field construction. No replacement emitted-text cleanup was added.
+
+Removed dead catch/exclusive-terminal aliases of the same liveness predicate.
+The remaining staging, temporary lifetime and reentry policies are unchanged;
+this work does not certify payload loans across callbacks or merge guards.
+
+Regression and acceptance status
+
+New tests/reference_transport.rs + fixtures/ReferenceTransportProbe.java cover
+actual final local/store improvements, Java/Rust shared alias mutation, one input
+stored in two generic nullable fields, repeated argument positions, loop reuse,
+and a Rust non-Clone payload stored once in a generated generic constructor.
+The test asserts the narrow emitted move sites as well as generated behavior.
+
+New lower unit move_transport_distinguishes_unanalyzed_from_final_and_repeated_uses
+checks an untracked statement versus tracked live/final statements, and repeated
+arguments at a dead-at-exit statement. This guards the critical Some(stmt) !=
+known-liveness distinction.
+
+Tests are authored, NOT run by the transport lane. Root owns the batched build.
+Suggested gates:
+  cargo test --test reference_transport --test shared_interface_references \
+    --test receiver_identity --test generic_producer_references \
+    --test source_call_staging --test shared_receiver_returns
+  cargo test --lib move_transport_distinguishes_unanalyzed_from_final_and_repeated_uses
+Existing idiom_gaps witnesses for loop back-edge/generic reuse, repeated string
+assignments and nullable constructor-loop arguments are useful preservation gates.
+No full corpus retranslation or benchmark was run here.
+
+Canonical borrowed-handle emission seam (same batch)
+
+The optimizer review found a concrete integration obstacle: the old
+source_method_retained_shared_param_storage_shape returned an owned storage
+shape for any nominal shared parameter, even a solved explicit Carrier loan.
+emitted_source_method_param_shape would silently overwrite a chosen borrowed
+ABI; the ordinary signature renderer also recomputed that storage predicate.
+
+The common emitted-source query now preserves explicit SharedBorrow with
+BorrowTarget::Carrier before nominal shared/hierarchy owned normalization.
+Payload loans do not receive this admission. Existing class-token and rebound
+native-array requirements stay earlier in the query. Final ordinary source
+parameter rendering uses the common effective shape directly; callback and live
+native map specialized ABIs keep their existing dedicated handling. Body-env
+alignment and source argument/adapter planning already consume this query, so
+printed parameter, body and calls now agree on the chosen carrier transport.
+
+Root's canonical transport optimizer owns eligibility and selected signatures.
+The seam itself makes no new scalar observer or general retention proof. With
+an &Arc/&Rc primitive observer, scoped_shared_storage_field_read's qualified
+Clone::clone(&parameter) copies a Rust reference instead of incrementing the
+shared allocation count, and the local payload guard still ends before returning.
+The current syntax cost audit can classify that clone conservatively; it is not
+an authoritative dynamic operation count.
+
+Preservation repair: Rust reference-copy versus source Java clone()
+
+Root's shared_interface_references run exposed a concrete E0034 failure in the
+included native-reference kernel: std::rc::Rc::clone selected by associated
+syntax was ambiguous with the generated RefCounter::clone implementation for
+Rc<RefCell<RefCounterImpl>>. Failure evidence:
+  .tmp/constraint-refactor/shared_interface_references.tests.log
+This is a general canonical-copy naming defect, not an allocation optimization.
+
+Audited all nine copy sites in src/java_native_reference.rs. They now name
+<Rc/Arc/Weak<ConcreteAllocationOrOwner> as std::clone::Clone>::clone, including
+projection owner retention before Any erasure. Generic source S is explicit
+where result context unsizes to dyn Any, so type inference cannot choose an
+erased owner too early. Payloads acquire no Clone bounds; canonical identity,
+root-owner retention, weak cleanup and operation-table sharing are unchanged.
+The raw included runtime cannot call compiler-side RustExpr projection helpers,
+but uses the same typed Rust Clone operation. No runtime helper family was added.
+Existing failing shared_interface_references fixture is the regression witness;
+root owns its rebuild and rerun. No additional redundant test was authored.

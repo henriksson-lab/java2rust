@@ -31,9 +31,14 @@ pub struct ResolvedProgram {
 #[derive(Debug, Clone)]
 pub struct SourceSymbols {
     symbols: ProgramSymbols,
+    type_parameter_catalog: crate::scoped_type_parameters::BinderCatalog,
 }
 
 impl SourceSymbols {
+    pub(crate) fn normalize_type_parameters(&self, program: &mut Program) {
+        self.type_parameter_catalog.normalize(program);
+    }
+
     /// Constructor references use the same candidate visibility, overload
     /// ranking and generic substitutions as an ordinary `new` expression.
     pub(crate) fn constructor_reference_with_input_types(
@@ -407,6 +412,9 @@ pub fn resolve_program_with_source_program_and_facts(
 
 pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     let mut symbol_program = source_program.clone();
+    let type_parameter_catalog =
+        crate::scoped_type_parameters::BinderCatalog::collect(&mut symbol_program);
+    type_parameter_catalog.normalize(&mut symbol_program);
     crate::class_initialization::materialize(&mut symbol_program);
     let mut diagnostics = DiagnosticBag::new();
     qualify_nested_type_names(&mut symbol_program);
@@ -431,6 +439,7 @@ pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     }
     SourceSymbols {
         symbols: ProgramSymbols::from_program(&symbol_program),
+        type_parameter_catalog,
     }
 }
 
@@ -488,6 +497,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
 ) -> ResolvedProgram {
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
+    source_symbols.normalize_type_parameters(&mut program);
     crate::class_initialization::materialize(&mut program);
     qualify_explicitly_imported_nested_type_names(&mut program);
     qualify_nested_type_names(&mut program);
@@ -1005,6 +1015,8 @@ fn qualify_imported_jdk_map_entry_implements(program: &mut Program) {
 
 pub fn declaration_facts_from_program(program: &Program) -> FactSet {
     let mut program = program.clone();
+    let catalog = crate::scoped_type_parameters::BinderCatalog::collect(&mut program);
+    catalog.normalize(&mut program);
     qualify_nested_type_names(&mut program);
     let mut facts = FactSet::default();
     collect_type_capability_facts(&program, &mut facts);

@@ -676,6 +676,28 @@ fn lower_program_with_semantic_plans_support_context_and_callable_context_in_loo
         ),
         &mut diagnostics,
     );
+    // A modeled native contract contradiction is a failed translation, not
+    // a warning or permission to emit an inconsistent ownership/layout ABI.
+    // Reject before any field/type rendering consumes a selected contract.
+    let native_contract_failures = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.severity() == crate::diagnostics::Severity::Error
+                && diagnostic.code().starts_with("native_contract_")
+        })
+        .map(|diagnostic| format!("{}: {}", diagnostic.code(), diagnostic.message()))
+        .collect::<Vec<_>>();
+    if !native_contract_failures.is_empty() {
+        return LoweredProgram::new(
+            RustFile {
+                items: vec![RustItem::Raw(format!(
+                    "compile_error!({:?});",
+                    native_contract_failures.join("\n")
+                ))],
+            },
+            diagnostics,
+        );
+    }
     record_lowering_profile_phase(
         profile_lowering,
         &mut profile_phase_start,
@@ -9980,6 +10002,24 @@ fn lower_constructor_field_value_plan(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> (String, RustExpr) {
+    if let ConstructorFieldValuePlan::FieldInitializer {
+        field_name, value, ..
+    } = &plan
+    {
+        if let Some(initialized) = lower_frozen_native_field_initializer(
+            &owner_ty.name,
+            field_name,
+            value,
+            env,
+            ctx,
+            &ExprRefinements::default(),
+        ) {
+            return (
+                source_instance_field_rust_name_for_type(owner_ty, field_name),
+                initialized,
+            );
+        }
+    }
     match plan {
         ConstructorFieldValuePlan::Assigned {
             field_name,
@@ -10221,6 +10261,7 @@ fn lower_constructor_field_assignment_value(
             value,
             &actual,
             &target_element_shape,
+            env,
             ctx,
         ) {
             return construct_preconverted_optional_value_for_target(
@@ -10239,7 +10280,7 @@ fn lower_constructor_field_assignment_value(
     let lowered = clear_result_tag_from_constructed_optional(
         wrap_optional_assignment_value_if_needed(value, env, slot.clone(), lowered, ctx),
     );
-    recover_single_use_constructor_optional_move(lowered, value, shape, env, ctx)
+    lowered
 }
 
 fn optional_constructor_type_parameter_value_can_move_into_present_slot(
@@ -10257,37 +10298,7 @@ fn optional_constructor_type_parameter_value_can_move_into_present_slot(
     target_element_shape.ownership == OwnershipShape::Owned
         && (java_type_is_in_scope_type_parameter(local_ty, ctx)
             || java_type_is_in_scope_type_parameter(&target_element_shape.java_ty, ctx))
-        && MoveUseContext::new(ctx)
-            .binding_use_count(name, env)
-            .is_none_or(|count| count <= 1)
-}
-
-fn recover_single_use_constructor_optional_move(
-    lowered: RustExpr,
-    value: &Expr,
-    _shape: &RustSlotShape,
-    _env: &ShapeEnv,
-    ctx: LowerCtx,
-) -> RustExpr {
-    let Expr::Var(name) = value else {
-        return lowered;
-    };
-    if ctx.current_constructor.is_none() {
-        return lowered;
-    }
-    let rendered = crate::emit::emit_expr(&lowered);
-    let expected = format!(
-        "Some({}.clone(){})",
-        name, "/* TODO(translation): validate added clone */"
-    );
-    if rendered == expected {
-        function_call_projection(
-            RustExpr::Var("Some".to_string()),
-            vec![RustExpr::Var(name.clone())],
-        )
-    } else {
-        lowered
-    }
+        && MoveUseContext::new(ctx).can_move_before_consume(name, env)
 }
 
 fn type_parameter_local_initializer_can_move_without_clone(
@@ -10306,13 +10317,7 @@ fn type_parameter_local_initializer_can_move_without_clone(
     {
         return false;
     }
-    let move_use = MoveUseContext::new(ctx);
-    if move_use.has_later_read_facts() {
-        return !move_use.has_later_or_repeated_current_read(name);
-    }
-    move_use
-        .binding_use_count(name, env)
-        .is_none_or(|count| count <= 1)
+    MoveUseContext::new(ctx).can_move_before_consume(name, env)
 }
 
 fn clear_result_tag_from_constructed_optional(expr: RustExpr) -> RustExpr {
@@ -13576,8 +13581,6 @@ fn lower_constructor_field_value_plan_with_future_reads(
             let slot = assignment_value_plan_for_shape(&shape).into_slot();
             let lowered = lower_constructor_field_assignment_value(value, env, &slot, &shape, ctx);
             let lowered = adapt_reused_owned_value_for_slot(lowered, value, &slot, env, ctx);
-            let lowered =
-                recover_single_use_constructor_optional_move(lowered, value, &shape, env, ctx);
             let lowered = if let Expr::Var(name) = value {
                 if future_reads.contains(name)
                     && shape_is_owned_non_erased(&shape)
@@ -16256,12 +16259,6 @@ fn lower_method_with_exception_owner(
         if rust_type_is_callback_param(&param.ty) {
             continue;
         }
-        let shared_local_param_shape = source_method_retained_shared_param_storage_shape(
-            method,
-            source_param,
-            &ty.name,
-            ctx.representations,
-        );
         let declared_param = exception_method.params.get(index).unwrap_or(source_param);
         let param_shape = emitted_rewritten_source_param_shape(
             method,
@@ -16286,13 +16283,10 @@ fn lower_method_with_exception_owner(
                 ctx.facts,
                 ctx.representations,
             );
-        let base_param = crate::slot_render::rust_type_for_slot_with_facts(&param_shape, ctx.facts);
-        if shared_local_param_shape.is_some()
-            || param_shape != *param_plan.shape()
-            || (representation_aware_param != base_param && param.ty != representation_aware_param)
-        {
-            param.ty = representation_aware_param;
-        }
+        // The same effective shape is used by body inference and call-site
+        // planning. Do not rediscover an owned-storage override here: an
+        // admitted carrier loan borrows the handle, not the Java payload.
+        param.ty = representation_aware_param;
     }
     record_lowering_profile_detail(
         profile_lowering,
@@ -16794,13 +16788,12 @@ fn source_method_retained_shared_param_storage_shape(
 
 /// Return the parameter shape that ordinary source-method emission exposes.
 ///
-/// Signature solving describes the Java-level contract. Representation
-/// lowering can subsequently require an owned shared handle (for example,
-/// when the parameter's class has identity/interior mutation, or when an
-/// anonymous object retains the parameter). Every adapter that invokes an
-/// emitted method must use this same post-solver shape; independently
-/// rendering the solved shape makes hierarchy carriers disagree with their
-/// payload methods.
+/// This is the deterministic physical parameter projection installed into
+/// SignaturePlan before transport optimization. An API borrow fallback is not
+/// a hard requirement to borrow a payload: a shared Java reference can require
+/// an owned handle as its incumbent physical ABI. Emission and legacy adapters
+/// reuse this query; finalized shapes are a fixed point, and an explicitly
+/// selected carrier loan remains authoritative.
 pub(crate) fn emitted_source_method_param_shape(
     method: &MethodDecl,
     source_param: &Param,
@@ -16846,6 +16839,17 @@ pub(crate) fn emitted_source_method_param_shape(
         shape.view = ViewShape::Native;
         return shape;
     }
+    if solved_shape.ownership == OwnershipShape::SharedBorrow
+        && solved_shape.borrow_target == crate::slot_shape::BorrowTarget::Carrier
+    {
+        // An explicit carrier loan is already a solved transport contract.
+        // Sharing describes the referenced allocation; it does not demand
+        // ownership of another Rc/Arc at every parameter use. Rebuilding a
+        // storage shape here would silently undo the selected ABI in bodies,
+        // calls and adapters. Payload loans still follow the legacy admission
+        // paths below, including owned capture/representation requirements.
+        return solved_shape.clone();
+    }
     if crate::representation_lowering::source_hierarchy_carrier_uses_only_interior_mutable_handles(
         &solved_shape.java_ty,
         representations,
@@ -16878,6 +16882,12 @@ pub(crate) fn emitted_source_method_param_shape(
             solved_shape.java_ty.clone(),
         );
         shape.mutability = solved_shape.mutability;
+        // Physical passing does not own semantic allocation inference. Keep
+        // solved native qualifiers and nested views when selecting the nominal
+        // handle ABI, including generic array/container arguments.
+        shape.native_allocation = solved_shape.native_allocation;
+        shape.nested_native_allocations = solved_shape.nested_native_allocations.clone();
+        shape.nested_collection_views = solved_shape.nested_collection_views.clone();
         shape
     } else if let DispatchShape::BoxedDynTrait { trait_name } =
         crate::shape_projection::storage_shape_for_java_type(
@@ -19073,6 +19083,44 @@ fn lower_stmt(
                     out.push(stmt);
                     refine_assigned_local_shape(target, value, env, ctx);
                     return;
+                }
+                if let Expr::FieldAccess(receiver, field_name) = target {
+                    if matches!(receiver.as_ref(), Expr::This) {
+                        if let Some(initialized) = ctx.current_type.and_then(|owner| {
+                            lower_frozen_native_field_initializer(
+                                owner,
+                                field_name,
+                                value,
+                                env,
+                                ctx,
+                                refinements,
+                            )
+                        }) {
+                            let name = "__java_frozen_stored_value".to_string();
+                            out.push(RustStmt::Expr(RustExpr::Block {
+                                stmts: vec![
+                                    RustStmt::Let {
+                                        mutable: false,
+                                        name: name.clone(),
+                                        ty: None,
+                                        value: Some(initialized),
+                                    },
+                                    RustStmt::Assign {
+                                        target: lower_assignment_place_for_stmt(
+                                            target,
+                                            env,
+                                            ctx,
+                                            refinements,
+                                        ),
+                                        value: RustExpr::Var(name),
+                                    },
+                                ],
+                                tail: None,
+                            }));
+                            refine_assigned_local_shape(target, value, env, ctx);
+                            return;
+                        }
+                    }
                 }
                 if let Some(stmt) = lower_ordered_field_place_assignment_stmt(
                     target,
@@ -23104,8 +23152,6 @@ fn refine_local_plan_from_initializer(
         &local_plan.shape(),
         &initializer_shape,
         initializer,
-        &local_plan.binding(),
-        ctx,
     ) {
         local_plan.set_shape(initializer_shape);
         return local_plan;
@@ -23571,19 +23617,22 @@ fn local_borrowed_optional_should_keep_owned_temporary(
     local_shape: &RustSlotShape,
     initializer_shape: &RustSlotShape,
     initializer: &Expr,
-    binding_id: &BindingId,
-    ctx: LowerCtx,
 ) -> bool {
-    if current_callable_binding_is_receiver_only_deref(binding_id, ctx) {
-        return false;
-    }
     let Some(local_element_ty) = local_shape.optional_element_type() else {
         return false;
     };
+    // A temporary's owned payload needs a backing owner even when the local
+    // is only used as a receiver. Neither &T nor &mut T can outlive a Box/Vec
+    // moved into an optional-conversion closure. Keep the producer's owner in
+    // the local; receiver staging can then copy its canonical reference or
+    // borrow it for a short call using the actual emitted storage contract.
     initializer_shape
         .optional_element_type()
         .is_some_and(|initializer_element_ty| initializer_element_ty == local_element_ty)
-        && local_shape.ownership == OwnershipShape::SharedBorrow
+        && matches!(
+            local_shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
         && initializer_shape.ownership == OwnershipShape::Owned
         && initializer_creates_temporary_value(initializer)
 }
@@ -37781,7 +37830,7 @@ fn lower_cast_expr_variant_with_refinements(
                 );
                 return apply_cast_conversion(unboxed, &primitive_plan);
             }
-            if let Some(downcast) = lower_erased_object_cast_to_shared_handle(
+            if let Some(downcast) = lower_erased_object_cast_to_reference_carrier(
                 ty,
                 expr,
                 &inner_shape,
@@ -37862,7 +37911,7 @@ fn lower_cast_expr_variant_with_refinements(
     }
 }
 
-fn lower_erased_object_cast_to_shared_handle(
+fn lower_erased_object_cast_to_reference_carrier(
     target_ty: &JavaType,
     source: &Expr,
     actual_shape: &RustSlotShape,
@@ -37873,7 +37922,18 @@ fn lower_erased_object_cast_to_shared_handle(
     if !matches!(actual_shape.dispatch, DispatchShape::ErasedObject) {
         return None;
     }
-    let target_name = concrete_java_type_name(target_ty)?;
+    // String's canonical carrier is a reference too. Reuse the same borrowed
+    // checked cast as source handles/enums: consuming an erased Box would move
+    // the Java Object slot, while cloning its JavaString carrier preserves the
+    // original allocation and leaves later source reads valid. Use the actual
+    // string representation rather than a hard-coded Rust String downcast.
+    let string_runtime_type = (*target_ty == JavaType::String)
+        .then(|| crate::emit::emit_type(&rust_type_for_java_type_with_facts(target_ty, ctx.facts)));
+    let target_name = if *target_ty == JavaType::String {
+        "String"
+    } else {
+        concrete_java_type_name(target_ty)?
+    };
     if java_type_is_source_hierarchy_carrier(target_ty, ctx.representations) {
         // A hierarchy root's Rust value is the closed carrier, not the handle
         // used by one concrete variant.  Let the representation-aware erased
@@ -37885,7 +37945,9 @@ fn lower_erased_object_cast_to_shared_handle(
         ctx.facts.storage_placement_for(target_name),
         ctx.representations.storage_placement_for(target_name),
     );
-    let runtime_type = if matches!(
+    let runtime_type = if let Some(runtime_type) = string_runtime_type {
+        runtime_type
+    } else if matches!(
         ctx.representations.representation_for(target_ty),
         crate::representation::ObjectRepresentation::JavaEnum { .. }
     ) {
@@ -44263,6 +44325,72 @@ fn lower_assignment_null_comparison_expr(
     ))
 }
 
+/// A direct primitive-array factory initializer is one fully checked vertical
+/// slice: selected producer ABI, stored boundary conversion and target storage
+/// type are consumed together. Uncovered initializers retain legacy lowering.
+fn lower_frozen_native_field_initializer(
+    owner: &str,
+    field_name: &str,
+    value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        args,
+        resolved: Some(call),
+        ..
+    } = value
+    else {
+        return None;
+    };
+    if call.kind != crate::java_ir::CallKind::Static
+        || !args.is_empty()
+        || !call.type_args.is_empty()
+        || slot_expr_needs_result_propagation(value, env, ctx)
+    {
+        return None;
+    }
+    let source = crate::plan_contracts::NativeSlotKey {
+        node: crate::signature::SignatureDependencyNode::MethodReturn {
+            method: crate::signature::MethodKey::resolved_call(call),
+        },
+        path: vec![],
+    };
+    let target = crate::plan_contracts::NativeSlotKey {
+        node: crate::signature::SignatureDependencyNode::Field {
+            field: crate::signature::FieldKey::rust_identity(owner, field_name),
+        },
+        path: vec![],
+    };
+    let boundary = match crate::plan_contracts::FrozenNativeBoundary::for_initializer(
+        ctx.signatures,
+        &source,
+        &target,
+    ) {
+        Ok(Some(boundary)) => boundary,
+        Ok(None) => return None,
+        Err(message) => {
+            return Some(RustExpr::Raw(format!(
+                "compile_error!({:?})",
+                format!("native_contract_frozen_initializer_changed: {message}")
+            )));
+        }
+    };
+    let produced = lower_expr_with_refinements(value, env, ctx, refinements);
+    let stored = boundary.construct_stored_value(produced);
+    let temporary = "__java_frozen_initializer_value".to_string();
+    Some(RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: temporary.clone(),
+            ty: Some(boundary.render_target_type(ctx.facts, ctx.representations)),
+            value: Some(stored),
+        }],
+        tail: Some(Box::new(RustExpr::Var(temporary))),
+    })
+}
+
 fn lower_assignment_value_for_slot(
     target: &Expr,
     value: &Expr,
@@ -48755,14 +48883,7 @@ fn lower_dead_collection_carrier_for_borrowed_argument(
     let Expr::Var(name) = arg else {
         return None;
     };
-    let move_use = MoveUseContext::new(ctx);
-    let can_move = if move_use.has_later_read_facts() {
-        !move_use.has_later_or_repeated_current_read(name)
-    } else {
-        move_use
-            .binding_use_count(name, env)
-            .is_some_and(|count| count <= 1)
-    };
+    let can_move = MoveUseContext::new(ctx).can_move_before_consume(name, env);
     if !can_move {
         return None;
     }
@@ -51626,7 +51747,7 @@ fn lower_unshaped_argument(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExp
     // facade from consuming the Java reference.
     if move_recovery_source_name(arg).is_some_and(|name| {
         env.local_type(name).is_some_and(java_type_is_string_type)
-            && MoveUseContext::new(ctx).has_later_or_repeated_current_read(name)
+            && MoveUseContext::new(ctx).needs_copy_before_consume(name, env)
     }) {
         lowered = apply_clone_recovery_decision(
             lowered,
@@ -63318,7 +63439,7 @@ fn lower_optional_owned_argument_for_owned_target(
     let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
     let reused_optional_source = actual_shape.ownership == OwnershipShape::Owned
         && move_recovery_source_name(arg)
-            .is_some_and(|name| MoveUseContext::new(ctx).has_later_or_repeated_current_read(name));
+            .is_some_and(|name| MoveUseContext::new(ctx).needs_copy_before_consume(name, env));
     if reused_optional_source && optional_shape_contains_erased_object(actual_shape) {
         let recovered = if java_type_is_erased_object_name(&target_shape.java_ty) {
             optional_clone_recovery_owned_element_projection(lowered, true)
@@ -64329,11 +64450,7 @@ fn source_argument_needs_clone_before_subtype_conversion(
     let Some(name) = move_recovery_source_name(source) else {
         return false;
     };
-    let move_use = MoveUseContext::new(ctx);
-    move_use.has_later_or_repeated_current_read(name)
-        || move_use
-            .binding_use_count(name, env)
-            .is_some_and(|use_count| use_count > 1)
+    MoveUseContext::new(ctx).needs_copy_before_consume(name, env)
 }
 
 fn adapt_reused_owned_optional_argument(
@@ -64349,12 +64466,7 @@ fn adapt_reused_owned_optional_argument(
     }
     let actual_shape = optional_owned_clone_recovery_source_shape(source, actual_shape, env, ctx)?;
     let name = move_recovery_source_name(source)?;
-    let move_use = MoveUseContext::new(ctx);
-    if !move_use.has_later_or_repeated_current_read(name)
-        && !move_use
-            .binding_use_count(name, env)
-            .is_some_and(|use_count| use_count > 1)
-    {
+    if !MoveUseContext::new(ctx).needs_copy_before_consume(name, env) {
         return None;
     }
     let element_ty = actual_shape.optional_element_type()?;
@@ -64458,27 +64570,10 @@ impl<'a> MoveUseContext<'a> {
     /// Whether the binding `name` refers to here may be read afterwards.
     ///
     /// Asks the analysis about the current statement, comparing *bindings* — a
-    /// same-named variable in another scope cannot answer for this one. The
-    /// override is consulted only where there is no statement to key on.
+    /// same-named variable in another scope cannot answer for this one.
+    /// Use copy_before_consume when absence of evidence must stay unknown.
     fn has_later_read(&self, name: &str) -> bool {
         binding_has_later_read(name, self.ctx)
-    }
-
-    /// Reads reachable through an exception edge into a `catch`.
-    ///
-    /// Subsumed by liveness: the `Stmt::Try` arm keeps every catch body's reads
-    /// live across the whole guarded region, which is this relation.
-    fn has_catch_future_use(&self, name: &str) -> bool {
-        self.has_later_read(name)
-    }
-
-    /// Reads on a branch that terminates.
-    ///
-    /// Subsumed by liveness: `Stmt::If` unions both arms into live-out, and a
-    /// `return`/`throw` kills everything after it, so a terminating branch's
-    /// reads are already carried.
-    fn has_exclusive_terminal_branch_read(&self, name: &str) -> bool {
-        self.has_later_read(name)
     }
 
     fn current_stmt_read_count(&self, name: &str) -> Option<usize> {
@@ -64499,12 +64594,33 @@ impl<'a> MoveUseContext<'a> {
             })
     }
 
-    fn has_later_or_repeated_current_read(&self, name: &str) -> bool {
-        self.has_later_read(name) || self.has_repeated_current_stmt_read(name)
+    /// Copy before consuming a source carrier. A known dead binding stays
+    /// dead even if it was read earlier; callable-wide counts are fallback
+    /// evidence only. Unknown evidence never authorizes a move.
+    fn copy_before_consume(&self, name: &str, env: &ShapeEnv) -> Option<bool> {
+        if env.is_repeated_materialized_argument_local(name)
+            || self.has_repeated_current_stmt_read(name)
+        {
+            return Some(true);
+        }
+        if let Some(live) = self
+            .ctx
+            .current_stmt
+            .and_then(|stmt| self.ctx.liveness.binding_is_live_after(stmt, name))
+        {
+            return Some(live);
+        }
+        self.binding_use_count(name, env)
+            .filter(|count| *count > 0)
+            .map(|count| count > 1)
     }
 
-    fn has_later_read_facts(&self) -> bool {
-        self.ctx.current_stmt.is_some()
+    fn needs_copy_before_consume(&self, name: &str, env: &ShapeEnv) -> bool {
+        self.copy_before_consume(name, env).unwrap_or(true)
+    }
+
+    fn can_move_before_consume(&self, name: &str, env: &ShapeEnv) -> bool {
+        self.copy_before_consume(name, env) == Some(false)
     }
 
     fn binding_use_count(&self, name: &str, env: &ShapeEnv) -> Option<usize> {
@@ -64713,16 +64829,7 @@ fn reused_erased_object_value_argument_needs_clone(
     let Expr::Var(name) = arg else {
         return false;
     };
-    let move_use = MoveUseContext::new(ctx);
-    if move_use.has_catch_future_use(name) {
-        return true;
-    }
-    if move_use.has_later_or_repeated_current_read(name) {
-        return true;
-    }
-    move_use
-        .binding_use_count(name, env)
-        .is_some_and(|use_count| use_count > 1)
+    MoveUseContext::new(ctx).needs_copy_before_consume(name, env)
 }
 
 fn optional_target_borrows_element(target_shape: &RustSlotShape, facts: &FactSet) -> bool {
@@ -64749,7 +64856,7 @@ fn reused_actual_optional_owned_argument_needs_clone(
     }
     let name = move_recovery_source_name(arg)?;
     MoveUseContext::new(ctx)
-        .has_later_or_repeated_current_read(name)
+        .needs_copy_before_consume(name, env)
         .then_some(actual_shape)
 }
 
@@ -65891,13 +65998,18 @@ fn clone_recovery_decision_for_value(
 }
 
 fn shape_has_unconditional_reference_clone(shape: &RustSlotShape, ctx: LowerCtx) -> bool {
+    // Option carries Java null, not another object allocation. Copying an
+    // Option of canonical handles copies those handles while preserving None.
+    let java_ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
     shape.native_allocation.shared()
-        || crate::effective_facts::EffectiveFacts::new(ctx.facts).native_shared_reference_carrier(&shape.java_ty)
+        || crate::effective_facts::EffectiveFacts::new(ctx.facts).native_shared_reference_carrier(&java_ty)
         || slot_java_type_is_shared_handle_with_representations(
-            &shape.java_ty, ctx.facts, ctx.representations,
+            &java_ty, ctx.facts, ctx.representations,
         )
         || crate::representation_lowering::source_hierarchy_carrier_uses_only_interior_mutable_handles(
-            &shape.java_ty, ctx.representations,
+            &java_ty, ctx.representations,
         )
 }
 
@@ -65945,18 +66057,7 @@ fn reused_owned_value_needs_clone(
     {
         return false;
     }
-    if move_use.has_later_read(name) {
-        return true;
-    }
-    if env.is_repeated_materialized_argument_local(name) {
-        return true;
-    }
-    if move_use.has_repeated_current_stmt_read(name) {
-        return true;
-    }
-    move_use
-        .binding_use_count(name, env)
-        .is_some_and(|use_count| use_count > 1)
+    move_use.needs_copy_before_consume(name, env)
 }
 
 fn shared_borrow_argument_needs_owned_clone(
@@ -65994,8 +66095,7 @@ fn reused_owned_argument_needs_clone(
                     Expr::Var(name) => name,
                     _ => unreachable!("checked above"),
                 };
-                env.is_repeated_materialized_argument_local(name)
-                    || move_use.has_later_or_repeated_current_read(name)
+                move_use.needs_copy_before_consume(name, env)
             };
     }
     if actual_shape
@@ -66011,10 +66111,7 @@ fn reused_owned_argument_needs_clone(
             return false;
         };
         let move_use = MoveUseContext::new(ctx);
-        if move_use.has_catch_future_use(name) {
-            return true;
-        }
-        return move_use.has_later_or_repeated_current_read(name);
+        return move_use.needs_copy_before_consume(name, env);
     }
     if !shape_is_owned_non_erased(target_shape) {
         return false;
@@ -66044,28 +66141,7 @@ fn reused_owned_argument_needs_clone(
     {
         return false;
     }
-    let move_use = MoveUseContext::new(ctx);
-    if env.is_repeated_materialized_argument_local(name) {
-        return true;
-    }
-    if move_use.has_catch_future_use(name) {
-        return true;
-    }
-    if move_use.has_exclusive_terminal_branch_read(name) && !move_use.has_later_read(name) {
-        return false;
-    }
-    if move_use.has_later_read_facts() {
-        return move_use.has_later_or_repeated_current_read(name);
-    }
-    if shape_is_erased_object_sequence_like(target_shape) {
-        return move_use.has_repeated_current_stmt_read(name);
-    }
-    if let Some(current_count) = move_use.current_stmt_read_count(name) {
-        return current_count > 1;
-    }
-    move_use
-        .binding_use_count(name, env)
-        .is_some_and(|use_count| use_count > 1)
+    MoveUseContext::new(ctx).needs_copy_before_consume(name, env)
 }
 
 fn shape_is_erased_object_sequence_like(shape: &RustSlotShape) -> bool {
@@ -66305,11 +66381,6 @@ fn current_callable_binding_use_count_for_id(
 /// read afterwards. One place that resolves the name to a binding; the override
 /// is only for constructs with no statement of their own.
 fn binding_has_later_read(name: &str, ctx: LowerCtx) -> bool {
-    // Union, not precedence. An override is installed for a construct the
-    // analysis cannot key on — a lambda whose body is a bare expression lowers
-    // into a loop with no `Stmt` of its own — while `current_stmt` still points
-    // at the *enclosing* statement. Returning the analysis answer alone there
-    // silently discards the carried reads and drops the clone the loop needs.
     ctx.current_stmt
         .and_then(|stmt| ctx.liveness.binding_is_live_after(stmt, name))
         .unwrap_or(false)
@@ -82182,6 +82253,7 @@ fn lower_expr_for_slot_with_refinements_impl(
                 expr,
                 &actual,
                 &target_element,
+                env,
                 ctx,
             )
         {
@@ -82270,13 +82342,14 @@ fn lower_expr_for_slot_with_refinements_impl(
         let plan = plan_slot_conversion(source, slot, ctx.facts);
         return apply_slot_expr_conversion(lowered_expr, &plan);
     }
-    let upcast_source = if actual.ownership == OwnershipShape::Owned
-        && concrete_java_type_name(&actual.java_ty).is_some_and(|owner| {
-            let placement = source_shared_storage_placement(owner, ctx);
-            placement.shared() && placement.is_implemented()
-        })
-        && source_argument_needs_clone_before_subtype_conversion(expr, &lowered_expr, env, ctx)
-    {
+    // Both the source-subtype mapper below and the portable slot conversion
+    // can consume the complete nullable carrier. Decide reference copying once
+    // from the source allocation and current use facts, before either mapper
+    // moves it. Copying the resulting trait adapter would already be too late.
+    let copy_source_before_conversion = actual.ownership == OwnershipShape::Owned
+        && shape_has_unconditional_reference_clone(&actual, ctx)
+        && source_argument_needs_clone_before_subtype_conversion(expr, &lowered_expr, env, ctx);
+    let upcast_source = if copy_source_before_conversion {
         apply_clone_projection(lowered_expr.clone())
     } else {
         lowered_expr.clone()
@@ -82307,16 +82380,9 @@ fn lower_expr_for_slot_with_refinements_impl(
     if slot_conversion_is_representation_identity(&actual, &slot, ctx) {
         return make_java_null_expect_catchable_in_propagating_ctx(lowered_expr, ctx);
     }
-    let copy_optional_source = actual.ownership == OwnershipShape::Owned
-        && actual.optional_element_type().is_some_and(|element| {
-            slot_java_type_is_shared_handle_with_representations(
-                &element,
-                ctx.facts,
-                ctx.representations,
-            )
-        })
-        && slot_target_shape(&slot).is_some_and(|target| target.ownership == OwnershipShape::Owned)
-        && source_argument_needs_clone_before_subtype_conversion(expr, &lowered_expr, env, ctx);
+    let copy_optional_source = copy_source_before_conversion
+        && actual.optional_element_type().is_some()
+        && slot_target_shape(&slot).is_some_and(|target| target.ownership == OwnershipShape::Owned);
     let plan = plan_slot_conversion(actual, slot, ctx.facts);
     if copy_optional_source
         && matches!(plan.conversion(), SlotConversionPlan::Shape(shape)
@@ -92608,7 +92674,7 @@ fn lower_map_carrier_cast_source_for_slot(
     let lowered = lower_expr_with_refinements(inner, env, ctx, refinements);
     let lowered = if actual.ownership == OwnershipShape::Owned
         && move_recovery_source_name(inner)
-            .is_some_and(|name| MoveUseContext::new(ctx).has_later_or_repeated_current_read(name))
+            .is_some_and(|name| MoveUseContext::new(ctx).needs_copy_before_consume(name, env))
     {
         apply_audited_clone_recovery(lowered)
     } else {
@@ -95836,7 +95902,7 @@ fn lower_reused_optional_unwrap_for_slot(
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
     if actual.ownership == OwnershipShape::Owned
         && !matches!(slot, Slot::Return(_))
-        && MoveUseContext::new(ctx).has_later_or_repeated_current_read(name)
+        && MoveUseContext::new(ctx).needs_copy_before_consume(name, env)
     {
         let plan = plan_slot_conversion(actual.clone(), slot.clone(), ctx.facts);
         return Some(apply_slot_expr_conversion(
@@ -96023,7 +96089,7 @@ fn lower_reused_optional_wrap_for_slot(
     if !known_owned_argument_clone_recovery(actual) && !known_named_clone_recovery(actual) {
         return None;
     }
-    let Some(binding_id) = env.binding_id(name) else {
+    let Some(_) = env.binding_id(name) else {
         return None;
     };
     // An escape (for example storing a parameter in a field) is not itself
@@ -96031,11 +96097,7 @@ fn lower_reused_optional_wrap_for_slot(
     // classification so a last-use owned value can move into Some without
     // inventing a Clone requirement for an unconstrained type parameter.
     let move_use = MoveUseContext::new(ctx);
-    let needs_clone = if move_use.has_later_read_facts() {
-        move_use.has_later_or_repeated_current_read(name)
-    } else {
-        current_callable_binding_needs_clone_for_move(binding_id, ctx)
-    };
+    let needs_clone = move_use.needs_copy_before_consume(name, env);
     if !needs_clone {
         return None;
     }
@@ -110676,6 +110738,7 @@ fn lower_present_expr_for_optional_target(
         expr,
         &actual_element_shape,
         plan.construction().element_shape(),
+        env,
         ctx,
     ) {
         Slot::Value
@@ -110721,9 +110784,10 @@ fn optional_type_parameter_value_can_move_into_present_slot(
     expr: &Expr,
     actual_element_shape: &RustSlotShape,
     target_element_shape: &RustSlotShape,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> bool {
-    matches!(expr, Expr::Var(_))
+    matches!(expr, Expr::Var(name) if MoveUseContext::new(ctx).can_move_before_consume(name, env))
         && actual_element_shape.ownership == OwnershipShape::Owned
         && target_element_shape.ownership == OwnershipShape::Owned
         && same_concrete_java_type(&actual_element_shape.java_ty, &target_element_shape.java_ty)
@@ -114785,6 +114849,68 @@ class Child extends Base {}
         assert_eq!(
             nested_type_simple_alias_item(&nested, &HashSet::new()).as_deref(),
             Some("pub type Inner<T, U> = dyn Outer_Inner<T, U>;")
+        );
+    }
+
+    #[test]
+    fn move_transport_distinguishes_unanalyzed_from_final_and_repeated_uses() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(Expr::Var("value".into())),
+                Stmt::Expr(Expr::Var("value".into())),
+            ],
+        };
+        let analysis = crate::liveness::LivenessAnalysis::for_body(&body);
+        let env = ShapeEnv::new();
+        let base = lower_test_ctx_with_facts(FactSet::default());
+        let unknown = Stmt::Expr(Expr::Var("value".into()));
+        let unknown_ctx = LowerCtx {
+            current_stmt: Some(&unknown),
+            liveness: &analysis,
+            ..base
+        };
+        assert_eq!(
+            MoveUseContext::new(unknown_ctx).copy_before_consume("value", &env),
+            None
+        );
+        assert!(!MoveUseContext::new(unknown_ctx).can_move_before_consume("value", &env));
+        assert!(MoveUseContext::new(unknown_ctx).needs_copy_before_consume("value", &env));
+        let live_ctx = LowerCtx {
+            current_stmt: Some(&body.statements[0]),
+            liveness: &analysis,
+            ..base
+        };
+        assert_eq!(
+            MoveUseContext::new(live_ctx).copy_before_consume("value", &env),
+            Some(true)
+        );
+        let dead_ctx = LowerCtx {
+            current_stmt: Some(&body.statements[1]),
+            liveness: &analysis,
+            ..base
+        };
+        assert_eq!(
+            MoveUseContext::new(dead_ctx).copy_before_consume("value", &env),
+            Some(false)
+        );
+        let repeated = Block {
+            statements: vec![Stmt::Expr(Expr::Call {
+                type_args: vec![],
+                receiver: None,
+                name: "consume".into(),
+                args: vec![Expr::Var("value".into()), Expr::Var("value".into())],
+                resolved: None,
+            })],
+        };
+        let repeated_analysis = crate::liveness::LivenessAnalysis::for_body(&repeated);
+        let repeated_ctx = LowerCtx {
+            current_stmt: Some(&repeated.statements[0]),
+            liveness: &repeated_analysis,
+            ..base
+        };
+        assert_eq!(
+            MoveUseContext::new(repeated_ctx).copy_before_consume("value", &env),
+            Some(true)
         );
     }
 

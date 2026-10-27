@@ -27,7 +27,7 @@ pub(crate) struct GenericAllocationSlot {
     pub declaration: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GenericAllocationEdge {
     pub source: SignatureDependencyNode,
     pub source_path: Vec<usize>,
@@ -40,8 +40,9 @@ pub(crate) struct GenericAllocationEdge {
 }
 
 /// Index once, then let the ordinary dependency worklist saturate qualifiers.
-/// Each owner/binder uses one existing declaration occurrence as an anchor,
-/// avoiding a quadratic clique between occurrences and instantiations.
+/// Each scoped owner/binder has an explicit solver anchor, including owners
+/// with no direct declaration occurrence. Star edges avoid a quadratic clique
+/// between occurrences and instantiations.
 pub(crate) fn constraint_edges(
     program: &Program,
     slots: &[GenericAllocationSlot],
@@ -68,14 +69,35 @@ pub(crate) fn constraint_edges(
                 .push((slot.node.clone(), path));
         }
     }
-    let anchors = groups
+    // A binder is a solver slot even when its owner declares no field or
+    // method mentioning it (e.g. Alias<A> extends Function<A,A>). Choosing a
+    // declaration occurrence as the only anchor loses such ancestor paths.
+    let anchors = identities
+        .arguments
         .iter()
-        .filter_map(|(key, occurrences)| Some((key.clone(), occurrences.first()?.clone())))
+        .flat_map(|(owner, arguments)| {
+            arguments.iter().enumerate().map(move |(index, _)| {
+                (
+                    (owner.clone(), index),
+                    (
+                        SignatureDependencyNode::GenericParameter {
+                            owner: owner.clone(),
+                            index,
+                        },
+                        vec![],
+                    ),
+                )
+            })
+        })
         .collect::<HashMap<_, _>>();
     let mut edges = Vec::new();
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(left, _), (right, _)| {
+        (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1))
+    });
     for (key, occurrences) in groups {
         let anchor = anchors[&key].clone();
-        for occurrence in occurrences.into_iter().skip(1) {
+        for occurrence in occurrences {
             for (from, to) in [(&anchor, &occurrence), (&occurrence, &anchor)] {
                 edges.push(GenericAllocationEdge {
                     source: from.0.clone(),
@@ -186,7 +208,62 @@ pub(crate) fn constraint_edges(
     edges
 }
 
+/// Scoped symbolic occurrence paths; method binders shadow owner binders.
+/// A qualifier below symbolic T may only become structural after instantiation.
+pub(crate) fn symbolic_occurrence_paths(
+    program: &Program,
+    slots: &[GenericAllocationSlot],
+) -> Vec<crate::plan_contracts::NativeSlotKey> {
+    let identities = SourceGenericAllocationPlan::for_declarations(program, &source_types(program));
+    let mut result = Vec::new();
+    for slot in slots {
+        let params = identities
+            .owner_key(&slot.owner)
+            .map(|owner| {
+                identities.arguments[&owner]
+                    .iter()
+                    .filter_map(|shape| match &shape.java_ty {
+                        JavaType::Named { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // Owner binders and method binders are both symbolic at their exact
+        // occurrence. Method binders shadow owner binders but must not become
+        // concrete merely because the enclosing class has no type parameters.
+        for (_, path) in binder_paths(&slot.ty, &params, &slot.shadows)
+            .into_iter()
+            .chain(binder_paths(&slot.ty, &slot.shadows, &[]))
+        {
+            result.push(crate::plan_contracts::NativeSlotKey {
+                node: slot.node.clone(),
+                path,
+            });
+        }
+    }
+    result
+}
+
 impl SourceGenericAllocationPlan {
+    /// Pure artifact construction from the signature solver's binder slots.
+    /// No ancestor fixed point or new qualifier inference belongs here.
+    pub(crate) fn from_solved_binders(
+        program: &Program,
+        mut qualifiers: impl FnMut(&JavaOwnerKey, usize) -> Vec<(Vec<usize>, StoragePlacement)>,
+    ) -> Self {
+        let mut plan = Self::for_declarations(program, &source_types(program));
+        for (owner, arguments) in &mut plan.arguments {
+            for (index, argument) in arguments.iter_mut().enumerate() {
+                for (path, placement) in qualifiers(owner, index) {
+                    argument.require_native_allocation_at(&path, placement);
+                }
+            }
+        }
+        plan
+    }
+
+    #[cfg(test)]
     pub(crate) fn build(program: &Program, signatures: &SignaturePlan) -> Self {
         let types = source_types(program);
         let mut plan = Self::for_declarations(program, &types);

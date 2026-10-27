@@ -1,0 +1,189 @@
+Constraint/optimization refactor: implementation and acceptance record
+Date: 2026-10-26
+Plan: docs/constraint-optimization-refactor-plan.txt
+
+Implemented scope
+
+All six initial batches are implemented, plus the scoped nominal/binder repair
+whose entry audit reproduced a correctness defect. This is a checked incremental
+architecture, not a claim that every Java operation now has a global proof or
+that the heuristic finds the globally cheapest Rust program.
+
+1. Witness audit and unified transport
+
+   docs/transport-refactor-witnesses.txt distinguishes reproduced final local/
+   static-store copies from non-reproductions. MoveUseContext retains unknown,
+   live and final-use evidence and supplies one copy-before-consume decision to
+   value, argument, subtype, nullable and erased-reference paths. Statement
+   presence alone does not establish liveness. Obsolete emitted-text constructor
+   clone deletion is removed. Existing constructor single-store/non-Clone proof,
+   repeated expression use, loop/catch floors and canonical identity are retained.
+
+   Verification exposed two more real conversion defects. Nullable source
+   upcasts returned early before copying a later-used handle; optional-aware
+   canonical-copy eligibility and the same reuse decision now precede both
+   consuming paths. Erased Object-to-String casts now reuse the existing borrowed
+   checked canonical-reference conversion with the facts-aware String type,
+   preserving null, later reads and catchable ClassCastException.
+
+   The new return-upcast regression exposed a dangling mutable trait loan into
+   an owned temporary Box. Existing local temporary-storage refinement now keeps
+   a proven owned backing value for either shared or mutable borrowed locals,
+   including receiver-only uses. This remains a legacy LOCAL physical refinement
+   outside the frozen native-initializer coverage, not a claim all locals freeze.
+
+2. Scoped native contract authority
+
+   src/plan_contracts.rs records explicit generic/initializer relations, stable
+   scoped slot identities, instantiated endpoint checks and qualifier reasons.
+   Coverage distinguishes checked, symbolic, implicit functional, unsupported and
+   ambiguous cases. Concrete native positions share the renderer's outer-carrier
+   eligibility query, rather than accidentally treating a source-controlled
+   List/Map or an implicit SAM environment as an outer cell wrapper.
+
+   Invalid modeled obligations are Error diagnostics and compile_error artifacts
+   before rendering; rejected proof queries do not panic. Unsupported coverage
+   is explicit and never certified as checked. Both indices of source parameter
+   ABI decisions are updated through one checked installer before optimization.
+   Existing physical ABI policy is finalized once, with semantic/physical
+   provenance; its emission query is a fixed point for the covered decisions.
+
+3. Generic obligations before finalization
+
+   GenericParameter solver slots anchor every owner binder, including owners
+   with no declaration occurrence. Existing GenericAllocationEdge paths carry
+   requirements through declarations, uses, substitutions and ancestors. The
+   published artifact reads solved qualifiers. Production no longer runs its
+   separate ancestor fixpoint or adds allocation qualifiers after saturation.
+   The old inference remains test-only as an independent artifact oracle.
+
+   Hierarchy products remain derived artifacts. Inherited declaration ambiguity
+   and unproved dispatch/owner cases remain explicit coverage limits.
+
+4. Actual frozen producer/storage/consumer seam
+
+   FrozenNativeSlot is a private proof token consumed by selected field lookup.
+   FrozenNativeBoundary stores the EXISTING SlotConversionPlan and exact checked
+   producer/target shapes. A covered direct static primitive-array factory field
+   initializer lowers its producer once, renders the selected target, and applies
+   the stored conversion without independently reselecting wrappers or clones.
+   Both constructor initialization and replayed assignments use this path.
+   Endpoint tampering invalidates the token; post-freeze transport mutation is
+   rejected. Generic qualifiers and direct initializer boundaries are covered;
+   arbitrary assignments, virtual adapters, loan regions and all local-storage
+   refinements are not falsely claimed to be globally frozen.
+
+5. Indexed allocation propagation
+
+   src/generic_allocation_schedule.rs shares one guarded path transfer between
+   reference and indexed execution. Dense watched slots and source/destination
+   indexes wake stable ordered edges. Complete destination constraints are
+   watched because insertion normalizers can depend on ownership/views or remove
+   earlier output. The cache is not semantic state and is ignored by equality.
+
+   Production preserves the original synchronous arm position and insertion
+   gates. Other arms retain global saturation. The old SCC executor is not
+   enabled. Complete constraint closure and final-plan equivalence are tested
+   on three real source families, including a declaration-free binder and a
+   callback-dependent late requirement. This does not assert confluence of all
+   existing nonmonotone normalization under arbitrary scheduling.
+
+6. Heuristic CSP and a real optimization
+
+   src/representation_solver.rs has finite candidates, hard compatibility tables,
+   additive representation/action costs, domain pruning, component-local bounded
+   backtracking and a validated incumbent. Missing tuples are infeasible at any
+   weight. Disconnected groups do not repeatedly search the global problem.
+   Trials are disposable; the final assignment is reevaluated. Exhaustion retains
+   a feasible incumbent. Tiny exhaustive oracles check coupled alternatives;
+   budget/invalidity/determinism have focused tests. No solver dependency added.
+
+   src/canonical_transport_optimizer.rs admits private static nongeneric scalar
+   observers with complete call/carrier/liveness evidence and a proved primitive
+   read body. Storage, dispatch and result ABI stay fixed. It chooses owned/move
+   versus borrowed canonical-handle transport, charging caller copies and callee
+   owner-snapshot copies at their origin. Semantic evidence is immutable.
+   Method references, unresolved calls and nested/unproved contexts pin the ABI.
+   Reports retain accepted/rejected choices and cost explanations. Real Java/Rust
+   tests prove two-call and last-use simplifications with alias writes.
+
+7. Scoped identity and native-copy repairs
+
+   docs/scoped-storage-identity-witnesses.txt records generated Rust printing 0
+   versus Java 7 when an unrelated binder named Cell disabled nominal Cell
+   sharing. A shared capture-avoiding catalog now normalizes primary/context/
+   summary and resolver copies before facts, reusing binder-aware substitution.
+   Scoped class/method/constructor/local/anonymous identities and explicit type
+   witnesses stay consistent. Proven value method references use existing exact
+   value/type namespace precedence. Type-only references through a renamed binder
+   remain explicitly unsupported pending their own method-reference lowering
+   proof. The global spelling-based nominal-storage exclusion is deleted.
+
+   Runtime Rc/Arc/Weak copies could conflict with Java interfaces declaring
+   clone(). All nine sites in java_native_reference.rs now use typed Rust Clone
+   UFCS, keeping concrete owners before Any erasure and adding no payload Clone
+   bound. The existing interface regression proved the failure and the fix.
+
+Acceptance evidence
+
+Focused matrix: 56 checks pass across the accepted batches:
+
+- 29 focused library checks: constraints/freeze/rejection, scoped identities,
+  complete indexed/reference equivalence, heuristic CSP/exact oracles, transport.
+- 5 canonical transport optimization checks, including Java/Rust runtime parity.
+- 5 idiom preservation checks. Four expectations predated qualified Rust Clone
+  and JavaString in checkpoint HEAD; their behavior/compile checks were retained
+  and three were strengthened with runtime checks. The fifth found/fixed the
+  consuming nullable downcast rather than updating an incorrect expectation.
+- 2 generic producer, 2 scoped storage/production-assembly, 4 receiver identity,
+  3 shared interface/assembly/reentry, 1 shared return, 1 reference transport,
+  1 frozen initializer, and 3 selected cross-function staging checks.
+
+The complete 21-test staging suite also passed during the first batch. Later
+changes reran affected cases rather than repeating the 426-second serial sweep.
+Logs and producer builds: .tmp/constraint-refactor/round1/, round2/, round3/,
+results3.log, reference_transport.last.log, source_call_staging.last.log and
+native_frozen_initializer.final.log. Some logs intentionally preserve prior
+failures; the accepted results are the later successful relevant checks.
+
+Full pinned Commons Numbers core gate PASSED:
+
+- All 11 production files plus existing contract client, untouched staged copies.
+- 12 emitted files; zero failed translations, invalid-pattern files or Rust errors.
+- Original Java and generated Rust both print contract=0 and oracle=ok.
+- No generated implementation was patched. External Rust launcher only invokes
+  the generated Java main. Reproduction: scripts/verify-constraint-refactor-core.sh.
+- Accepted artifacts: .tmp/constraint-refactor/core/run.rv8EDZ/.
+- Producer SHA256: 7b4b55dde23a86b383c4f5680fde476f65fe2b1d0b43fcac16236da82872c236.
+- One run: translation111673ms, assembly15067ms, full driver132656ms.
+
+The profile records six signature iterations, 930 slots and 4817 graph edges;
+source-generic transfer consumed533us in the earlier representative core run.
+Counter assertions prove zero repeated transfers for an idle arm and only one
+edge fired after one independent late source change. Complete indexed/reference
+three-source plan oracle took3.67s. These establish scheduling behavior, not a
+whole-translator speedup: emission still dominates the debug corpus run.
+
+cargo fmt --check and git diff --check pass; the reproduction script passes
+bash syntax checking. Only motivated focused/corpus checks were run, not the
+entire repository's thousands of generated-crate tests. No commit was created.
+
+Additional corpus result that must not be hidden
+
+Commons CSV1.10.0 was attempted using all12 production files. It FAILED with100
+Rust errors spanning text/character runtime operations and native conversions.
+No native_contract invariant error was reported. Historical v101 success is not
+a verified passing baseline for the current checkpoint; this refactor does not
+claim CSV support or zero CSV regressions. Artifacts remain at
+/tmp/new-java2rust-commons-csv.QukkuG/translation/. A separate baseline/rewrite
+audit is required before starting a CSV fix campaign.
+
+Conditional later extensions in the original plan
+
+No payload guard/loan is coalesced across callbacks, no retained generic live
+view is newly admitted, and nominal allocation contexts are not split. Therefore
+new callback-effect/view/context-splitting machinery was not triggered by these
+transformations. Their original admission prerequisites remain requirements for
+that future work. Existing monitor/reentry behavior and conservative unsupported
+live-view boundaries are retained. The scoped identity repair was triggered by
+an actual reproduced defect and is included above.

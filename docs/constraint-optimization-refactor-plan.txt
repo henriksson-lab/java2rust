@@ -1,7 +1,8 @@
 Constraint and optimization refactoring plan
 Date: 2026-10-26
-Status: proposed implementation plan; no implementation or new test runs in
-this planning task. Incorporates four parallel source reviews and user steering.
+Status: six initial batches and the reproduced scoped-identity repair implemented.
+Acceptance and precise coverage: docs/constraint-optimization-execution.txt.
+Original plan incorporates four parallel source reviews and user steering.
 Background: docs/constraint-optimization-review.txt.
 
 Objective

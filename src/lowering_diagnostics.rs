@@ -70,7 +70,11 @@ pub fn collect_lowering_diagnostic_plans(
     );
     diagnostics.extend(signatures.diagnostics().iter().map(|diagnostic| {
         LoweringDiagnosticPlan::new(
-            Severity::Warning,
+            if diagnostic.code().starts_with("native_contract_") {
+                Severity::Error
+            } else {
+                Severity::Warning
+            },
             diagnostic.code(),
             diagnostic.message().to_string(),
         )

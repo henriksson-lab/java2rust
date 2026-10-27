@@ -7,7 +7,12 @@ mod array_plan;
 pub mod binding_id;
 pub mod call_lowering;
 pub mod call_plan;
+mod canonical_transport_optimizer;
+mod generic_allocation_schedule;
+mod plan_contracts;
 pub mod representation_cost;
+mod representation_solver;
+mod scoped_type_parameters;
 
 /// Producer-owned runtime snippets needed by package assemblers as well as
 /// individual translation units. Assemblers must not maintain forked bodies.
@@ -555,6 +560,12 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         context_diagnostics.extend(context_parsed.diagnostics.clone());
         parsed_context.push(context_parsed);
     }
+    // All source declarations must be known before a binder receives an
+    // identity: an unrelated class in another file can have the same spelling.
+    let mut parsed_summaries = summary_sources
+        .iter()
+        .map(|source| parser::parse_java_source(source))
+        .collect::<Vec<_>>();
     {
         let mut programs = Vec::with_capacity(1 + parsed_context.len());
         programs.push(&mut parsed.program);
@@ -562,6 +573,13 @@ pub fn translate_source_with_context_sources_and_summary_sources(
             programs.push(&mut context_parsed.program);
         }
         qualify_duplicate_program_type_names(&mut programs);
+        for summary in &mut parsed_summaries {
+            programs.push(&mut summary.program);
+        }
+        let binder_catalog = scoped_type_parameters::BinderCatalog::collect_many(&mut programs);
+        for program in programs {
+            binder_catalog.normalize(program);
+        }
     }
     let mut source_program = parsed.program.clone();
     for context_parsed in &parsed_context {
@@ -579,8 +597,7 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     // owned by another class in another file. Type names are qualified with
     // each file's own package here; the merged program no longer knows them.
     let mut summary_constant_declarations = Vec::new();
-    for summary_source in summary_sources {
-        let summary_parsed = parser::parse_java_source(summary_source);
+    for summary_parsed in parsed_summaries {
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
@@ -718,6 +735,12 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         context_diagnostics.extend(context_parsed.diagnostics.clone());
         parsed_context.push(context_parsed);
     }
+    // All source declarations must be known before a binder receives an
+    // identity: an unrelated class in another file can have the same spelling.
+    let mut parsed_summaries = summary_sources
+        .iter()
+        .map(|source| parser::parse_java_source(source))
+        .collect::<Vec<_>>();
     {
         let mut programs = Vec::with_capacity(parsed_primary.len() + parsed_context.len());
         for (_, parsed) in &mut parsed_primary {
@@ -727,6 +750,13 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
             programs.push(&mut parsed.program);
         }
         qualify_duplicate_program_type_names(&mut programs);
+        for summary in &mut parsed_summaries {
+            programs.push(&mut summary.program);
+        }
+        let binder_catalog = scoped_type_parameters::BinderCatalog::collect_many(&mut programs);
+        for program in programs {
+            binder_catalog.normalize(program);
+        }
     }
     for (_, parsed) in &parsed_primary {
         merge_program_context(&mut source_program, parsed.program.clone());
@@ -762,8 +792,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     // owned by another class in another file. Type names are qualified with
     // each file's own package here; the merged program no longer knows them.
     let mut summary_constant_declarations = Vec::new();
-    for summary_source in summary_sources {
-        let summary_parsed = parser::parse_java_source(summary_source);
+    for summary_parsed in parsed_summaries {
         context_diagnostics.extend(summary_parsed.diagnostics);
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
@@ -1028,7 +1057,7 @@ struct BatchTranslationContextBuild {
 
 fn build_batch_translation_context(
     source_program: Program,
-    summary_program: Program,
+    mut summary_program: Program,
     context_sources_are_emitted: bool,
     external_facts: &FactSet,
     event_sink: Option<&(dyn Fn(BatchTranslationEvent) + Send + Sync)>,
@@ -1052,6 +1081,7 @@ fn build_batch_translation_context(
     );
     let resolve_start = Instant::now();
     let source_symbols = resolve::source_symbols_from_program(&source_program);
+    source_symbols.normalize_type_parameters(&mut summary_program);
     let resolved_context = resolve::resolve_program_with_source_symbols_and_facts(
         &source_program,
         DiagnosticBag::new(),
@@ -1538,23 +1568,27 @@ fn translate_parsed_source_with_context(
     source_program_context: Option<Program>,
     semantic_program_context: Option<Program>,
     support_program_context: Option<Program>,
-    summary_program_context: Option<Program>,
+    mut summary_program_context: Option<Program>,
     context_sources_are_emitted: bool,
     external_facts: &FactSet,
 ) -> Translation {
     let source_program = source_program_context.as_ref().unwrap_or(&parsed.program);
-    let resolved = resolve::resolve_program_with_source_program_and_facts(
+    let source_symbols = resolve::source_symbols_from_program(source_program);
+    if let Some(summary) = &mut summary_program_context {
+        source_symbols.normalize_type_parameters(summary);
+    }
+    let resolved = resolve::resolve_program_with_source_symbols_and_facts(
         &parsed.program,
         parsed.diagnostics,
-        source_program,
+        &source_symbols,
         external_facts,
     );
     let (semantic_program, semantic_resolved_facts) =
         if let Some(semantic_program_context) = semantic_program_context {
-            let resolved_semantic = resolve::resolve_program_with_source_program_and_facts(
+            let resolved_semantic = resolve::resolve_program_with_source_symbols_and_facts(
                 &semantic_program_context,
                 DiagnosticBag::new(),
-                source_program,
+                &source_symbols,
                 external_facts,
             );
             (resolved_semantic.program, resolved_semantic.facts)
@@ -1586,10 +1620,10 @@ fn translate_parsed_source_with_context(
         support_program_context
             .as_ref()
             .map(|support_program_context| {
-                resolve::resolve_program_with_source_program_and_facts(
+                resolve::resolve_program_with_source_symbols_and_facts(
                     support_program_context,
                     DiagnosticBag::new(),
-                    source_program,
+                    &source_symbols,
                     external_facts,
                 )
                 .program
@@ -2530,11 +2564,15 @@ fn rename_callable_type_params_shadowing_enclosing_type(program: &mut Program, s
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
     for ty in &mut program.types {
-        rename_shadowing_callable_type_params_in_type(ty, &mut used);
+        rename_shadowing_callable_type_params_in_type(ty, &mut used, &crate::types::TypeEnv::new());
     }
 }
 
-fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl, used: &mut BTreeSet<String>) {
+fn rename_shadowing_callable_type_params_in_type(
+    ty: &mut TypeDecl,
+    used: &mut BTreeSet<String>,
+    values: &crate::types::TypeEnv,
+) {
     let collisions = ty
         .type_params
         .iter()
@@ -2545,9 +2583,11 @@ fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl, used: &mut B
     for (index, old) in collisions {
         let new = unique_callable_type_param_name(&old, "Type", used);
         used.insert(new.clone());
-        java_type_substitution::rename_class_parameter(ty, index, new);
+        java_type_substitution::rename_class_parameter_in_value_scope(ty, index, new, values);
     }
     let enclosing = ty.type_params.iter().cloned().collect::<BTreeSet<_>>();
+    let member_values = java_type_substitution::value_scope_for_members(&ty.members, values);
+    let values = &member_values;
     for member in &mut ty.members {
         match member {
             Member::Method(method) => {
@@ -2564,7 +2604,9 @@ fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl, used: &mut B
                 for (index, old_name) in collisions {
                     let new_name = unique_callable_type_param_name(&old_name, "Method", used);
                     used.insert(new_name.clone());
-                    java_type_substitution::rename_method_parameter(method, index, new_name);
+                    java_type_substitution::rename_method_parameter_in_value_scope(
+                        method, index, new_name, values,
+                    );
                 }
             }
             Member::Constructor(constructor) => {
@@ -2581,14 +2623,17 @@ fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl, used: &mut B
                 for (index, old_name) in collisions {
                     let new_name = unique_callable_type_param_name(&old_name, "Constructor", used);
                     used.insert(new_name.clone());
-                    java_type_substitution::rename_constructor_parameter(
+                    java_type_substitution::rename_constructor_parameter_in_value_scope(
                         constructor,
                         index,
                         new_name,
+                        values,
                     );
                 }
             }
-            Member::Type(nested) => rename_shadowing_callable_type_params_in_type(nested, used),
+            Member::Type(nested) => {
+                rename_shadowing_callable_type_params_in_type(nested, used, values)
+            }
             Member::Field(_) | Member::Unsupported { .. } => {}
         }
     }

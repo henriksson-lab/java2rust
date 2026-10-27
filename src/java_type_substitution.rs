@@ -7,6 +7,20 @@ use std::{borrow::Cow, collections::HashMap};
 type Substitutions = HashMap<String, JavaType>;
 
 pub(crate) fn rename_class_parameter(declaration: &mut TypeDecl, index: usize, new_name: String) {
+    rename_class_parameter_in_value_scope(
+        declaration,
+        index,
+        new_name,
+        &crate::types::TypeEnv::new(),
+    );
+}
+
+pub(crate) fn rename_class_parameter_in_value_scope(
+    declaration: &mut TypeDecl,
+    index: usize,
+    new_name: String,
+    values: &crate::types::TypeEnv,
+) {
     let old = std::mem::replace(&mut declaration.type_params[index], new_name.clone());
     declaration_contents(
         declaration,
@@ -17,10 +31,20 @@ pub(crate) fn rename_class_parameter(declaration: &mut TypeDecl, index: usize, n
                 args: vec![],
             },
         )]),
+        values,
     );
 }
 
 pub(crate) fn rename_method_parameter(method: &mut MethodDecl, index: usize, new_name: String) {
+    rename_method_parameter_in_value_scope(method, index, new_name, &crate::types::TypeEnv::new());
+}
+
+pub(crate) fn rename_method_parameter_in_value_scope(
+    method: &mut MethodDecl,
+    index: usize,
+    new_name: String,
+    values: &crate::types::TypeEnv,
+) {
     let old = std::mem::replace(&mut method.type_params[index], new_name.clone());
     method_types(
         method,
@@ -31,6 +55,7 @@ pub(crate) fn rename_method_parameter(method: &mut MethodDecl, index: usize, new
                 args: vec![],
             },
         )]),
+        values,
     );
 }
 
@@ -38,6 +63,20 @@ pub(crate) fn rename_constructor_parameter(
     constructor: &mut ConstructorDecl,
     index: usize,
     new_name: String,
+) {
+    rename_constructor_parameter_in_value_scope(
+        constructor,
+        index,
+        new_name,
+        &crate::types::TypeEnv::new(),
+    );
+}
+
+pub(crate) fn rename_constructor_parameter_in_value_scope(
+    constructor: &mut ConstructorDecl,
+    index: usize,
+    new_name: String,
+    values: &crate::types::TypeEnv,
 ) {
     let old = std::mem::replace(&mut constructor.type_params[index], new_name.clone());
     constructor_types(
@@ -49,12 +88,14 @@ pub(crate) fn rename_constructor_parameter(
                 args: vec![],
             },
         )]),
+        values,
     );
 }
 
 pub(crate) fn specialized_method(method: &MethodDecl, substitutions: &Substitutions) -> MethodDecl {
     let mut result = method.clone();
-    method_types(&mut result, substitutions);
+    let values = &crate::types::TypeEnv::new();
+    method_types(&mut result, substitutions, values);
     result
 }
 
@@ -97,7 +138,34 @@ fn ty(ty: &mut JavaType, substitutions: &Substitutions) {
     *ty = crate::resolve::substitute_method_type_variables(ty, substitutions);
 }
 
-fn method_types(method: &mut MethodDecl, substitutions: &Substitutions) {
+pub(crate) fn insert_value_binding(
+    values: &mut crate::types::TypeEnv,
+    name: &str,
+    source_name: &str,
+    ty: &JavaType,
+) {
+    values.insert_local(name, ty.clone());
+    values.insert_local(source_name, ty.clone());
+}
+
+pub(crate) fn value_scope_for_members(
+    members: &[Member],
+    outer: &crate::types::TypeEnv,
+) -> crate::types::TypeEnv {
+    let mut values = outer.clone();
+    for item in members {
+        if let Member::Field(field) = item {
+            values.insert_field(field.name.clone(), field.ty.clone());
+        }
+    }
+    values
+}
+
+fn method_types(
+    method: &mut MethodDecl,
+    substitutions: &Substitutions,
+    values: &crate::types::TypeEnv,
+) {
     let substitutions = without_shadowed_binders(substitutions, &method.type_params);
     ty(&mut method.return_type, &substitutions);
     for param in &mut method.params {
@@ -111,27 +179,41 @@ fn method_types(method: &mut MethodDecl, substitutions: &Substitutions) {
     {
         ty(bound, &substitutions);
     }
+    let mut callable_values = values.clone();
+    for param in &method.params {
+        insert_value_binding(
+            &mut callable_values,
+            &param.name,
+            &param.source_name,
+            &param.ty,
+        );
+    }
+    let values = &callable_values;
     if let Some(body) = &mut method.body {
-        block(body, &substitutions);
+        block(body, &substitutions, values);
     }
 }
 
-fn member(member: &mut Member, substitutions: &Substitutions) {
+fn member(member: &mut Member, substitutions: &Substitutions, values: &crate::types::TypeEnv) {
     match member {
-        Member::Method(method) => method_types(method, substitutions),
+        Member::Method(method) => method_types(method, substitutions, values),
         Member::Field(field) => {
             ty(&mut field.ty, substitutions);
             if let Some(value) = &mut field.initializer {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
         }
-        Member::Constructor(constructor) => constructor_types(constructor, substitutions),
-        Member::Type(declaration) => declaration_types(declaration, substitutions),
+        Member::Constructor(constructor) => constructor_types(constructor, substitutions, values),
+        Member::Type(declaration) => declaration_types(declaration, substitutions, values),
         Member::Unsupported { .. } => {}
     }
 }
 
-fn constructor_types(constructor: &mut ConstructorDecl, substitutions: &Substitutions) {
+fn constructor_types(
+    constructor: &mut ConstructorDecl,
+    substitutions: &Substitutions,
+    values: &crate::types::TypeEnv,
+) {
     let substitutions = without_shadowed_binders(substitutions, &constructor.type_params);
     for param in &mut constructor.params {
         ty(&mut param.ty, &substitutions);
@@ -144,12 +226,26 @@ fn constructor_types(constructor: &mut ConstructorDecl, substitutions: &Substitu
     {
         ty(bound, &substitutions);
     }
+    let mut callable_values = values.clone();
+    for param in &constructor.params {
+        insert_value_binding(
+            &mut callable_values,
+            &param.name,
+            &param.source_name,
+            &param.ty,
+        );
+    }
+    let values = &callable_values;
     if let Some(body) = &mut constructor.body {
-        block(body, &substitutions);
+        block(body, &substitutions, values);
     }
 }
 
-fn declaration_types(declaration: &mut TypeDecl, substitutions: &Substitutions) {
+fn declaration_types(
+    declaration: &mut TypeDecl,
+    substitutions: &Substitutions,
+    values: &crate::types::TypeEnv,
+) {
     let mut binders = declaration.type_params.clone();
     binders.push(
         declaration
@@ -160,10 +256,16 @@ fn declaration_types(declaration: &mut TypeDecl, substitutions: &Substitutions) 
             .to_string(),
     );
     let substitutions = without_shadowed_binders(substitutions, &binders);
-    declaration_contents(declaration, &substitutions);
+    declaration_contents(declaration, &substitutions, values);
 }
 
-fn declaration_contents(declaration: &mut TypeDecl, substitutions: &Substitutions) {
+fn declaration_contents(
+    declaration: &mut TypeDecl,
+    substitutions: &Substitutions,
+    values: &crate::types::TypeEnv,
+) {
+    let declaration_values = value_scope_for_members(&declaration.members, values);
+    let values = &declaration_values;
     for bound in declaration.type_param_bounds.iter_mut().flatten() {
         ty(bound, &substitutions);
     }
@@ -179,15 +281,16 @@ fn declaration_contents(declaration: &mut TypeDecl, substitutions: &Substitution
         *name = java_type_text(&specialized);
     }
     for item in &mut declaration.members {
-        member(item, &substitutions);
+        member(item, &substitutions, values);
     }
     for init in &mut declaration.static_init_blocks {
-        block(&mut init.block, &substitutions);
+        block(&mut init.block, &substitutions, values);
     }
 }
 
-fn block(body: &mut Block, substitutions: &Substitutions) {
+fn block(body: &mut Block, substitutions: &Substitutions, values: &crate::types::TypeEnv) {
     let mut scope = Cow::Borrowed(substitutions);
+    let mut block_values = values.clone();
     for statement in &mut body.statements {
         if let Stmt::LocalType(declaration) = statement {
             let name = declaration
@@ -199,11 +302,20 @@ fn block(body: &mut Block, substitutions: &Substitutions) {
                 scope.to_mut().remove(name);
             }
         }
-        stmt(statement, &scope);
+        if let Stmt::VarDecl {
+            name,
+            source_name,
+            ty,
+            ..
+        } = statement
+        {
+            insert_value_binding(&mut block_values, name, source_name, ty);
+        }
+        stmt(statement, &scope, &block_values);
     }
 }
 
-fn stmt(statement: &mut Stmt, substitutions: &Substitutions) {
+fn stmt(statement: &mut Stmt, substitutions: &Substitutions, values: &crate::types::TypeEnv) {
     match statement {
         Stmt::VarDecl {
             ty: declared,
@@ -212,25 +324,25 @@ fn stmt(statement: &mut Stmt, substitutions: &Substitutions) {
         } => {
             ty(declared, substitutions);
             if let Some(value) = initializer {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
         }
         Stmt::Assign { target, value } => {
-            expr(target, substitutions);
-            expr(value, substitutions);
+            expr(target, substitutions, values);
+            expr(value, substitutions, values);
         }
         Stmt::Expr(value) | Stmt::Return(Some(value)) | Stmt::Throw(value) => {
-            expr(value, substitutions)
+            expr(value, substitutions, values)
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            expr(condition, substitutions);
-            block(then_block, substitutions);
+            expr(condition, substitutions, values);
+            block(then_block, substitutions, values);
             if let Some(body) = else_block {
-                block(body, substitutions);
+                block(body, substitutions, values);
             }
         }
         Stmt::While {
@@ -239,8 +351,8 @@ fn stmt(statement: &mut Stmt, substitutions: &Substitutions) {
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            expr(condition, substitutions);
-            block(body, substitutions);
+            expr(condition, substitutions, values);
+            block(body, substitutions, values);
         }
         Stmt::For {
             init,
@@ -249,37 +361,61 @@ fn stmt(statement: &mut Stmt, substitutions: &Substitutions) {
             body,
             ..
         } => {
+            let mut loop_values = values.clone();
             for statement in init {
-                stmt(statement, substitutions);
+                if let Stmt::VarDecl {
+                    name,
+                    source_name,
+                    ty,
+                    ..
+                } = statement
+                {
+                    insert_value_binding(&mut loop_values, name, source_name, ty);
+                }
+                stmt(statement, substitutions, &loop_values);
             }
             if let Some(value) = condition {
-                expr(value, substitutions);
+                expr(value, substitutions, &loop_values);
             }
             for value in update {
-                expr(value, substitutions);
+                expr(value, substitutions, &loop_values);
             }
-            block(body, substitutions);
+            block(body, substitutions, &loop_values);
         }
         Stmt::EnhancedFor {
             var_type,
+            var_name,
+            source_var_name,
             iterable,
             body,
             ..
         } => {
             ty(var_type, substitutions);
-            expr(iterable, substitutions);
-            block(body, substitutions);
+            expr(iterable, substitutions, values);
+            let mut loop_values = values.clone();
+            insert_value_binding(&mut loop_values, var_name, source_var_name, var_type);
+            block(body, substitutions, &loop_values);
         }
         Stmt::Switch { selector, cases } => {
-            expr(selector, substitutions);
+            expr(selector, substitutions, values);
+            let mut case_values = values.clone();
             for case in cases {
                 for label in &mut case.labels {
                     if let SwitchLabel::Expr(value) = label {
-                        expr(value, substitutions);
+                        expr(value, substitutions, values);
                     }
                 }
                 for statement in &mut case.statements {
-                    stmt(statement, substitutions);
+                    if let Stmt::VarDecl {
+                        name,
+                        source_name,
+                        ty,
+                        ..
+                    } = statement
+                    {
+                        insert_value_binding(&mut case_values, name, source_name, ty);
+                    }
+                    stmt(statement, substitutions, &case_values);
                 }
             }
         }
@@ -289,30 +425,47 @@ fn stmt(statement: &mut Stmt, substitutions: &Substitutions) {
             catches,
             finally_block,
         } => {
+            let mut resource_values = values.clone();
             for statement in resources {
-                stmt(statement, substitutions);
+                if let Stmt::VarDecl {
+                    name,
+                    source_name,
+                    ty,
+                    ..
+                } = statement
+                {
+                    insert_value_binding(&mut resource_values, name, source_name, ty);
+                }
+                stmt(statement, substitutions, &resource_values);
             }
-            block(body, substitutions);
+            block(body, substitutions, &resource_values);
             for catch in catches {
                 for caught in &mut catch.types {
                     ty(caught, substitutions);
                 }
-                block(&mut catch.body, substitutions);
+                let mut catch_values = values.clone();
+                let caught = catch
+                    .types
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| JavaType::Unknown(catch.name.clone()));
+                insert_value_binding(&mut catch_values, &catch.name, &catch.source_name, &caught);
+                block(&mut catch.body, substitutions, &catch_values);
             }
             if let Some(body) = finally_block {
-                block(body, substitutions);
+                block(body, substitutions, values);
             }
         }
-        Stmt::LocalType(declaration) => declaration_types(declaration, substitutions),
+        Stmt::LocalType(declaration) => declaration_types(declaration, substitutions, values),
         Stmt::ConstructorInvocation { args, resolved, .. } => {
             for value in args {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
             if let Some(call) = resolved {
                 constructor(call, substitutions);
             }
         }
-        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => block(body, substitutions),
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => block(body, substitutions, values),
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
@@ -328,14 +481,14 @@ fn constructor(call: &mut ResolvedConstructor, substitutions: &Substitutions) {
     }
 }
 
-fn expr(value: &mut Expr, substitutions: &Substitutions) {
+fn expr(value: &mut Expr, substitutions: &Substitutions, values: &crate::types::TypeEnv) {
     match value {
         Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
-            expr(receiver, substitutions)
+            expr(receiver, substitutions, values)
         }
         Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
-            expr(left, substitutions);
-            expr(right, substitutions);
+            expr(left, substitutions, values);
+            expr(right, substitutions, values);
         }
         Expr::ArrayCreation {
             element_type,
@@ -344,17 +497,17 @@ fn expr(value: &mut Expr, substitutions: &Substitutions) {
         } => {
             ty(element_type, substitutions);
             for value in dimensions {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
-            if let Some(values) = initializer {
-                for value in values {
-                    expr(value, substitutions);
+            if let Some(elements) = initializer {
+                for value in elements {
+                    expr(value, substitutions, values);
                 }
             }
         }
-        Expr::ArrayInitializer(values) => {
-            for value in values {
-                expr(value, substitutions);
+        Expr::ArrayInitializer(elements) => {
+            for value in elements {
+                expr(value, substitutions, values);
             }
         }
         Expr::Ternary {
@@ -362,32 +515,36 @@ fn expr(value: &mut Expr, substitutions: &Substitutions) {
             then_expr,
             else_expr,
         } => {
-            expr(condition, substitutions);
-            expr(then_expr, substitutions);
-            expr(else_expr, substitutions);
+            expr(condition, substitutions, values);
+            expr(then_expr, substitutions, values);
+            expr(else_expr, substitutions, values);
         }
         Expr::Switch { selector, cases } => {
-            expr(selector, substitutions);
+            expr(selector, substitutions, values);
             for case in cases {
                 for label in &mut case.labels {
                     if let SwitchLabel::Expr(value) = label {
-                        expr(value, substitutions);
+                        expr(value, substitutions, values);
                     }
                 }
-                expr(&mut case.value, substitutions);
+                expr(&mut case.value, substitutions, values);
             }
         }
         Expr::Call {
             receiver,
+            type_args,
             args,
             resolved,
             ..
         } => {
+            for argument in type_args {
+                ty(argument, substitutions);
+            }
             if let Some(receiver) = receiver {
-                expr(receiver, substitutions);
+                expr(receiver, substitutions, values);
             }
             for value in args {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
             if let Some(call) = resolved {
                 ty(&mut call.return_type, substitutions);
@@ -410,14 +567,15 @@ fn expr(value: &mut Expr, substitutions: &Substitutions) {
         } => {
             ty(declared, substitutions);
             if let Some(value) = qualifier {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
             for value in args {
-                expr(value, substitutions);
+                expr(value, substitutions, values);
             }
             if let Some(body) = body {
+                let anonymous_values = value_scope_for_members(body, values);
                 for item in body {
-                    member(item, substitutions);
+                    member(item, substitutions, &anonymous_values);
                 }
             }
             if let Some(call) = resolved {
@@ -434,22 +592,41 @@ fn expr(value: &mut Expr, substitutions: &Substitutions) {
             ..
         } => {
             ty(declared, substitutions);
-            expr(value, substitutions);
+            expr(value, substitutions, values);
         }
         Expr::Lambda { params, body } => {
-            for param in params {
+            for param in params.iter_mut() {
                 if let Some(declared) = &mut param.ty {
                     ty(declared, substitutions);
                 }
             }
+            let mut lambda_values = values.clone();
+            for param in params.iter() {
+                let ty = param
+                    .ty
+                    .clone()
+                    .unwrap_or_else(|| JavaType::Unknown(param.name.clone()));
+                insert_value_binding(&mut lambda_values, &param.name, &param.source_name, &ty);
+            }
+            let values = &lambda_values;
             match body {
-                LambdaBody::Expr(value) => expr(value, substitutions),
-                LambdaBody::Block(body) => block(body, substitutions),
+                LambdaBody::Expr(value) => expr(value, substitutions, values),
+                LambdaBody::Block(body) => block(body, substitutions, values),
             }
         }
-        Expr::MethodReference { target, .. } => {
-            if let Some(declared) = substitutions.get(target) {
-                *target = java_type_text(declared);
+        Expr::MethodReference {
+            target, receiver, ..
+        } => {
+            if let Some(receiver) = receiver {
+                expr(receiver, substitutions, values);
+            }
+            if values
+                .method_reference_value_binding(target, true)
+                .is_none()
+            {
+                if let Some(declared) = substitutions.get(target) {
+                    *target = java_type_text(declared);
+                }
             }
         }
         Expr::ClassLiteral(declared) => ty(declared, substitutions),

@@ -3,6 +3,10 @@
 // loans; a projection's wrapper address is not a new Java identity.
 // Payload access policy stays explicit in T: immutable operation tables need
 // no loan, while mutable Java state uses RefCell<T> or Mutex<T>.
+// Reference copies name Rust's Clone implementation explicitly: a generated
+// Java interface can itself declare clone() for Rc/Arc-backed implementors.
+// Neither associated Rc::clone nor method syntax is an unambiguous Rust copy
+// in that scope; typed UFCS also preserves the concrete type before Any erasure.
 
 struct JavaLocalNativeIdentity {
     pointer: usize,
@@ -31,7 +35,9 @@ pub struct JavaLocalNativeWeak<T> {
 impl<T> Clone for JavaLocalNativeWeak<T> {
     fn clone(&self) -> Self {
         Self {
-            allocation: self.allocation.clone(),
+            allocation: <std::rc::Weak<JavaLocalNativeAllocation<T>> as std::clone::Clone>::clone(
+                &self.allocation,
+            ),
         }
     }
 }
@@ -47,7 +53,9 @@ impl<T> JavaLocalNativeWeak<T> {
 impl<T> Clone for JavaLocalNativeRef<T> {
     fn clone(&self) -> Self {
         Self {
-            allocation: std::rc::Rc::clone(&self.allocation),
+            allocation: <std::rc::Rc<JavaLocalNativeAllocation<T>> as std::clone::Clone>::clone(
+                &self.allocation,
+            ),
         }
     }
 }
@@ -66,7 +74,7 @@ impl<T> JavaLocalNativeRef<T> {
                 value,
                 identity: Some(JavaLocalNativeIdentity {
                     pointer: std::rc::Rc::as_ptr(source) as usize,
-                    _owner: source.clone(),
+                    _owner: <std::rc::Rc<S> as std::clone::Clone>::clone(source),
                 }),
             }),
         }
@@ -86,8 +94,12 @@ impl<T> JavaLocalNativeRef<T> {
     /// identity and lifetime, never an element conversion or a snapshot.
     pub fn projected<S: 'static>(source: &JavaLocalNativeRef<S>, value: T) -> Self {
         let owner = match &source.allocation.identity {
-            Some(identity) => std::rc::Rc::clone(&identity._owner),
-            None => source.allocation.clone() as std::rc::Rc<dyn std::any::Any>,
+            Some(identity) => {
+                <std::rc::Rc<dyn std::any::Any> as std::clone::Clone>::clone(&identity._owner)
+            }
+            None => <std::rc::Rc<JavaLocalNativeAllocation<S>> as std::clone::Clone>::clone(
+                &source.allocation,
+            ) as std::rc::Rc<dyn std::any::Any>,
         };
         Self {
             allocation: std::rc::Rc::new(JavaLocalNativeAllocation {
@@ -138,7 +150,9 @@ pub struct JavaSyncNativeRef<T> {
 impl<T> Clone for JavaSyncNativeRef<T> {
     fn clone(&self) -> Self {
         Self {
-            allocation: std::sync::Arc::clone(&self.allocation),
+            allocation: <std::sync::Arc<JavaSyncNativeAllocation<T>> as std::clone::Clone>::clone(
+                &self.allocation,
+            ),
         }
     }
 }
@@ -153,7 +167,7 @@ impl<T> JavaSyncNativeRef<T> {
                 value,
                 identity: Some(JavaSyncNativeIdentity {
                     pointer: std::sync::Arc::as_ptr(source) as usize,
-                    _owner: source.clone(),
+                    _owner: <std::sync::Arc<S> as std::clone::Clone>::clone(source),
                 }),
             }),
         }
@@ -170,8 +184,14 @@ impl<T> JavaSyncNativeRef<T> {
 
     pub fn projected<S: Send + Sync + 'static>(source: &JavaSyncNativeRef<S>, value: T) -> Self {
         let owner = match &source.allocation.identity {
-            Some(identity) => std::sync::Arc::clone(&identity._owner),
-            None => source.allocation.clone() as std::sync::Arc<dyn std::any::Any + Send + Sync>,
+            Some(identity) => {
+                <std::sync::Arc<dyn std::any::Any + Send + Sync> as std::clone::Clone>::clone(
+                    &identity._owner,
+                )
+            }
+            None => <std::sync::Arc<JavaSyncNativeAllocation<S>> as std::clone::Clone>::clone(
+                &source.allocation,
+            ) as std::sync::Arc<dyn std::any::Any + Send + Sync>,
         };
         Self {
             allocation: std::sync::Arc::new(JavaSyncNativeAllocation {
