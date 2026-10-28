@@ -863,6 +863,8 @@ pub(crate) enum NativeCollectionExtendArgPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCollectionStaticMethod {
+    SpliteratorUnknownSize,
+    StreamFromSpliterator,
     ArraysAsList,
     ArraysEquals,
     ArraysDeepEquals,
@@ -902,6 +904,7 @@ impl NativeCollectionStaticMethod {
         types: &TypeEnv,
     ) -> bool {
         match self {
+            Self::SpliteratorUnknownSize | Self::StreamFromSpliterator => index == 0,
             Self::EnumSetOf => index < args.len(),
             Self::EnumSetAllOf => index == 0,
             Self::ArraysAsList if index == 0 && args.len() == 1 => {
@@ -927,6 +930,7 @@ impl NativeCollectionStaticMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaInstanceMethod {
+    EnumName,
     StringLen,
     StringIsEmpty,
     StringTrim,
@@ -1085,6 +1089,8 @@ pub enum NativeJavaStaticMethod {
         primitive: PrimitiveType,
     },
     CharacterToChars,
+    CharacterToString,
+    CharacterIsWhitespace,
     CharacterPredicate {
         java_name: &'static str,
         rust_method: &'static str,
@@ -1322,6 +1328,11 @@ pub fn native_collection_lowered_type(
 /// of conservative Java effects attached to its spelling or declaring owner.
 pub(crate) fn intrinsic_call_result_abi(target: &CallTargetPlan<'_>) -> Option<ResultAbi> {
     match target {
+        CallTargetPlan::NativeCollectionStatic {
+            method:
+                NativeCollectionStaticMethod::SpliteratorUnknownSize
+                | NativeCollectionStaticMethod::StreamFromSpliterator,
+        } => Some(ResultAbi::ResultWrapped),
         CallTargetPlan::NativeJavaInstance {
             method:
                 NativeJavaInstanceMethod::VirtualObjectToString
@@ -1332,6 +1343,7 @@ pub(crate) fn intrinsic_call_result_abi(target: &CallTargetPlan<'_>) -> Option<R
             method:
                 NativeJavaInstanceMethod::ObjectToString
                 | NativeJavaInstanceMethod::SourceObjectToString
+                | NativeJavaInstanceMethod::EnumName
                 | NativeJavaInstanceMethod::StringToString,
             ..
         } => Some(ResultAbi::Plain),
@@ -1480,6 +1492,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 NativeJavaStaticMethod::BooleanParseBoolean
                 | NativeJavaStaticMethod::FloatingIsNaN
                 | NativeJavaStaticMethod::CharacterPredicate { .. }
+                | NativeJavaStaticMethod::CharacterIsWhitespace
                 | NativeJavaStaticMethod::ObjectsEquals
                 | NativeJavaStaticMethod::ObjectsNonNull
                 | NativeJavaStaticMethod::ObjectsIsNull,
@@ -1513,6 +1526,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         CallTargetPlan::NativeJavaInstance {
             method:
                 NativeJavaInstanceMethod::StringTrim
+                | NativeJavaInstanceMethod::EnumName
                 | NativeJavaInstanceMethod::StringToLowercase
                 | NativeJavaInstanceMethod::StringToUppercase
                 | NativeJavaInstanceMethod::StringToString
@@ -1533,7 +1547,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaStaticMethod::ObjectsToString
                 | NativeJavaStaticMethod::IntegralFormat { .. }
                 | NativeJavaStaticMethod::IntegralToString { .. }
-                | NativeJavaStaticMethod::FloatingToString { .. },
+                | NativeJavaStaticMethod::FloatingToString { .. }
+                | NativeJavaStaticMethod::CharacterToString,
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
         ))),
@@ -2618,6 +2633,9 @@ pub enum NativeCollectionNewTarget {
         source_kind: crate::stdlib::JavaCollectionKind,
     },
     FromSingleArg {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    CaseInsensitiveStringMap {
         kind: crate::stdlib::JavaCollectionKind,
     },
     PriorityQueueComparatorUnsupported {
@@ -5159,6 +5177,27 @@ pub(crate) fn plan_native_collection_static_call<'a>(
         .static_type_alias(&written_owner)
         .unwrap_or(&written_owner);
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    for (owner, matches_method, method) in [
+        (
+            "Spliterators",
+            matches!(name, "spliteratorUnknownSize" | "spliterator_unknown_size"),
+            NativeCollectionStaticMethod::SpliteratorUnknownSize,
+        ),
+        (
+            "StreamSupport",
+            name == "stream",
+            NativeCollectionStaticMethod::StreamFromSpliterator,
+        ),
+    ] {
+        if matches_method
+            && native_static_owner_matches(receiver_name, owner)
+            && !java_type_owner_is_parsed_source(receiver_name, types, facts)
+            && !resolved_static_owner_shadows_native_owner(resolved, receiver_name, owner, types)
+            && !static_type_alias_shadows_native_owner(receiver_name, owner, types)
+        {
+            return Some(CallTargetPlan::NativeCollectionStatic { method });
+        }
+    }
     if native_static_owner_matches(receiver_name, "Arrays") {
         if java_type_owner_is_parsed_source(receiver_name, types, facts)
             || resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Arrays", types)
@@ -5626,6 +5665,14 @@ fn plan_native_java_receiver_call<'a>(
         return Some(CallTargetPlan::NativeJavaInstance { receiver, method });
     }
     let method = match (&effective_receiver_ty, name) {
+        (JavaType::Named { name: owner, .. }, "name")
+            if arg_count == 0
+                && crate::stdlib::canonical_external_receiver_type_key(owner) == "Enum"
+                && !crate::effective_facts::EffectiveFacts::new(facts)
+                    .parsed_source_controls_native_carrier(&effective_receiver_ty) =>
+        {
+            NativeJavaInstanceMethod::EnumName
+        }
         (JavaType::Named { name, .. } | JavaType::Unknown(name), "toString" | "to_string")
             if arg_count == 0 && platform_type_has_direct_object_to_string(name) =>
         {
@@ -6299,6 +6346,8 @@ pub(crate) fn native_static_owner_matches(owner: &str, native_owner: &str) -> bo
 
 fn native_static_owner_qualified_names(native_owner: &str) -> &'static [&'static str] {
     match native_owner {
+        "Spliterators" => &["java.util.Spliterators"],
+        "StreamSupport" => &["java.util.stream.StreamSupport"],
         "Arrays" => &["java.util.Arrays"],
         "Collections" => &["java.util.Collections"],
         "Comparator" => &["java.util.Comparator"],
@@ -6536,6 +6585,7 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         },
         ("Character", "valueOf" | "value_of") => NativeJavaStaticMethod::CharacterValueOf,
         ("Character", "toChars" | "to_chars") => NativeJavaStaticMethod::CharacterToChars,
+        ("Character", "toString" | "to_string") => NativeJavaStaticMethod::CharacterToString,
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
         ("Double" | "Float", "compare") => NativeJavaStaticMethod::FloatingCompare {
             primitive: if receiver_simple == "Float" { PrimitiveType::Float } else { PrimitiveType::Double },
@@ -6543,7 +6593,7 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Character", "isDigit" | "is_digit") => character_predicate("isDigit", "is_ascii_digit"),
         ("Character", "isLetter" | "is_letter") => character_predicate("isLetter", "is_alphabetic"),
         ("Character", "isWhitespace" | "is_whitespace") => {
-            character_predicate("isWhitespace", "is_whitespace")
+            NativeJavaStaticMethod::CharacterIsWhitespace
         }
         ("Character", "toUpperCase" | "to_upper_case") => {
             character_transform("toUpperCase", "to_ascii_uppercase")
@@ -7411,6 +7461,14 @@ pub(crate) fn plan_native_collection_constructor_for_args(
             } else {
                 Some(NativeCollectionNewTarget::PriorityQueueComparator { kind })
             }
+        }
+        [Expr::FieldAccess(owner, field)]
+            if kind == crate::stdlib::JavaCollectionKind::SortedMap
+                && field == "CASE_INSENSITIVE_ORDER"
+                && native_utility_static_owner(Some(owner), None, types, facts, "String")
+                    .is_some() =>
+        {
+            Some(NativeCollectionNewTarget::CaseInsensitiveStringMap { kind })
         }
         [_] => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
         _ => None,
@@ -8986,6 +9044,35 @@ pub(crate) fn native_cursor_returned_child(
     }
 }
 
+pub(crate) fn native_class_enum_constants_element(
+    receiver_ty: &JavaType,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    if arg_count != 0 || !matches!(name, "getEnumConstants" | "get_enum_constants") {
+        return None;
+    }
+    let ty =
+        crate::types::optional_element_type(receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    let JavaType::Named { name: owner, args } = &ty else {
+        return None;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(owner) != "Class"
+        || java_type_owner_is_parsed_source(owner, types, facts)
+    {
+        return None;
+    }
+    Some(match args.first() {
+        Some(JavaType::Wildcard(None)) | None => JavaType::Named {
+            name: "java.lang.Object".into(),
+            args: vec![],
+        },
+        Some(argument) => crate::types::generic_read_type_preserving_optional(argument),
+    })
+}
+
 pub(crate) fn native_list_cursor_written_child(
     receiver_ty: &JavaType,
     name: &str,
@@ -9984,6 +10071,41 @@ pub fn plan_constructor_arguments(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn case_insensitive_map_factory_requires_the_platform_comparator_constant() {
+        use super::*;
+        let ty = crate::parser::parse_hierarchy_type("java.util.TreeMap<String, Integer>");
+        let comparator = Expr::FieldAccess(
+            Box::new(Expr::Var("String".into())),
+            "CASE_INSENSITIVE_ORDER".into(),
+        );
+        let facts = FactSet::default();
+        let mut types = TypeEnv::new();
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(&ty, &[comparator.clone()], &types, &facts),
+            Some(NativeCollectionNewTarget::CaseInsensitiveStringMap { .. })
+        ));
+        types.insert_local(
+            "String",
+            JavaType::Named {
+                name: "CustomComparatorOwner".into(),
+                args: vec![],
+            },
+        );
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(&ty, &[comparator], &types, &facts),
+            Some(NativeCollectionNewTarget::FromSingleArg { .. })
+        ));
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(
+                &ty,
+                &[Expr::Var("customComparator".into())],
+                &TypeEnv::new(),
+                &facts
+            ),
+            Some(NativeCollectionNewTarget::FromSingleArg { .. })
+        ));
+    }
     #[test]
     fn qualified_optional_dispatch_uses_the_receiver_owner_not_a_leaf_binding() {
         use super::*;

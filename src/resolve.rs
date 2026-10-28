@@ -192,6 +192,30 @@ impl SourceSymbols {
             .map(|field| (field.declaring_type, field.java_name, field.ty))
     }
 
+    pub(crate) fn source_lexical_field_identity(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Option<(String, String, JavaType)> {
+        let canonical = crate::parser::to_snake_case(name);
+        let mut static_context = false;
+        for scope in self.symbols.lexical_type_scope(owner) {
+            if let Some(field) =
+                self.symbols
+                    .fields_for_hierarchy(&scope)
+                    .into_iter()
+                    .find(|field| {
+                        field_name_matches(field, name, &canonical)
+                            && (!static_context || field.is_static)
+                    })
+            {
+                return Some((field.declaring_type, field.java_name, field.ty));
+            }
+            static_context |= self.symbols.type_is_static(&scope);
+        }
+        None
+    }
+
     pub(crate) fn source_field_identity_for_receiver(
         &self,
         receiver: &JavaType,
@@ -5189,6 +5213,19 @@ fn resolve_expr_calls(
                     )
                 })
                 .collect::<Vec<_>>();
+            if let Some(call) = receiver.as_deref().and_then(|receiver| {
+                native_iterator_factory_call(
+                    receiver,
+                    name,
+                    &arg_types,
+                    symbols,
+                    env,
+                    external_facts,
+                )
+            }) {
+                *resolved = Some(call);
+                return;
+            }
             if receiver.is_none()
                 || receiver
                     .as_deref()
@@ -6938,6 +6975,92 @@ fn infer_stream_map_return_type(
             name: "Stream".to_string(),
             args: vec![mapped],
         },
+    })
+}
+
+fn native_iterator_factory_call(
+    receiver: &Expr,
+    name: &str,
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ResolvedCall> {
+    use crate::call_plan::{CallTargetPlan, NativeCollectionStaticMethod};
+    if arg_types.len() != 2 {
+        return None;
+    }
+    let written = match receiver {
+        Expr::Var(name) => env.static_type_alias(name).unwrap_or(name).to_string(),
+        receiver => crate::stdlib::qualified_static_owner_java_name(receiver)?,
+    };
+    if symbols.source_type_kind(&written).is_some() {
+        return None;
+    }
+    let CallTargetPlan::NativeCollectionStatic { method } =
+        crate::call_plan::plan_native_collection_static_call(
+            Some(receiver),
+            name,
+            None,
+            env,
+            facts,
+        )?
+    else {
+        return None;
+    };
+    let input =
+        crate::types::optional_element_type(&arg_types[0]).unwrap_or_else(|| arg_types[0].clone());
+    let (owner, input_name, output_name, second) = match method {
+        NativeCollectionStaticMethod::SpliteratorUnknownSize => (
+            "java.util.Spliterators",
+            "java.util.Iterator",
+            "java.util.Spliterator",
+            PrimitiveType::Int,
+        ),
+        NativeCollectionStaticMethod::StreamFromSpliterator => (
+            "java.util.stream.StreamSupport",
+            "java.util.Spliterator",
+            "java.util.stream.Stream",
+            PrimitiveType::Boolean,
+        ),
+        _ => return None,
+    };
+    let key = crate::stdlib::canonical_external_receiver_type_key(input_name);
+    let short_key = input_name.rsplit('.').next()?;
+    let element = match &input {
+        JavaType::Named { name, args }
+            if (crate::stdlib::canonical_external_receiver_type_key(name) == key
+                || crate::stdlib::canonical_external_receiver_type_key(name) == short_key)
+                && args.len() == 1
+                && symbols.source_type_kind(name).is_none() =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    }
+    .or_else(|| symbols.source_single_arg_supertype_arg(&input, input_name))
+    .or_else(|| {
+        (symbols.source_type_kind(short_key).is_none())
+            .then(|| symbols.source_single_arg_supertype_arg(&input, short_key))
+            .flatten()
+    })?;
+    Some(ResolvedCall {
+        declaring_type: owner.into(),
+        rust_name: crate::parser::to_snake_case(name),
+        kind: CallKind::Static,
+        type_args: vec![element.clone()],
+        return_type: JavaType::Named {
+            name: output_name.into(),
+            args: vec![element.clone()],
+        },
+        arg_target_types: vec![
+            JavaType::Named {
+                name: input_name.into(),
+                args: vec![element],
+            },
+            JavaType::Primitive(second),
+        ],
+        arg_coercions: Vec::new(),
     })
 }
 
@@ -11971,6 +12094,39 @@ fn collect_assignment_target_name(expr: &Expr, out: &mut HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lexical_field_identity_stops_at_static_enclosing_boundaries() {
+        let parsed = crate::parser::parse_java_source(
+            "class Lexical { String[] values; static String[] shared; static class Middle { String[] own; class Inner {} } }",
+        );
+        let resolved = super::resolve_program(&parsed.program, parsed.diagnostics);
+        let symbols = super::source_symbols_from_program(&resolved.program);
+        assert!(
+            symbols
+                .source_lexical_field_identity("Lexical.Middle.Inner", "values")
+                .is_none()
+        );
+        assert_eq!(
+            symbols
+                .source_lexical_field_identity("Lexical.Middle.Inner", "own")
+                .unwrap()
+                .0,
+            "Lexical.Middle"
+        );
+        assert_eq!(
+            symbols
+                .source_lexical_field_identity("Lexical.Middle.Inner", "shared")
+                .unwrap()
+                .0,
+            "Lexical"
+        );
+        assert!(
+            symbols
+                .source_field_identity("Lexical.Middle.Inner", "shared")
+                .is_none(),
+            "qualified member lookup must not become lexical lookup"
+        );
+    }
     #[test]
     fn source_sam_value_projections_preserve_symbolic_and_inherited_binders() {
         let parsed = crate::parser::parse_java_source(

@@ -89,7 +89,7 @@ class Use {
 fn reference_cast_copies_the_nullable_value_domain() {
     assert_eq!(Use::run().unwrap(), 3);
     assert_eq!(Use::cast(None).unwrap(), None);
-    assert_eq!(Use::cast(Some(Box::new("ok".to_string()))).unwrap(), Some("ok".to_string()));
+    assert_eq!(Use::cast(Some(Box::new(JavaString::intern_literal("ok")))).unwrap(), Some(JavaString::intern_literal("ok")));
 }
 "#,
         }],

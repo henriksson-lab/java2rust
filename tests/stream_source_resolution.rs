@@ -230,7 +230,7 @@ public class Use {
 "#,
             ),
         ],
-        "fn main() { assert_eq!(translated::Use::probe(), 4); }",
+        "fn main() { assert_eq!(translated::Use::probe().unwrap(), 4); }",
         "external-api values neutral.Bucket getter read-only non-null args=0 return=Set<Object>\nexternal-api values Bucket getter read-only non-null args=0 return=Set<Object>\n",
     );
 }
@@ -277,10 +277,12 @@ class Use {
             tests: r#"
 #[test]
 fn typed_source_producer_feeds_the_typed_callback() {
-    assert_eq!(Use::run(), 4);
-    assert_eq!(Use::reused(), 4);
+    assert_eq!(Use::run().unwrap(), 4);
+    assert_eq!(Use::reused().unwrap(), 4);
     struct NonClone;
-    let _bucket = Bucket::new(vec![NonClone]);
+    let _bucket = Bucket::new(std::rc::Rc::new(std::cell::RefCell::new(
+        JavaNativeCollection::list(vec![NonClone], true)
+    )));
 }
 "#,
         }],

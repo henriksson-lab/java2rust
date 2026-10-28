@@ -268,7 +268,7 @@ fn type_emission_for_with_facts_and_exceptions(
             let binary_name = crate::java_naming::source_binary_class_name(ty, None);
             let identity_count = variants.len();
             let mut anonymous_index = 0;
-            let runtime_class_arms = variants
+            let runtime_classes = variants
                 .iter()
                 .zip(crate::constructor_plan::enum_constant_fields(ty))
                 .map(|(variant, field)| {
@@ -279,13 +279,93 @@ fn type_emission_for_with_facts_and_exceptions(
                         } else {
                             binary_name.clone()
                         };
-                    format!("Self::{variant} => JavaClass::literal({class_name:?}),")
+                    (variant, class_name)
+                })
+                .collect::<Vec<_>>();
+            let runtime_class_arms = runtime_classes
+                .iter()
+                .map(|(variant, class_name)| {
+                    let factory = if class_name == &binary_name {
+                        ".with_enum_metadata::<Self>()"
+                    } else {
+                        ""
+                    };
+                    format!("Self::{variant} => JavaClass::literal({class_name:?}){factory},")
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            let reference_class_arms = runtime_classes
+                .iter()
+                .map(|(variant, class_name)| format!("Self::{variant} => {class_name:?},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let has_constant_display_override = crate::constructor_plan::enum_constant_fields(ty).any(|field| {
+                matches!(&field.initializer, Some(Expr::New { body: Some(members), .. })
+                    if members.iter().any(|member| matches!(member, Member::Method(method)
+                        if crate::java_signature::source_method_rust_name(method) == "to_string" && method.params.is_empty())))
+            });
+            let enum_display = if has_constant_display_override {
+                "Err(JavaException::new(\"UnsupportedOperationException\", \"Source enum constant-specific toString dispatch requires a selected override\"))".to_string()
+            } else if let Some(method) = ty.members.iter().find_map(|member| match member {
+                Member::Method(method)
+                    if !method.modifiers.contains(&Modifier::Static)
+                        && method.params.is_empty()
+                        && crate::java_signature::source_method_rust_name(method)
+                            == "to_string" =>
+                {
+                    Some(method)
+                }
+                _ => None,
+            }) {
+                let mut call = format!("{rust_enum_name}::to_string(self)");
+                if exceptions.method_plan(ty, method).wrap_returns_in_result() {
+                    call.push('?');
+                }
+                if signatures
+                    .method_signature(ty, method)
+                    .and_then(|signature| signature.return_shape())
+                    .is_some_and(|shape| shape.optional_element_type().is_some())
+                {
+                    format!("Ok({call})")
+                } else {
+                    format!("Ok(Some({call}))")
+                }
+            } else {
+                "Ok(Some(java_enum_name_string(self.name())))".to_string()
+            };
+            let reflection_values = format!(
+                "{}{}Some(vec![{values}])",
+                if crate::class_initialization::requires_initialization(ty) {
+                    "Self::__java_class_init(); "
+                } else {
+                    ""
+                },
+                if runtime_initialized {
+                    "if !Self::__java_values_ready() { return None; } "
+                } else {
+                    ""
+                }
+            );
+            let source_enum_reference_impl = format!(
+                r#"
+impl JavaSourceEnum for {rust_enum_name} {{
+    fn java_enum_declaring_class_name() -> &'static str {{ {binary_name:?} }}
+    fn java_enum_runtime_class_name(&self) -> &'static str {{ match self {{ {reference_class_arms} }} }}
+    fn java_enum_from_ordinal(ordinal: i32) -> Self {{ match ordinal {{ {reference_ordinal_arms} _ => panic!("invalid canonical source enum ordinal"), }} }}
+    fn java_enum_reflection_values() -> Option<Vec<Self>> {{ {reflection_values} }}
+    fn java_enum_to_string_result(&self) -> Result<Option<JavaLogicalString>, JavaException> {{ {enum_display} }}
+}}
+"#,
+                reference_ordinal_arms = variants
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, variant)| format!("{ordinal} => Self::{variant},"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             let enum_object_methods = format!(
                 r#"
-    pub fn get_declaring_class(&self) -> JavaClass<Self> {{ JavaClass::literal({binary_name:?}) }}
+    pub fn get_declaring_class(&self) -> JavaClass<Self> {{ JavaClass::literal({binary_name:?}).with_enum_metadata::<Self>() }}
     pub fn get_class(&self) -> JavaClass<Self> {{ match self {{ {runtime_class_arms} }} }}
     pub fn hash_code(&self) -> i32 {{ JavaReferenceIdentity::java_reference_identity(self) as usize as i32 }}
 "#
@@ -320,7 +400,7 @@ impl JavaObjectEquals for {rust_enum_name} {{
                 "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ {values_body} }}\n\n{enum_name_lookup}    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n{enum_compare_to}{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             );
             let enum_item = format!(
-                "{enum_item}\nimpl {rust_enum_name} {{\n{enum_object_methods}\n}}\n{enum_object_protocols}"
+                "{enum_item}\nimpl {rust_enum_name} {{\n{enum_object_methods}\n}}\n{enum_object_protocols}\n{source_enum_reference_impl}"
             );
             RepresentationTypeEmission::RawRustItem(format!(
                 "{enum_item}\n\nimpl JavaAppendValue for {rust_enum_name} {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ self.name().to_string().into() }}\n}}\n\nimpl JavaAppendValue for &{rust_enum_name} {{\n    fn into_java_append_string(self) -> JavaUtf16 {{ self.name().to_string().into() }}\n}}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"

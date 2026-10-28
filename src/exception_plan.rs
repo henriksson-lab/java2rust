@@ -68,6 +68,8 @@ pub enum FallibilityReason {
     ClassCastThrow,
     /// Array reads and writes can fail bounds checks even for non-null arrays.
     ArrayBoundsThrow,
+    /// A store through an erased reference-array view checks its actual component.
+    ArrayStoreThrow,
     /// Native array-copy factories have checked size/range/null failures.
     NativeArrayCopyThrow,
     /// Shared native collections can reject mutation or checked list indices.
@@ -911,6 +913,19 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         facts,
         signatures,
         representations,
+        |expr| matches!(expr, Expr::ArrayAccess(..) | Expr::Binary { .. }),
+        None,
+        block_has_unhandled_erased_array_store,
+    ) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry.reasons.push(FallibilityReason::ArrayStoreThrow);
+    }
+    for key in shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
         |expr| matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "copyOf" | "copy_of" | "copyOfRange" | "copy_of_range")),
         None,
         block_has_unhandled_native_array_copy_effect,
@@ -969,7 +984,7 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             facts,
             signatures,
             representations,
-            |_| false,
+            |expr| matches!(expr, Expr::Call { name, .. } if name == "forEach"),
             Some(|body| !enhanced_for_iterable_sites(body).is_empty()),
             block_has_unhandled_retained_iteration,
         ) {
@@ -982,7 +997,7 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             facts,
             signatures,
             representations,
-            |expr| matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "stream" | "parallelStream" | "parallel_stream")),
+            |expr| matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "stream" | "parallelStream" | "parallel_stream" | "of" | "map" | "filter" | "count" | "collect" | "anyMatch" | "any_match" | "allMatch" | "all_match" | "forEach" | "forEachOrdered" | "iterator")),
             None,
             block_has_unhandled_retained_stream,
         ) {
@@ -1076,6 +1091,20 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             (
                 block_has_unhandled_array_bounds(body),
                 FallibilityReason::ArrayBoundsThrow,
+            ),
+            (
+                block_has_unhandled_erased_array_store(
+                    body,
+                    &cast_env,
+                    crate::expr_shape::ExprShapeContext::new(
+                        signatures,
+                        representations,
+                        Some(facts),
+                    ),
+                    &[],
+                    signatures.unwrap_or(&fallback_signatures),
+                ),
+                FallibilityReason::ArrayStoreThrow,
             ),
             (
                 block_has_unhandled_checked_cast(
@@ -1902,6 +1931,16 @@ fn call_is_checked_native_arithmetic(
     name: &str,
     arg_count: usize,
 ) -> bool {
+    if arg_count == 1
+        && matches!(name, "toString" | "to_string")
+        && receiver.is_some_and(|receiver| match receiver {
+            Expr::Var(owner) => matches!(owner.as_str(), "Character" | "java.lang.Character"),
+            Expr::FieldAccess(_, owner) => owner == "Character",
+            _ => false,
+        })
+    {
+        return true;
+    }
     (matches!(name, "toIntExact" | "to_int_exact") && arg_count == 1
         || matches!(
             name,
@@ -2364,6 +2403,25 @@ fn block_has_unhandled_retained_iteration(
         "NullPointerException",
     ] {
         let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+            if let Expr::Call {
+                receiver: Some(receiver),
+                name,
+                args,
+                ..
+            } = expr
+                && name == "forEach"
+                && matches!(args.as_slice(), [Expr::Lambda { params, .. }] if params.len() == 2)
+            {
+                let shape = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
+                if shape.native_allocation.shared()
+                    && crate::effective_facts::EffectiveFacts::new(facts)
+                        .retained_native_map_kind(&shape.java_ty)
+                        .is_some()
+                {
+                    return thrown != "NullPointerException"
+                        || shape.optional_element_type().is_some();
+                }
+            }
             if !sites.contains(&(expr as *const Expr)) {
                 return false;
             }
@@ -2408,6 +2466,7 @@ fn block_has_unhandled_retained_stream(
         "ConcurrentModificationException",
         "NoSuchElementException",
         "NullPointerException",
+        "IllegalStateException",
     ]
     .into_iter()
     .any(|thrown| {
@@ -3022,6 +3081,60 @@ fn block_has_unhandled_checked_identity_null(
     )
 }
 
+fn block_has_unhandled_erased_array_store(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let mut stores = HashSet::new();
+    crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| {
+        if let Stmt::Assign {
+            target: Expr::ArrayAccess(array, _),
+            ..
+        } = stmt
+        {
+            stores.insert(array.as_ref() as *const Expr);
+        }
+    });
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |site| {
+            if stores.contains(&(site as *const Expr))
+                && crate::java_reference_array_plan::erased_array_cast_source(site, env, ctx)
+                    .is_some()
+            {
+                found = true;
+            }
+            if let Expr::Binary {
+                op: crate::java_ir::BinaryOp::Assign,
+                left,
+                ..
+            } = site
+                && let Expr::ArrayAccess(array, _) = left.as_ref()
+                && crate::java_reference_array_plan::erased_array_cast_source(array, env, ctx)
+                    .is_some()
+            {
+                found = true;
+            }
+        });
+        found
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx))
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &|catches| catches_intrinsic_exception(catches, "ArrayStoreException"),
+            learn: Some(&learn),
+        },
+    )
+}
+
 fn block_has_unhandled_checked_cast(
     body: &Block,
     env: &crate::expr_shape::ShapeEnv,
@@ -3141,6 +3254,12 @@ fn nullable_receiver_throw_callables(
                             )
                         });
                     if callback_throws
+                        || external_super_constructor_has_nullable_required_argument(
+                            ty,
+                            constructor,
+                            signatures,
+                            facts,
+                        )
                         || (!nullable_params.is_empty()
                             && constructor.body.as_ref().is_some_and(|body| {
                                 block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
@@ -3154,6 +3273,61 @@ fn nullable_receiver_throw_callables(
         }
     }
     keys
+}
+
+fn external_super_constructor_has_nullable_required_argument(
+    ty: &TypeDecl,
+    constructor: &crate::java_ir::ConstructorDecl,
+    signatures: Option<&crate::signature::SignaturePlan>,
+    facts: &FactSet,
+) -> bool {
+    let Some(super_name) = ty.extends.as_deref() else {
+        return false;
+    };
+    if !crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+        || crate::effective_facts::EffectiveFacts::new(facts)
+            .has_parsed_source_type_capability_for_name(super_name)
+    {
+        return false;
+    }
+    let Some(Stmt::ConstructorInvocation {
+        kind: crate::java_ir::ConstructorInvocationKind::Super,
+        args,
+        ..
+    }) = constructor
+        .body
+        .as_ref()
+        .and_then(|body| body.statements.first())
+    else {
+        return false;
+    };
+    let Some((signatures, signature)) = signatures.and_then(|signatures| {
+        signatures
+            .constructor_signature(ty, constructor)
+            .map(|signature| (signatures, signature))
+    }) else {
+        return false;
+    };
+    let env = crate::expr_shape::shape_env_for_constructor(ty, constructor, signature, signatures);
+    let ctx = crate::expr_shape::ExprShapeContext::new(Some(signatures), None, Some(facts));
+    args.iter().enumerate().any(|(index, argument)| {
+        let effect = facts
+            .external_constructor_argument_effect_for(super_name, args.len(), index)
+            .cloned()
+            .or_else(|| {
+                crate::external_packs::java_platform_constructor_argument_effect_for(
+                    super_name,
+                    args.len(),
+                    index,
+                )
+            });
+        effect.is_some_and(|effect| {
+            effect.parameter_nullability == crate::facts::NullabilityState::DefinitelyNonNull
+        }) && (matches!(argument, Expr::Literal(crate::java_ir::Literal::Null))
+            || crate::expr_shape::infer_expr_shape_with_context(argument, &env, ctx)
+                .optional_element_type()
+                .is_some())
+    })
 }
 
 fn block_has_callback_syntax(body: &Block) -> bool {

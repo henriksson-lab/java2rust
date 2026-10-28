@@ -1,6 +1,21 @@
 Commons CSV 1.10.0 continuation audit
 Date: 2026-10-27
-Status: baseline and architectural entry audit complete; no translator fixes made.
+Status: B36 corpus acceptance verified. Implementation and the final requirement
+audit are in docs/commons-csv-execution.txt; historical measurements below still
+describe their original checkpoints.
+
+Latest implementation measurement is B36: fresh translation of all12 files,
+complete crate compilation with0 errors /0 invalid files,32-line Java/Rust
+differential oracle and fresh Numbers core parity PASS. Actual parser streams,
+retained record arrays, independent lists, generic map identity/null values,
+erased nested array/Iterable printing, source reader errors, UTF16 and escaping
+are exercised in the generated production crate. Discarded inherited Results
+and nullable nested map-reference returns have been repaired generally.
+Focused standalone/batch controls cover callback reentry, exception timing,
+enum/generic/array capabilities and source precedence. The final audit records
+remaining external API limits and the pre-existing lexical-super fixture failure;
+it does not claim universal Java/API support or a green entire repository suite.
+Exact frozen producer, manifests and evidence are in the execution log.
 
 Purpose and scope
 
@@ -122,7 +137,10 @@ permission to wrap or copy at a mismatched boundary.
 
 Lexer constructor takes format.getDelimiterString().toCharArray() (fresh array)
 into a retained delimiter field. CSVParser.nextRecord passes recordList.toArray
-into CSVRecord.values (also a fresh result). Current output explicitly rejects
+into CSVRecord.values. Follow-up source audit establishes that its actual
+argument is Constants.EMPTY_STRING_ARRAY: unlike a new-array argument, this
+operation can return the supplied canonical empty array when the list is empty.
+It is not an unconditionally fresh result. Current output explicitly rejects
 unshared-to-shared placement changes. Correct recipe for a proved fresh array:
 evaluate once and allocate the selected canonical Rc/Arc carrier once at birth;
 pass it unchanged through constructor/field/return uses. For a potentially
@@ -130,6 +148,10 @@ aliased parameter, propagate the selected representation to the producer and
 all consumers instead of allocating a second wrapper or cloning the payload.
 Trace native producer result shapes, nested element/nullability shapes,
 constructor parameters, field storage and call conversion plans together.
+For toArray(existingArray), preserve the existing destination when large enough,
+write its elements and required null terminator, and return that same reference;
+otherwise construct the fresh result in the selected carrier. An empty constant
+argument does not permit silently copying or rewrapping its empty-result alias.
 The existing frozen direct primitive-array static initializer path does not
 cover these constructor/method-result boundaries. Extend a bounded checked seam
 or explicitly record remaining legacy coverage; do not claim global freezing.
@@ -432,3 +454,306 @@ transcripts, source/producer checksums, full census and generated witnesses unde
 .tmp/csv-continuation. Scratch artifacts are evidence, not source to commit.
 No translator implementation, pinned source, previous deliverable or baseline
 acceptance record was edited. No additional corpus gate was run.
+
+
+Post-batch4 stream rewrite evidence (source batch5)
+
+The independent ArrayStreamContracts witness exposes two producer cases:
+Stream.of(staticArray) was treated as one array-valued item when only TypeEnv
+was consulted; CSVRecord's retained array had instead been traversed with the
+outer Option iterator. Source selection now consults the physical array slot,
+copies its canonical Rc/Arc handle and performs any nullable check at creation.
+The existing JavaArrayReadInput kernel now lives in the unconditional array
+support item, so a stream can use its short per-element reads independently of
+String/Arrays display support. JavaStream::from_array captures fixed length
+and creates the element cursor on traversal; it neither snapshots elements nor
+holds an array guard over a Java callback. Its currently supported element
+copy bound is Clone: logical String and canonical source handles satisfy this;
+the erased Object element protocol and generic reference-copy bounds still
+need the separate audit/repair described below. No claim of erased array
+support follows merely from this bounded stream repair.
+
+Usage records retention of an array captured by Stream.of/Arrays.stream and
+connects the array's stored child to the stream's output child. It never joins
+their outer allocation roots. The fixture verifies escaping local Rc storage,
+parameter arrays, static Arc storage, late writes, callback reentry, null and
+isolated UTF16 units, fresh collect output, null stream parameters and shared
+one-use state. Stored native Stream terminals now enter the existing checked
+terminal renderer; Stream<T> yields T through stream_element_type, preserving
+solved nullable children at collection and callback boundaries. This repair
+covers direct terminals on stored streams, not every intermediate pipeline.
+Array creation null checks and terminal IllegalStateException are included in
+the shaped effect audit so Java catch blocks observe them.
+
+The existing array-stream rendering unit expectation was updated from eager
+iter().cloned() to the retained lazy producer/checked terminal boundary; runtime
+parity is proven separately by the Java witness, not by that text assertion.
+
+The next typed Iterable boundary remains incomplete: current
+lower_retained_collection_as_iterable rejects sync allocations, and the native
+Iterable::from_native_collection ABI stores only Rc<RefCell<...>>. Arrays.asList
+itself already has from_local_array/from_sync_array live backing constructors.
+A correct next batch must carry that backed list into the Iterable protocol
+without losing the list projection or Java identity; it must support both
+allocation kinds through their actual signatures/storage. Merely deleting the
+sync rejection would pass an Arc to an Rc-only constructor. Erased Object[] and
+raw Iterable still require the capability protocol from sectionD; this typed
+adapter repair cannot substitute for that representation work.
+
+
+Batch6 feasibility update: typed projection accepted; erased entry blocked
+
+The complete batch6 measurement is n5iHs9/translation with frozen producer
+727ffd66b6fcaeaeb5fb22b41d113d537679b44d83bf74b74fd0a16bda784841.
+The runtime can now express the typed Rc/Arc array-backed List -> Iterable path;
+the Java witness includes static storage, alias identity, callback reentry,
+nullable returns/parameters, fixed-size mutation failure and mutable List.add.
+Its source and checked runtime tests pass. Scoped generic-boundary baseline
+failures are preserved separately; this does not establish erased capability
+support. Full CSV still fails37 errors, including2 Box<dyn Any>: Clone bounds
+and1 dyn Any: Send bound revealed behind these typed projections.
+
+An independent covariant-array/raw-Iterable witness now identifies an earlier
+contract boundary. Array -> Object assignment propagates the array allocation
+requirement to an Object local, which is correctly rejected as a concrete
+nonnative leaf. The remedy must change the erasure transfer contract, not declare
+Object to be an ordinary native array position or disable invariant checking.
+The source allocation must be retained; erased storage must hold a canonical
+reference plus proved runtime capability projections. A viable design needs
+local and synchronized owner/callback domains, because Rc<dyn Any> is inadequate
+for the now-reached synchronized CSV arrays. Box<dyn Any> cannot provide per-
+element Java reference copies merely by adding a Clone bound.
+
+Minimal semantic witness requirements are preserved at
+.tmp/csv-continuation/erased-capability-entry/ErasedCapabilities.java (Java0).
+String[] viewed as Object[] must keep the same backing; a non-String store must
+throw ArrayStoreException before changing it; int[] must fail the Object[] test;
+String[][] reads must preserve nested array identity; raw Iterable must work
+for source implementations and backed native lists with late element writes,
+nulls and escaped cursor lifetimes. Null instanceof is false. Array and iterable
+capabilities must retain the original owner and release loans before source
+callbacks. The witness currently has no implementation output to audit because
+the native contract rejection stops generation; audit rewrites as soon as this
+boundary is repaired. No hypothetical generated implementation is a deliverable.
+
+
+Batch7 entry gate and ownership rewrite
+
+The concrete Object-position rejection came from treating representation-changing
+erasure as a plain signature/storage alias. Source arrays now retain their own
+allocation; the erased slot does not receive an array shell, and constraints
+from an Object consumer do not turn a typed array parameter into Box<dyn Any>.
+Declaration types classify local, field and returned-call edges before solving.
+The native contract validator has not been weakened. The original large witness
+now emits implementation, whose9 compile errors are preserved in
+.tmp/csv-continuation/erased-capability-entry/check-b7.log.
+
+The whole owner path is accepted independently: ErasedStorageContracts plus
+Java Oracle0 and a mechanically adapted Rust caller verify canonical alias
+identity and late writes through local erasure, direct returns, object and
+typed fields, source call results and direct returned calls. Primitive and
+synchronized source arrays, nulls and a throwing producer are covered. Retained
+arrays enter JavaErasedValue with their original allocation token and share
+that owner on erased copies; no array snapshot or raw Any Clone is used.
+This is a local erased capsule containing a canonical Rc/Arc array reference;
+it is not a Send/Sync erased storage carrier or an array/interface capability.
+
+Remaining representation gate, before a raw-dispatch implementation campaign:
+- Raw Object[] cannot be represented by one concrete Vec Any downcast. Its view
+  needs read/write/length operations, original identity/lifetime, actual runtime
+  component kind and checked stores. String[] -> Object[] must retain String's
+  store check, including through generic array forwarding and nested arrays.
+- Runtime component metadata belongs to the original array allocation/producer,
+  not the declared type at the later Object cast. For example a T[] helper can
+  receive a String[] and an Object[] with identical element contents; inspecting
+  contents, substituting T's erased bound or guessing from the cast is unsound.
+  Explicitly tagged allocation storage and weak owner-associated metadata are
+  possible mechanisms; choose/test the smallest complete producer/clone/view
+  lifetime recipe before admitting conversions. No metadata design is accepted
+  merely because the new owner capsule is cloneable.
+- Native erased collection/array elements need canonical erased reference
+  carriers in both local and synchronized domains. Current Box<dyn Any> cannot
+  satisfy the reached Clone/Send requirements, and putting Rc<dyn Any> inside a
+  synchronized array cannot make it Send. Demand any needed synchronized source
+  owner at producers/signatures; never convert an existing aliased Rc to a new
+  detached Arc payload or assert Send unsafely.
+- Raw Iterable needs a checked live iterator factory for arbitrary parsed source
+  implementors and native backed lists. Reuse typed source adapter/cursor
+  machinery, erase yielded references/nulls through actual stored contracts,
+  and drop array/collection/receiver loans before callbacks. Classified absence
+  differs from an unknown projection. Return false only for proved absence.
+These are producer/storage/signature/consumer obligations, not compiler-weight
+adjustments. Continue implementing them under the full goal after this bounded
+owner-transfer prerequisite; a completed audit alone is not success.
+
+Batch8 runtime array class evidence (producer prerequisite)
+
+An erased String[] owner previously reached getClass with no registered runtime
+metadata, even after Batch7 retained the correct allocation. Empty and all-null
+arrays disprove element inspection as a substitute. The implemented first step
+is weak owner-associated class evidence: local owners use a thread-local weak
+registry, synchronized owners use a synchronized weak registry shared across
+threads. Registry lookup never borrows/locks the array payload, and entries
+never retain its elements strongly. Periodic registration cleanup and expired
+lookup cleanup prevent dead entries from accumulating without bound. Keeping
+the weak allocation token also prevents pointer reuse from confusing classes.
+
+Class evidence is installed at selected fresh array allocation boundaries from
+the source creation syntax, including sized/initialized/ragged outer arrays;
+String.toCharArray uses its proved native producer contract. Source declaration
+binary names are resolved before emission. Unknown components remain unknown.
+An alias/erasure consumer never installs its declared component type. The erased
+getClass consumer queries the original owner identity before opaque downcasts.
+The existing Rc<RefCell<Vec<T>>> / Arc<Mutex<Vec<T>>> ABI remains intact. Metadata
+requires owning 'static payloads and sync owners require Send, but never Clone
+on elements. No unsafe Send implementation or detached copy is introduced.
+
+This is not yet the complete array capability contract: clone/copyOf/toArray,
+reflective/generic class-token producers, enum arrays, implicit initializers,
+and all nested row allocations still need provenance-aware metadata propagation
+or explicit fresh evidence. Plain external Rust-created owners remain unknown.
+Do not infer a concrete class from a generic source type, a new destination
+carrier, contents, or an unregistered owner. Covariant reads/stores and raw
+Iterable projections remain unimplemented and unaccepted. The whole producer /
+clone / view recipe must be accepted before admitting those conversions.
+
+The expanded witness also exposed a whole-path null-row defect, independent
+of class metadata. A directly returned new String[n][] did not seed nullable
+row storage, so its Rust signature advertised Vec<Vec<...>> while construction
+produced Vec<Option<_>>. Usage now records the null value domain at the first
+unsized dimension, through the same nullable storage graph as assignments and
+calls. Once the signature became correct, generic Vec-to-Vec<Option<_>> widening
+incorrectly intercepted creation, lowered an unsupported empty Vec, and wrapped
+its rows in Some. Partially sized creation now bypasses that adapter and uses
+the existing ragged-array producer. Tests include both empty and two-null-row
+returns, plus an explicit check against unsupported array-creation placeholders.
+
+Batch9 retained array copy provenance and scoped generic requirements
+
+Entry evidence: the frozen B8 producer loses class evidence after array clone
+and Arrays.copyOf/Range, despite preserving String[] class on the source. The
+isolated B8 copy-class runtime failure is preserved at
+.tmp/csv-continuation/array-copy-class-b8-baseline/test.log; only an external
+caller is appended to the untouched emitted implementation. The caller first
+needed the existing Result ABI for checked copy operations. A generic T[] clone
+then exposed the actual missing T: Clone requirement, followed by the metadata
+registration's owning lifetime requirement. Neither is satisfied by changing
+generated function signatures by hand.
+
+The slot-aware clone/copy producers now keep their evaluated source owner in
+scope until the new destination owner is allocated. They register the original
+runtime class on that new owner, then return it through ordinary slot conversion.
+Fresh placement sees the result's actual allocated shape and does not allocate
+a second shell. Source evaluation and checked copy execution remain single;
+bounds evaluation and null/negative/range exceptions precede metadata transfer,
+and payload guards end before registration. Identity lookup uses the existing
+canonical JavaReferenceIdentity protocol, not a buffer address or a Vec-only
+trait. Weak class registration/inheritance accepts a general Rc/Arc owner, so
+array storage such as Array2 is not forced through a Vec metadata ABI. Unknown
+source metadata remains unknown instead of borrowing the destination's class.
+
+Generic bound inference follows the solved stored child for copying: an actual
+T payload needs Clone, whereas a retained child handle can clone independently
+of its payload's T. Runtime class registration additionally requires the owning
+Any lifetime when a retained source is copied into a retained destination. Return,
+binding, assignment and selected source-call/constructor argument slots provide
+that destination evidence; conditional branches inherit it. Source Arrays
+declarations precede native static-copy inference. Requirements propagate through
+the existing source capability graph, rather than adding Clone/Any to all generic
+array construction or all collection methods.
+
+The expanded Java/Rust witness covers empty/all-null sources, concrete and
+generic clone/copy, range padding, new copy identity versus retained alias
+identity, independence from subsequent source writes, synchronized copies and
+conditional copy-versus-alias behavior. Full raw/covariant array capability
+admission still requires the remaining factory/view/storage work. In particular
+plain/expression-only producers with no retained source evidence, enum/reflection
+and toArray factories, implicit initializers and nested fresh child allocations
+are not classified by this copy repair. No Object[] checked-store or raw Iterable
+acceptance is claimed here.
+
+The fresh B9 full CSV run exposed the next real obligation behind the repaired
+Clone: CSVFormat.clone<T> returns a synchronized array owner. Registering that
+owner globally requires T: Send, so this is a cross-function generic contract
+requirement, not a reason to assert Send for Rc or erase the synchronization
+domain. A scoped JavaSend capability now follows actual synchronized-copy
+destinations and source forwarding calls. Local copies keep their existing
+Clone/Any obligations and accept !Send elements. The positive generic sync
+forwarder and negative Rc-containing local element both pass in the focused
+Java/Rust witness. This is separate from the still-unresolved synchronized
+erased Object element representation (Box<dyn Any> itself remains !Send).
+
+B9-sync full verification confirms that the generic array clone failure is
+resolved (Clone and Send both disappear from that function's diagnostics).
+Other failure families remain unchanged at36 compile errors /2 invalid files;
+all12 sources emit with zero translation/parse failures or unsupported counters.
+Fresh Numbers core compiles and matches Java. This validates the bounded copy
+producer/contract batch, not the remaining raw/covariant view/storage design.
+
+Batch10 reference-array operation tables (producer integration prerequisite)
+
+The previous goal turn made verified implementation progress. Inspection of
+the current output still shows concrete Vec downcasts for Object[] and rejected
+raw Iterable conversions. Neither can express the preserved runtime component
+type or arbitrary source iterator factories. This turn implemented the array
+operation-table boundary rather than weakening those conversion diagnostics.
+
+JavaReferenceArrayView retains an original Rc/RefCell or Arc/Mutex owner through
+local read/write/length operations. It has the original identity and actual
+producer class. Reads copy one stored Java reference under a short loan, end
+that loan, then encode the result. Writes check bounds first, then component
+assignability, then decode outside the payload loan, and finally commit under a
+short write loan. Failed checks do not change the element. The kernel accepts
+an explicit semantic reference copier and codecs; it never requires arbitrary
+erased Box<dyn Any> payloads to implement Rust Clone. A local operation view over
+an Arc keeps that Arc owner; it does not detach its contents into Rc storage or
+claim Send for its erased elements.
+
+JavaErasedValue now retains a classified reference-array projection, copied
+with the capsule. Primitive array erasure records proved absence. Actual stored
+class metadata admits typed String-component and erased Object-component
+adapters at the existing retained-array erasure boundary. Object components
+require native provenance, so a parsed source Object class does not receive a
+Box<dyn Any> codec merely because of its spelling. Other component kinds and
+missing producer class evidence stay Unknown, never a false instanceof result.
+The generic kernel can carry source/hierarchy-specific codecs, but those codecs
+have not yet been derived/admitted by the emitter.
+
+The checked-store witness exposed incomplete native ancestry on Integer versus
+String. A proved final target can reject a distinct actual class without knowing
+all of the actual class's ancestors. Runtime class support now emits finality
+from explicit source final/record declarations and the final java.lang.String
+identity; it leaves incomplete ancestry incomplete. Conversely Object-component
+stores accept every non-null reference without requesting its class metadata.
+
+Accepted focused behavior includes Java/Rust bounds-before-store-error order,
+String ArrayStoreException before mutation, null stores, late reads, original
+owner identity/lifetime across erased/view copies, Object[] nested array aliases,
+opaque non-Clone payload ownership, synchronized owners and codec reentry with
+no RefCell or Mutex loan held. The source fixture's array production/erasure is
+generated unchanged; external clients exercise the runtime operation interface.
+This is not acceptance of translated Java Object[] casts/indexing/foreach.
+
+Shared class verification also found a real assembly defect: a private type used
+only by a promoted thread-local value was left in its source module. Nominal
+dependency closure now follows top-level values and functions together, including
+transitive private fields. A one-module TLS regression and both shared runtime
+class-assignability regressions pass after this repair; there is no array-type
+name allowlist or generated implementation patch.
+
+Before admitting source casts/consumers, finish their whole-path contract:
+- Select a reference-array operation view independently of its canonical owner,
+  and carry it through local/field/return/argument signatures and index/foreach
+  consumers. A Vec downcast is still not a valid substitute.
+- Derive source hierarchy/generic/nested element codecs through existing Java
+  conversion policies; exact Any downcasts cannot implement arbitrary upcasts.
+- Complete implicit/nested/reflection/enum producer class evidence, array clone/
+  copy operations through the view and retained typed-native interoperability.
+- Resolve canonical erased local/synchronized stored reference carriers and raw
+  Iterable factories. This local projection does not make Box<dyn Any> Clone or
+  Send and does not solve the remaining generic native-collection requirements.
+That was the earlier admission boundary. The B36 acceptance audit in the
+execution log supersedes it for the pinned corpus's actual String/Object array,
+char-buffer, enum reflection and raw Iterable paths. Arbitrary unregistered
+source-hierarchy codecs, synchronized static native-IO owners and general Java
+GC/buffering fidelity remain explicit support limits, not accepted substitutes.

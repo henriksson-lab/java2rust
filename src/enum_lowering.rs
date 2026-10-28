@@ -13,7 +13,6 @@ fn enabled(ty: &TypeDecl) -> bool {
 /// so its exception kind/message are not replaced by an arbitrary slot unwrap.
 pub(super) fn value_of(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustExpr> {
     let Expr::Call {
-        receiver,
         name,
         args,
         resolved,
@@ -27,23 +26,19 @@ pub(super) fn value_of(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<Rus
     }
     // An enum may declare other valueOf overloads. Only the compiler-provided
     // String overload uses this checked nullable runtime entry point.
-    if resolved.as_ref()?.rust_name != crate::java_naming::ENUM_VALUE_OF_RESULT_METHOD {
+    let call = resolved.as_ref()?;
+    if call.rust_name != crate::java_naming::ENUM_VALUE_OF_RESULT_METHOD {
         return None;
     }
     let [argument] = args.as_slice() else {
         return None;
     };
-    let owner = match receiver.as_deref() {
-        Some(receiver) => source_type_name_from_expr(receiver, env, ctx)?,
-        None => env
-            .type_env()
-            .static_member_import_owner(name)
-            .or(ctx.current_type)?
-            .to_string(),
-    };
+    // Resolution already identifies the compiler-provided overload and its
+    // declaring enum. Rediscovering it from a qualified receiver can fail when
+    // primary and support contexts both contain the enclosing declaration.
     let ty = find_source_enum_type_decl_for_java_type(
         &JavaType::Named {
-            name: owner,
+            name: call.declaring_type.clone(),
             args: vec![],
         },
         ctx,
@@ -200,11 +195,12 @@ pub(super) fn support(ty: &TypeDecl, ctx: LowerCtx) -> Option<String> {
         let storage_name = crate::java_naming::source_instance_field_rust_name(ty, &field.name);
         let field_token = crate::representation_lowering::rust_identifier_token(&storage_name);
         let shape = ctx.signatures.required_declared_field_shape(ty, field);
-        let rust_ty = emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+        let storage_type = rust_type_for_slot_with_facts_and_representations(
             &shape,
             ctx.facts,
             ctx.representations,
-        ));
+        );
+        let rust_ty = emit::emit_type(&storage_type);
         declarations.push(format!("{field_token}: {rust_ty}"));
         defaults.push(format!(
             "{field_token}: {}",
@@ -218,7 +214,22 @@ pub(super) fn support(ty: &TypeDecl, ctx: LowerCtx) -> Option<String> {
         );
         // Project the optional element, not its Option shell. Slot conversion
         // then copies values or clones retained identities without moving state.
-        let copied = if let Some(element) = shape.optional_element_type() {
+        let storage_payload = match &storage_type {
+            RustType::Option(payload) => payload.as_ref(),
+            payload => payload,
+        };
+        let copied = if matches!(storage_payload, RustType::Generic { base, .. }
+            if matches!(base.as_str(), "std::rc::Rc" | "std::sync::Arc"))
+        {
+            // A field read copies its stored canonical handle. A borrowed
+            // nominal view may dereference that handle to its Mutex/RefCell;
+            // recovering ownership from that view would clone the payload.
+            crate::coercion::clone_reference_carrier_for_evaluation(
+                value,
+                &shape,
+                RustExpr::path(["std", "clone", "Clone", "clone"]),
+            )
+        } else if let Some(element) = shape.optional_element_type() {
             let lowered = optional_element_borrow_lowered_expr_with_facts(
                 value,
                 &shape,

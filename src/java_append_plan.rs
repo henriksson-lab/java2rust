@@ -43,6 +43,43 @@ pub(crate) struct ObjectAppend<'a> {
     pub return_type: JavaType,
 }
 
+/// The char[] overload appends its code units, unlike append(Object)'s
+/// identity display. Keep its receiver/argument evaluation order shared with
+/// object append, without admitting it to the object-callback proof.
+pub(crate) fn plan_char_array_append<'a>(
+    expr: &'a Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ObjectAppend<'a>> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let [argument] = args.as_slice() else {
+        return None;
+    };
+    if name != "append" {
+        return None;
+    }
+    let return_type = native_builder_receiver_type(receiver, types, facts)?;
+    let ty = infer_expr_type(argument, types);
+    let ty = optional_element_type(&ty).unwrap_or(ty);
+    if !matches!(ty, JavaType::Array(element) if *element == JavaType::Primitive(crate::java_ir::PrimitiveType::Char))
+    {
+        return None;
+    }
+    Some(ObjectAppend {
+        receiver,
+        argument,
+        return_type,
+    })
+}
+
 pub(crate) fn plan_object_append<'a>(
     expr: &'a Expr,
     types: &TypeEnv,

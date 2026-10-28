@@ -525,6 +525,8 @@ fn rust_method_family_key_matches(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
+    declared_return_type: Option<JavaType>,
+    declared_field_types: std::sync::Arc<HashMap<String, JavaType>>,
     // Transient plans keyed by identity in this immutable AST traversal. They
     // are consumed on entering the callback and cleared before publishing facts.
     callback_value_domains: HashMap<(u8, usize), NativeCallbackValueDomains>,
@@ -815,6 +817,12 @@ fn contains_aliased_resolved_source_method_key(
 }
 
 impl MethodUsageFacts {
+    pub(crate) fn declared_return_type(&self) -> Option<&JavaType> {
+        self.declared_return_type.as_ref()
+    }
+    pub(crate) fn declared_field_type(&self, name: &str) -> Option<&JavaType> {
+        self.declared_field_types.get(name)
+    }
     pub(crate) fn source_local_null_slot(
         &self,
         binding: &BindingId,
@@ -1385,6 +1393,7 @@ impl NativeCollectionStorageSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCallbackValueDomains {
     result: Option<NativeCollectionStorageSlot>,
+    inputs: Vec<JavaType>,
 }
 
 /// Invocation transfers a value, not ownership of its Java allocation. Use
@@ -2291,10 +2300,13 @@ fn analyze_type_usage(
             .map(|symbols| symbols.source_static_field_names(&ty.name))
             .unwrap_or_default(),
     );
+    let declared_field_types = std::sync::Arc::new(field_types.clone());
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                method_facts.declared_return_type = Some(method.return_type.clone());
+                method_facts.declared_field_types = std::sync::Arc::clone(&declared_field_types);
                 method_facts.source_local_slots =
                     crate::null_diagnostic::SourceLocalSlots::for_method(method)
                         .map(std::sync::Arc::new);
@@ -2359,6 +2371,7 @@ fn analyze_type_usage(
             }
             Member::Constructor(ctor) => {
                 let mut ctor_facts = MethodUsageFacts::default();
+                ctor_facts.declared_field_types = std::sync::Arc::clone(&declared_field_types);
                 ctor_facts.static_field_names = std::sync::Arc::clone(&static_field_names);
                 ctor_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 ctor_facts.type_params_in_scope =
@@ -6052,13 +6065,13 @@ fn native_storage_expr_type(
     types: &TypeEnv,
     context: &UsageAnalysisContext<'_>,
 ) -> JavaType {
-    match expr {
+    let ty = match expr {
         Expr::Var(name) => agreed_binding_java_type(facts, name)
             .or_else(|| {
                 context
                     .source_symbols
                     .as_ref()?
-                    .source_field_identity(owner, name)
+                    .source_lexical_field_identity(owner, name)
                     .map(|(_, _, ty)| ty)
             })
             .unwrap_or_else(|| crate::types::infer_expr_type(expr, types)),
@@ -6076,6 +6089,34 @@ fn native_storage_expr_type(
                 .unwrap_or_else(|| crate::types::infer_expr_type(expr, types))
         }
         _ => crate::types::infer_expr_type(expr, types),
+    };
+    native_storage_bound_type(ty, types, context)
+}
+
+fn native_storage_bound_type(
+    ty: JavaType,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> JavaType {
+    let mut candidate = ty.clone();
+    let mut seen = HashSet::new();
+    loop {
+        let JavaType::Named { name, args } = &candidate else {
+            return ty;
+        };
+        if !args.is_empty() || !seen.insert(name.clone()) {
+            return ty;
+        }
+        let Some(bound) = types.type_param_bound(name) else {
+            return ty;
+        };
+        if crate::effective_facts::EffectiveFacts::new(context.facts)
+            .retained_native_map_kind(bound)
+            .is_some()
+        {
+            return bound.clone();
+        }
+        candidate = bound.clone();
     }
 }
 
@@ -6095,7 +6136,7 @@ fn native_storage_type_env(
                 } else if let Some((_, _, ty)) = context
                     .source_symbols
                     .as_ref()
-                    .and_then(|symbols| symbols.source_field_identity(owner, name))
+                    .and_then(|symbols| symbols.source_lexical_field_identity(owner, name))
                 {
                     types.insert_field(name, ty);
                 }
@@ -6187,6 +6228,101 @@ fn record_native_call_input_domains(
         return;
     }
     let receiver_ty = native_storage_expr_type(receiver, facts, owner, types, context);
+    if matches!(args.as_slice(), [_])
+        && native_storage_method_for_type(receiver, name, args, &receiver_ty, types, context)
+            == Some(crate::call_plan::NativeCollectionMethod::ToArray {
+                has_destination: true,
+            })
+    {
+        let storage_types =
+            native_storage_type_env(&[receiver, &args[0]], facts, owner, types, context);
+        if let Some(array) =
+            native_collection_storage_slot(&args[0], facts, owner, &storage_types, context)
+            && let Some(mut child) = array.child(&[0])
+            && crate::types::optional_element_type(&child.ty).unwrap_or_else(|| child.ty.clone())
+                == JavaType::String
+        {
+            // Calls with discarded results still evaluate and may reuse an
+            // existing destination. Their operands need the same retained
+            // contracts as assignment/return factory boundaries.
+            facts.native_collection_retention_requirements.push(array);
+            child.ty = crate::types::optional_java_type(child.ty);
+            facts
+                .nullable_collection_storage_flows
+                .push((child.clone(), child));
+            if let Some(source) =
+                native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+            {
+                facts.native_collection_retention_requirements.push(source);
+            }
+        }
+    }
+    if name == "forEach"
+        && let [Expr::Lambda { params, body }] = args.as_slice()
+        && params.len() == 2
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .retained_native_map_kind(&receiver_ty)
+            .is_some()
+    {
+        let storage_types = native_storage_type_env(&[receiver], facts, owner, types, context);
+        if let Some(source) =
+            native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+        {
+            facts.callback_value_domains.insert(
+                SourceLambdaBodyKey::for_lambda(body).domain_key(),
+                NativeCallbackValueDomains {
+                    result: None,
+                    inputs: (0..2)
+                        .filter_map(|index| source.child(&[index]).map(|slot| slot.ty))
+                        .collect(),
+                },
+            );
+            for (index, param) in params.iter().enumerate() {
+                if let (Some(binding), Some(child)) = (&param.binding, source.child(&[index])) {
+                    let local = NativeCollectionStorageSlot {
+                        root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                        path: vec![],
+                        ty: child.ty.clone(),
+                        root_ty: child.ty.clone(),
+                    };
+                    record_functional_value_domain_transfer(
+                        child,
+                        local,
+                        facts,
+                        &storage_types,
+                        context,
+                    );
+                }
+            }
+        }
+    }
+    if matches!(args.as_slice(), [_])
+        && native_storage_method_for_type(receiver, name, args, &receiver_ty, types, context)
+            == Some(crate::call_plan::NativeCollectionMethod::Extend)
+        && crate::stdlib::java_map_type_args(&receiver_ty).is_some()
+    {
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        if let (Some(destination), Some(source)) = (
+            native_collection_storage_slot(receiver, facts, owner, &storage_types, context),
+            native_collection_storage_slot(&args[0], facts, owner, &storage_types, context),
+        ) {
+            for index in 0..2 {
+                if let (Some(source), Some(destination)) =
+                    (source.child(&[index]), destination.child(&[index]))
+                {
+                    // putAll copies entries, not map allocations. Nullable
+                    // children flow forward; referenced children keep their
+                    // canonical owner/domain across both containers.
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((source.clone(), destination.clone()));
+                    facts
+                        .native_collection_reference_transfers
+                        .push((source, destination));
+                }
+            }
+        }
+    }
     // Stored scalar references have nullable domains too. A nullable field
     // or call result inserted into a native container must widen that child,
     // just as an explicit null does; query-only operands must never do so.
@@ -6224,6 +6360,9 @@ fn record_native_call_input_domains(
                                 name,
                                 args.len(),
                             ) == Some(*argument)
+                                || (*child == 0
+                                    && kind.is_map_like()
+                                    && kind != crate::stdlib::JavaCollectionKind::SortedMap)
                         },
                     ) {
                         // A literal null has no source binding, but it still
@@ -6897,6 +7036,7 @@ fn record_native_generic_composition_storage(
                 SourceLambdaBodyKey::for_lambda(body).domain_key(),
                 NativeCallbackValueDomains {
                     result: endpoint(to),
+                    inputs: Vec::new(),
                 },
             );
         } else if let (Some(source), Some(target)) = (endpoint(from), endpoint(to)) {
@@ -6978,6 +7118,7 @@ fn record_source_callback_value_storage(
                 SourceLambdaBodyKey::for_lambda(body).domain_key(),
                 NativeCallbackValueDomains {
                     result: Some(result),
+                    inputs: Vec::new(),
                 },
             );
             true
@@ -7043,6 +7184,278 @@ fn record_source_callback_value_storage(
     }
 }
 
+/// Stored stream stages retain callback and yielded reference domains even
+/// when no terminal is present in the expression being assigned or returned.
+fn record_stored_stream_stage_domains(
+    expr: &Expr,
+    destination: &NativeCollectionStorageSlot,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    if !matches!(name.as_str(), "map" | "filter") || args.len() != 1 {
+        return false;
+    }
+    let storage_types = native_storage_type_env(&[receiver], facts, owner, types, context);
+    let receiver_ty = native_storage_expr_type(receiver, facts, owner, &storage_types, context);
+    let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    let JavaType::Named {
+        name: receiver_name,
+        ..
+    } = &receiver_ty
+    else {
+        return false;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) != "Stream"
+        || crate::call_plan::java_type_owner_is_parsed_source(
+            receiver_name,
+            &storage_types,
+            context.facts,
+        )
+    {
+        return false;
+    }
+    let Some(source) =
+        native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+            .and_then(|source| source.child(&[0]))
+    else {
+        return false;
+    };
+    let Some(target) = destination.child(&[0]) else {
+        return false;
+    };
+    if name == "filter" {
+        record_functional_value_domain_transfer(
+            source.clone(),
+            target.clone(),
+            facts,
+            &storage_types,
+            context,
+        );
+    }
+    if let Expr::Lambda { params, body } = &args[0]
+        && let [param] = params.as_slice()
+    {
+        record_native_lambda_environment(params, body, destination, facts, &storage_types, context);
+        if let Some(binding) = &param.binding {
+            record_functional_value_domain_transfer(
+                source.clone(),
+                NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                    path: vec![],
+                    ty: source.ty.clone(),
+                    root_ty: source.ty.clone(),
+                },
+                facts,
+                &storage_types,
+                context,
+            );
+        }
+        facts.callback_value_domains.insert(
+            SourceLambdaBodyKey::for_lambda(body).domain_key(),
+            NativeCallbackValueDomains {
+                result: (name == "map").then_some(target),
+                inputs: vec![source.ty],
+            },
+        );
+        return true;
+    }
+    if let Some(callback) =
+        native_collection_storage_slot(&args[0], facts, owner, &storage_types, context)
+    {
+        for (input, path) in functional_value_domain_slots(&callback, Some(0), context) {
+            if let Some(input) = input.child(&path) {
+                record_functional_value_domain_transfer(
+                    source.clone(),
+                    input,
+                    facts,
+                    &storage_types,
+                    context,
+                );
+            }
+        }
+        if name == "map" {
+            for (result, path) in functional_value_domain_slots(&callback, None, context) {
+                if let Some(result) = result.child(&path) {
+                    record_functional_value_domain_transfer(
+                        result,
+                        target.clone(),
+                        facts,
+                        &storage_types,
+                        context,
+                    );
+                }
+            }
+        }
+        facts
+            .native_callback_environment_domains
+            .push((callback, destination.clone()));
+        return true;
+    }
+    if let Expr::MethodReference {
+        target: callback_owner,
+        method,
+        receiver: callback_receiver,
+    } = &args[0]
+        && let Some(symbols) = context.source_symbols.as_ref()
+        && let Some(call) = crate::resolve::resolve_source_method_reference_with_receiver(
+            callback_owner,
+            callback_receiver.as_deref(),
+            method,
+            std::slice::from_ref(&source.ty),
+            owner,
+            symbols,
+            &storage_types,
+            context.facts,
+        )
+    {
+        if let [input] = call.arg_target_types.as_slice() {
+            record_functional_value_domain_transfer(
+                source,
+                NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::MethodArgument {
+                        call: call.clone(),
+                        index: 0,
+                    },
+                    path: vec![],
+                    ty: input.clone(),
+                    root_ty: input.clone(),
+                },
+                facts,
+                &storage_types,
+                context,
+            );
+        }
+        if name == "map" {
+            let ty = call.return_type.clone();
+            record_functional_value_domain_transfer(
+                NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::Origin(
+                        CollectionArgumentOrigin::MethodReturn(call),
+                    ),
+                    path: vec![],
+                    ty: ty.clone(),
+                    root_ty: ty,
+                },
+                target,
+                facts,
+                &storage_types,
+                context,
+            );
+        }
+    }
+    true
+}
+
+fn record_iterator_stream_factory_domains(
+    expr: &Expr,
+    destination: &NativeCollectionStorageSlot,
+    usage: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> bool {
+    use crate::call_plan::{CallTargetPlan, NativeCollectionStaticMethod};
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    let Some(CallTargetPlan::NativeCollectionStatic { method }) =
+        crate::call_plan::plan_native_collection_static_call(
+            receiver.as_deref(),
+            name,
+            resolved.as_ref(),
+            types,
+            context.facts,
+        )
+    else {
+        return false;
+    };
+    if !matches!(
+        method,
+        NativeCollectionStaticMethod::SpliteratorUnknownSize
+            | NativeCollectionStaticMethod::StreamFromSpliterator
+    ) || args.len() != 2
+    {
+        return false;
+    }
+    let Some(target) = destination.child(&[0]) else {
+        return false;
+    };
+    // Follow an inline factory's producer before a generic storage lookup
+    // mistakes its external logical return origin for solved child evidence.
+    if record_iterator_stream_factory_domains(&args[0], destination, usage, owner, types, context) {
+        return true;
+    }
+    let storage_types = native_storage_type_env(&[&args[0]], usage, owner, types, context);
+    if let Some(parent) =
+        native_collection_storage_slot(&args[0], usage, owner, &storage_types, context)
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_cursor_element_type(&parent.ty)
+            .is_some()
+        && let Some(source) = parent.child(&[0])
+    {
+        record_functional_value_domain_transfer(source, target, usage, &storage_types, context);
+        return true;
+    }
+    if method == NativeCollectionStaticMethod::SpliteratorUnknownSize
+        && let Some(symbols) = context.source_symbols.as_ref()
+        && let Some(call) = crate::resolve::resolve_source_call_with_types(
+            Some(&args[0]),
+            "next",
+            &[],
+            owner,
+            symbols,
+            &storage_types,
+            context.facts,
+        )
+    {
+        let ty = call.return_type.clone();
+        record_functional_value_domain_transfer(
+            NativeCollectionStorageSlot {
+                root: NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::MethodReturn(
+                    call,
+                )),
+                path: vec![],
+                ty: ty.clone(),
+                root_ty: ty,
+            },
+            target,
+            usage,
+            &storage_types,
+            context,
+        );
+        return true;
+    }
+    // A nested factory has no binding, but its same child value contract still
+    // reaches the outer destination. Never equate the protocol object roots.
+    record_iterator_stream_factory_domains(
+        &args[0],
+        destination,
+        usage,
+        owner,
+        &storage_types,
+        context,
+    );
+    true
+}
+
 fn record_native_value_domain_storage(
     expr: &Expr,
     destination: NativeCollectionStorageSlot,
@@ -7051,6 +7464,70 @@ fn record_native_value_domain_storage(
     types: &TypeEnv,
     context: &UsageAnalysisContext<'_>,
 ) {
+    // Upcasting a source Iterator creates a live native capability whose child
+    // contract is the selected source next() result, including nullability and
+    // retained allocation. The nominal source object is not its yielded value.
+    let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+    let destination_ty = crate::types::optional_element_type(&destination.ty)
+        .unwrap_or_else(|| destination.ty.clone());
+    if effective
+        .native_cursor_element_type(&destination_ty)
+        .is_some()
+        && matches!(&destination_ty, JavaType::Named { name, .. }
+            if matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(), "Iterator" | "java.util.Iterator"))
+        && let Some(symbols) = context.source_symbols.as_ref()
+    {
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        let source_ty = native_storage_expr_type(expr, facts, owner, &storage_types, context);
+        if effective.native_cursor_element_type(&source_ty).is_none()
+            && let Some(call) = crate::resolve::resolve_source_call_with_types(
+                Some(expr),
+                "next",
+                &[],
+                owner,
+                symbols,
+                &storage_types,
+                context.facts,
+            )
+            && let Some(target) = destination.child(&[0])
+        {
+            let ty = call.return_type.clone();
+            record_functional_value_domain_transfer(
+                NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::Origin(
+                        CollectionArgumentOrigin::MethodReturn(call),
+                    ),
+                    path: vec![],
+                    ty: ty.clone(),
+                    root_ty: ty,
+                },
+                target,
+                facts,
+                &storage_types,
+                context,
+            );
+            return;
+        }
+    }
+    if let Expr::Cast { ty, expr: source } = expr
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_iterable_element_type(ty)
+            .is_some()
+        && matches!(ty, JavaType::Named { args, .. } if args == &[JavaType::Wildcard(None)])
+        && {
+            let source_ty = native_storage_expr_type(source, facts, owner, types, context);
+            let source_ty = crate::types::optional_element_type(&source_ty).unwrap_or(source_ty);
+            crate::shape_projection::java_type_is_erased_object_storage(&source_ty)
+        }
+        && let Some(mut child) = destination.child(&[0])
+    {
+        // An erased wildcard producer may yield Java null. This qualifies
+        // the cursor value domain; the cast's outer null remains independent.
+        child.ty = crate::types::optional_java_type(crate::types::generic_read_type(&child.ty));
+        facts
+            .nullable_collection_storage_flows
+            .push((child.clone(), child));
+    }
     if expr_is_null_literal(expr)
         && !matches!(destination.ty, JavaType::Primitive(_) | JavaType::Void)
     {
@@ -7119,6 +7596,23 @@ fn record_native_value_domain_storage(
         return;
     }
     if let Expr::ArrayCreation {
+        element_type: JavaType::Array(_),
+        dimensions,
+        initializer: None,
+    } = expr
+    {
+        // Unsized trailing dimensions are null child references, including
+        // when the sized prefix is empty. Record the actual stored value
+        // domain so returns and callers agree with locals/fields on row ABI.
+        if let Some(mut child) = destination.child(&vec![0; dimensions.len()]) {
+            child.ty = crate::types::optional_java_type(child.ty);
+            facts
+                .nullable_collection_storage_flows
+                .push((child.clone(), child));
+        }
+        return;
+    }
+    if let Expr::ArrayCreation {
         initializer: Some(values),
         ..
     }
@@ -7141,6 +7635,85 @@ fn record_native_value_domain_storage(
         return;
     }
     let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && let Expr::Var(api) = receiver.as_ref()
+        && ((name == "of" && crate::stdlib::canonical_external_receiver_type_key(api) == "Stream")
+            || (name == "stream"
+                && crate::stdlib::canonical_external_receiver_type_key(api) == "Arrays"))
+        && !crate::call_plan::java_type_owner_is_parsed_source(api, types, context.facts)
+        && let [array] = args.as_slice()
+    {
+        let storage_types = native_storage_type_env(&[array], facts, owner, types, context);
+        let array_ty = native_storage_expr_type(array, facts, owner, &storage_types, context);
+        let array_ty = crate::types::optional_element_type(&array_ty).unwrap_or(array_ty);
+        if matches!(array_ty, JavaType::Array(_))
+            && matches!(
+                array,
+                Expr::ArrayCreation { .. } | Expr::ArrayInitializer(_)
+            )
+        {
+            // A fresh array has no declaration slot to connect to the stream.
+            // Its elements still supply the destination's yielded value domain.
+            // Do not turn the stream object into an alias of the array object.
+            if matches!(
+                array,
+                Expr::ArrayCreation {
+                    initializer: None,
+                    ..
+                }
+            ) {
+                if let Some(mut child) = destination.child(&[0])
+                    && !matches!(child.ty, JavaType::Primitive(_) | JavaType::Void)
+                {
+                    child.ty = crate::types::optional_java_type(child.ty);
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((child.clone(), child));
+                }
+            } else {
+                record_native_value_domain_storage(
+                    array,
+                    destination,
+                    facts,
+                    owner,
+                    types,
+                    context,
+                );
+            }
+            return;
+        }
+        if matches!(array_ty, JavaType::Array(_))
+            && let Some(mut source) =
+                native_collection_storage_slot(array, facts, owner, &storage_types, context)
+            && let Some(target) = destination.child(&[0])
+            && let Some(child) = source.child(&[0])
+        {
+            // A stream captures the original allocation but is a separate
+            // protocol object. Connect only its yielded value domain.
+            facts
+                .native_collection_retention_requirements
+                .push(source.clone());
+            source = child;
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), target.clone()));
+            if native_storage_value_type(&source.ty, &storage_types, context) {
+                facts.native_collection_storage_flows.push((source, target));
+            }
+            return;
+        }
+    }
+    if record_iterator_stream_factory_domains(expr, &destination, facts, owner, types, context) {
+        return;
+    }
+    if record_stored_stream_stage_domains(expr, &destination, facts, owner, types, context) {
+        return;
+    }
     if record_native_generic_composition_storage(expr, &destination, facts, owner, types, context) {
         return;
     }
@@ -7556,6 +8129,66 @@ fn record_native_value_domain_storage(
         if effective
             .native_cursor_element_type(&destination.ty)
             .is_some()
+            && matches!(name.as_str(), "iterator")
+            && args.is_empty()
+            && let Expr::Call {
+                receiver: factory,
+                name,
+                args,
+                resolved,
+                ..
+            } = receiver.as_ref()
+            && matches!(
+                crate::call_plan::plan_native_collection_static_call(
+                    factory.as_deref(),
+                    name,
+                    resolved.as_ref(),
+                    &storage_types,
+                    context.facts
+                ),
+                Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic {
+                    method: crate::call_plan::NativeCollectionStaticMethod::ArraysAsList
+                })
+            )
+            && let [array] = args.as_slice()
+            && let JavaType::Array(element) = crate::types::optional_element_type(
+                &native_storage_expr_type(array, facts, owner, &storage_types, context),
+            )
+            .unwrap_or_else(|| {
+                native_storage_expr_type(array, facts, owner, &storage_types, context)
+            })
+            && !matches!(element.as_ref(), JavaType::Primitive(_))
+            && let Some(mut target) = destination.child(&[0])
+        {
+            // An inline backed-list factory has no binding/return storage
+            // node. Its iterator still reads the original array's qualified
+            // elements. Join only those children, never the three owners.
+            target.ty = crate::shape_projection::indexed_assignment_shape_with_facts(
+                &crate::slot_shape::RustSlotShape::for_storage(JavaType::Array(element)),
+                context.facts,
+            )
+            .map(|shape| shape.java_ty)
+            .unwrap_or(target.ty);
+            let backing =
+                native_collection_storage_slot(array, facts, owner, &storage_types, context);
+            if let Some(backing) = backing {
+                facts
+                    .native_collection_retention_requirements
+                    .push(backing.clone());
+                if let Some(source) = backing.child(&[0]) {
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((source, target.clone()));
+                }
+            }
+            facts
+                .nullable_collection_storage_flows
+                .push((target.clone(), target));
+            return;
+        }
+        if effective
+            .native_cursor_element_type(&destination.ty)
+            .is_some()
             && let Some(child_index) = cursor_child
             && let Some(mut source) =
                 native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
@@ -7944,6 +8577,22 @@ fn record_native_value_domain_storage(
         if let Some(mut source) =
             native_collection_storage_slot(expr, facts, owner, &storage_types, context)
         {
+            let target = crate::types::optional_element_type(&destination.ty)
+                .unwrap_or_else(|| destination.ty.clone());
+            if matches!(target, JavaType::Named { ref name, .. } | JavaType::Unknown(ref name)
+                if matches!(name.as_str(), "Object" | "java.lang.Object"))
+                && native_storage_value_type(&source.ty, &storage_types, context)
+            {
+                // Erasure owns the original Java reference. Retain the native
+                // source, but do not give Object an array/collection shell.
+                facts
+                    .native_collection_retention_requirements
+                    .push(source.clone());
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source, destination));
+                return;
+            }
             if effective.native_cursor_element_type(&source.ty).is_some()
                 && effective
                     .native_cursor_element_type(&destination.ty)
@@ -8198,7 +8847,10 @@ fn record_native_value_domain_storage(
         };
         facts.callback_value_domains.insert(
             SourceLambdaBodyKey::for_lambda(body).domain_key(),
-            NativeCallbackValueDomains { result },
+            NativeCallbackValueDomains {
+                result,
+                inputs: Vec::new(),
+            },
         );
         return;
     }
@@ -8323,6 +8975,23 @@ fn record_native_factory_storage(
         return;
     };
     if let Some(receiver) = receiver.as_deref()
+        && crate::call_plan::native_class_enum_constants_element(
+            &native_storage_expr_type(receiver, facts, owner, types, context),
+            name,
+            args.len(),
+            types,
+            context.facts,
+        )
+        .is_some()
+    {
+        // The runtime component class is more precise than a generic Class<T>
+        // view. Keep an original allocation on which to register that class.
+        facts
+            .native_collection_retention_requirements
+            .push(destination);
+        return;
+    }
+    if let Some(receiver) = receiver.as_deref()
         && matches!(args.as_slice(), [Expr::ArrayCreation { initializer, dimensions, .. }]
             if (initializer.is_none() && dimensions.len() == 1)
                 || (initializer.as_ref().is_some_and(Vec::is_empty) && dimensions.is_empty()))
@@ -8350,6 +9019,44 @@ fn record_native_factory_storage(
         }
         if native_storage_value_type(&source.ty, types, context) {
             facts.native_collection_storage_flows.push((source, target));
+        }
+        return;
+    }
+    if let Some(receiver) = receiver.as_deref()
+        && let [array] = args.as_slice()
+        && matches!(
+            native_storage_method(receiver, name, args, types, context),
+            Some(crate::call_plan::NativeCollectionMethod::ToArray {
+                has_destination: true
+            })
+        )
+        && let Some(array_slot) =
+            native_collection_storage_slot(array, facts, owner, types, context)
+        && array_slot.child(&[0]).is_some_and(|child| {
+            crate::types::optional_element_type(&child.ty).unwrap_or(child.ty) == JavaType::String
+        })
+    {
+        // This factory can return its existing argument. Keep that allocation
+        // and the result in one retained domain, rather than wrapping a copied
+        // destination. Root nullability is not a success-result null proof.
+        facts
+            .native_collection_storage_flows
+            .push((array_slot.clone(), destination.clone()));
+        if let Some(source) = native_collection_storage_slot(receiver, facts, owner, types, context)
+        {
+            facts
+                .native_collection_retention_requirements
+                .push(source.clone());
+            if let (Some(source), Some(target)) = (source.child(&[0]), destination.child(&[0])) {
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source, target.clone()));
+                let mut nullable = target;
+                nullable.ty = crate::types::optional_java_type(nullable.ty);
+                facts
+                    .nullable_collection_storage_flows
+                    .push((nullable.clone(), nullable));
+            }
         }
         return;
     }
@@ -8444,23 +9151,42 @@ fn record_native_factory_storage(
         && !matches!(element.as_ref(), JavaType::Primitive(_))
     {
         // The view is a distinct fixed-size collection, but its storage must
-        // retain the original array allocation. Root placement requirements
-        // cross this edge; outer Java-nullability does not (the factory throws
-        // on a null array). Element storage is shared in both directions.
+        // retain the original array allocation. A synchronized view requires
+        // synchronized backing; an Arc backing can also serve a local view.
+        // Elements share their qualified storage in both directions.
+        let mut array_shape =
+            crate::slot_shape::RustSlotShape::for_storage(JavaType::Array(element.clone()));
+        crate::java_reference_array_plan::select_stored_view(
+            &mut array_shape,
+            context.facts,
+            &types.type_parameter_names(),
+        );
+        if array_shape.view == crate::slot_shape::ViewShape::ReferenceArray
+            && crate::stdlib::java_collection_kind_for_type(&destination.ty)
+                == Some(crate::stdlib::JavaCollectionKind::List)
+        {
+            facts.native_list_projection_slots.push(destination.clone());
+        }
         let backing = native_collection_storage_slot(array, facts, owner, types, context);
         if let Some(backing) = &backing {
             facts
                 .native_collection_retention_requirements
                 .push(backing.clone());
         }
-        if crate::stdlib::java_collection_kind_for_type(&destination.ty).is_some() {
+        if crate::stdlib::java_collection_kind_for_type(&destination.ty).is_some()
+            || crate::effective_facts::EffectiveFacts::new(context.facts)
+                .native_iterable_element_type(&destination.ty)
+                .is_some()
+        {
             facts
                 .native_collection_retention_requirements
                 .push(destination.clone());
             if let Some(backing) = &backing {
-                facts
-                    .native_collection_storage_flows
-                    .push((backing.clone(), destination.clone()));
+                facts.native_collection_view_backings.push((
+                    backing.clone(),
+                    destination.clone(),
+                    0,
+                ));
             }
             if let Some(child) =
                 crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
@@ -8485,6 +9211,11 @@ fn record_native_factory_storage(
                 if let Some(mut backing) = backing {
                     backing.path.push(0);
                     backing.ty = physical;
+                    if native_storage_value_type(&backing.ty, types, context) {
+                        facts
+                            .native_collection_storage_flows
+                            .push((backing.clone(), view.clone()));
+                    }
                     facts
                         .nullable_collection_storage_flows
                         .push((backing.clone(), view.clone()));
@@ -8612,14 +9343,14 @@ fn native_collection_storage_slot(
                 return Some(NativeCollectionStorageSlot {
                     root: NativeCollectionStorageRoot::Binding(binding),
                     path: vec![],
-                    ty: crate::types::infer_expr_type(expr, types),
-                    root_ty: crate::types::infer_expr_type(expr, types),
+                    ty: native_storage_expr_type(expr, facts, owner, types, context),
+                    root_ty: native_storage_expr_type(expr, facts, owner, types, context),
                 });
             }
             let (owner, name, _) = context
                 .source_symbols
                 .as_ref()?
-                .source_field_identity(owner, name)?;
+                .source_lexical_field_identity(owner, name)?;
             NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { owner, name })
         }
         Expr::FieldAccess(receiver, field) => {
@@ -8708,7 +9439,20 @@ fn native_collection_storage_slot(
             slot.ty = crate::types::infer_expr_type(expr, types);
             return Some(slot);
         }
-        Expr::Cast { expr, .. } => {
+        Expr::Cast { ty, expr } => {
+            let source_ty = native_storage_expr_type(expr, facts, owner, types, context);
+            if matches!(ty, JavaType::Array(_))
+                && !matches!(
+                    crate::types::optional_element_type(&source_ty).unwrap_or(source_ty),
+                    JavaType::Array(_)
+                )
+            {
+                // A checked cast from erased storage supplies an operation
+                // view, not a typed array slot at the Object's storage node.
+                // Retaining its backing must not attach an array allocation
+                // shell (or element paths) to the erased source reference.
+                return None;
+            }
             return native_collection_storage_slot(expr, facts, owner, types, context);
         }
         _ => return None,
@@ -9174,7 +9918,18 @@ fn record_nullable_source_callback_calls(
     context: &UsageAnalysisContext<'_>,
     types: &TypeEnv,
 ) {
-    let Some(source) = crate::stream::stream_chain_source_expression(expr) else {
+    let source = crate::stream::stream_chain_source_expression(expr).or_else(|| {
+        let Expr::Call {
+            receiver: Some(receiver),
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        crate::stream::native_stored_stream_source(receiver, types, context.facts)
+            .then_some(receiver.as_ref())
+    });
+    let Some(source) = source else {
         return;
     };
     let source_types = native_storage_type_env(&[source], usage, current_type, types, context);
@@ -9339,6 +10094,10 @@ fn analyze_expr_with_context(
         );
     }
     if matches!(expr, Expr::This | Expr::Super)
+        // Qualified Outer.this reads this object's enclosing-instance capture.
+        // Treating the qualifier as a static type name would let private
+        // receiver elision emit a body using self.__outer with no receiver.
+        || matches!(expr, Expr::FieldAccess(_, field) if field == "this")
         || self_field_name(expr, facts, field_names).is_some()
     {
         facts.uses_receiver = true;
@@ -10346,18 +11105,25 @@ fn analyze_lambda_body(
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
     let previous_result = facts.active_callback_result.take();
-    facts.active_callback_result = facts
+    let domain = facts
         .callback_value_domains
-        .remove(&SourceLambdaBodyKey::for_lambda(body).domain_key())
-        .and_then(|domain| domain.result);
+        .remove(&SourceLambdaBodyKey::for_lambda(body).domain_key());
+    facts.active_callback_result = domain.as_ref().and_then(|domain| domain.result.clone());
     let mut lambda_env = type_env.clone();
     let saved_params = params
         .iter()
-        .map(|param| {
+        .enumerate()
+        .map(|(index, param)| {
             let saved = facts.hide_visible_binding_for_scope(&param.source_name);
             let ty = param
                 .ty
                 .clone()
+                .or_else(|| {
+                    domain
+                        .as_ref()
+                        .and_then(|domain| domain.inputs.get(index))
+                        .cloned()
+                })
                 .unwrap_or_else(|| JavaType::Unknown("lambda parameter".to_string()));
             lambda_env.insert_local(param.name.clone(), ty.clone());
             lambda_env.insert_local(param.source_name.clone(), ty.clone());
@@ -11839,6 +12605,184 @@ fn restore_binding_use_facts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn array_view_sync_requirement_flows_from_view_to_backing_only() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/csv/ArrayViewDomainContracts.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &crate::facts::FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner = &resolved.program.types[0];
+        let method = |name| {
+            owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    crate::java_ir::Member::Method(method) if method.name == name => Some(method),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let view = signatures
+            .method_signature(owner, method("view"))
+            .unwrap()
+            .return_shape()
+            .unwrap();
+        assert!(
+            !view.native_allocation.sync(),
+            "local view must not inherit backing domain: {view:?}"
+        );
+        let consume = signatures
+            .method_signature(owner, method("consume"))
+            .unwrap();
+        assert!(
+            !consume.params()[0].shape().native_allocation.sync(),
+            "{consume:?}"
+        );
+        assert!(
+            signatures
+                .required_field_shape("ArrayViewDomainContracts", "data")
+                .native_allocation
+                .sync()
+        );
+        assert!(
+            signatures
+                .required_field_shape("ArrayViewDomainContracts", "kept")
+                .native_allocation
+                .sync()
+        );
+        let keep = signatures.method_signature(owner, method("keep")).unwrap();
+        assert!(
+            keep.params()[0].shape().native_allocation.sync(),
+            "retained synchronized view requires synchronized backing: {keep:?}"
+        );
+    }
+    #[test]
+    fn erased_array_list_factory_keeps_native_obligations_off_object_storage() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/csv/ErasedArrayListViewContracts.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &crate::facts::FactSet::default(),
+        );
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|owner| owner.name == "ErasedArrayListViewContracts")
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "view" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+        assert!(
+            usage
+                .native_collection_retention_requirements()
+                .iter()
+                .all(|requirement| !requirement.path.is_empty()
+                    || !crate::shape_projection::java_type_is_erased_object_storage(
+                        &requirement.ty
+                    )),
+            "{usage:#?}"
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let signature = signatures.method_signature(owner, method).unwrap();
+        assert!(
+            !signature.params()[0].shape().native_allocation.shared(),
+            "{:#?}",
+            signature.params()[0]
+        );
+        let result = signature.return_shape().unwrap();
+        let child =
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&result.java_ty, &[0])
+                .unwrap();
+        assert!(
+            crate::types::optional_element_type(&child).is_some(),
+            "{result:#?}"
+        );
+    }
+
+    #[test]
+    fn inline_array_list_iterator_retains_its_nullable_element_contract() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/csv/ErasedIterableCastContracts.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &crate::facts::FactSet::default(),
+        );
+        let owner = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Type(ty) if ty.name.ends_with("Rows") => Some(ty),
+                _ => None,
+            })
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "iterator" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+        assert!(
+            !usage.nullable_collection_storage_flows.is_empty(),
+            "{usage:#?}"
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let shape = signatures
+            .method_signature(owner, method)
+            .unwrap()
+            .return_shape()
+            .unwrap();
+        let child =
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&shape.java_ty, &[0])
+                .unwrap();
+        assert!(
+            crate::types::optional_element_type(&child).is_some(),
+            "{shape:#?}; flows={:#?}",
+            usage.nullable_collection_storage_flows
+        );
+    }
     #[test]
     fn exact_method_inventory_and_lookup_keep_overloaded_bodies_distinct() {
         let parsed = crate::parser::parse_java_source(

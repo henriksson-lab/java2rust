@@ -156,13 +156,13 @@ fn unsupported_collection_destinations_are_explicit_and_source_methods_keep_thei
         r#"
         import java.util.List;
         class IntoArray {
-            static String[] into(List<String> values, String[] target) { return values.toArray(target); }
+            static String[] into(List<Object> values, String[] target) { return values.toArray(target); }
         }
     "#,
     );
     assert!(unsupported.rust.contains(
-        "typed Collection.toArray requires an exact compatible fresh reference-array destination"
-    ));
+        "typed Collection.toArray requires a compatible fresh reference-array destination or a retained destination with a proved exact final component"
+    ), "{}", unsupported.rust);
     let source = new_java2rust::translate_source(
         r#"
         class ArrayApi {

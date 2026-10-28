@@ -264,6 +264,7 @@ pub(crate) fn source_enum_field_accessor_name(ty: &TypeDecl, field_name: &str) -
                 && method.params.is_empty()
                 && method.type_params.is_empty()
                 && !method.modifiers.contains(&Modifier::Static)
+                && !method.modifiers.contains(&Modifier::Synchronized)
                 && trivial_returned_instance_field_name(method).as_deref() == Some(base.as_str())
                 && source_instance_field_decl(ty, field_name)
                     .is_some_and(|field| field.ty == method.return_type);

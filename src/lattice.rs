@@ -51,7 +51,7 @@ pub(crate) fn view_lattice_rank(requirement: &ViewShape) -> u8 {
     match requirement {
         ViewShape::Native => 50,
         ViewShape::JavaSemanticHash => 55,
-        ViewShape::ListInterface => 60,
+        ViewShape::ListInterface | ViewShape::ReferenceArray => 60,
         ViewShape::ErasedObjectView => 40,
         ViewShape::EnumView | ViewShape::DynTraitView => 30,
         ViewShape::Slice | ViewShape::Str => 10,

@@ -466,7 +466,15 @@ fn build_stream_plan_core<'a>(
         _ => return None,
     };
     let chain_root = receiver;
-    let source_spec = receiver_source_spec(chain_root)?;
+    let source_spec = receiver_source_spec(chain_root);
+    let stored_stream =
+        source_spec.is_none() && native_stored_stream_source(chain_root, env, facts);
+    let source_spec = source_spec.or_else(|| {
+        stored_stream.then_some(StreamSourceSpec {
+            expr: chain_root,
+            range: None,
+        })
+    })?;
     let source_expr = source_spec.expr;
     let source_shape = match shape_context {
         Some((shape_env, shape_ctx)) => {
@@ -479,8 +487,11 @@ fn build_stream_plan_core<'a>(
         }
         None => infer_stream_source_element_shape_with_facts(source_expr, env, facts)?,
     };
-    let (source, ops, current_shape) =
-        collect_stream_chain(chain_root, source_shape.clone(), env, facts)?;
+    let (source, ops, current_shape) = if stored_stream {
+        (chain_root.as_ref(), Vec::new(), source_shape.clone())
+    } else {
+        collect_stream_chain(chain_root, source_shape.clone(), env, facts)?
+    };
     let actual = stream_terminal_actual(&terminal, current_shape.clone(), env, facts);
     let collection_empty_add_changes = if matches!(terminal, StreamTerminal::Collect(_)) {
         match args.first() {
@@ -529,6 +540,14 @@ fn build_stream_plan_core<'a>(
         source_element: StreamElement::new(source_shape),
         actual,
     })
+}
+
+pub(crate) fn native_stored_stream_source(expr: &Expr, env: &TypeEnv, facts: &FactSet) -> bool {
+    let ty = crate::types::infer_expr_type(expr, env);
+    let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+    matches!(ty, JavaType::Named { ref name, .. }
+        if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream"
+            && !crate::call_plan::java_type_owner_is_parsed_source(name, env, facts))
 }
 
 fn stream_source_is_optional_sequence(source: &Expr, env: &TypeEnv, facts: &FactSet) -> bool {

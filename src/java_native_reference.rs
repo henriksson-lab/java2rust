@@ -80,6 +80,22 @@ impl<T> JavaLocalNativeRef<T> {
         }
     }
 
+    /// A local operation table may view a synchronized Java allocation. Keep
+    /// its original token and owner; the operation table itself need not be Send.
+    pub fn projected_from_arc<S: 'static>(source: &std::sync::Arc<S>, value: T) -> Self {
+        Self {
+            allocation: std::rc::Rc::new(JavaLocalNativeAllocation {
+                value,
+                identity: Some(JavaLocalNativeIdentity {
+                    pointer: std::sync::Arc::as_ptr(source) as usize,
+                    _owner: std::rc::Rc::new(<std::sync::Arc<S> as std::clone::Clone>::clone(
+                        source,
+                    )),
+                }),
+            }),
+        }
+    }
+
     pub fn new(value: T) -> Self {
         Self {
             allocation: std::rc::Rc::new(JavaLocalNativeAllocation {

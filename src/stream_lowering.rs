@@ -484,6 +484,13 @@ fn emit_stream_lambda_shared_native_call(
                         representations,
                     )
                 }),
+                ctx.representations.and_then(|representations| {
+                    crate::lower::retained_collection_reference_copy_operation(
+                        &shape,
+                        facts,
+                        representations,
+                    )
+                }),
             )?,
             precedence,
         ));
@@ -1679,8 +1686,43 @@ fn render_stream_plan_structured(
         );
         crate::call_plan::retained_native_iteration_element_type(&parent, facts).map(|_| parent)
     });
-    let checked_source = retained_parent.is_some();
-    let mut expr = if let Some(parent) = &retained_parent {
+    let stored_stream = ctx.env.zip(ctx.facts).is_some_and(|(env, facts)| {
+        crate::stream::native_stored_stream_source(plan.source().expr(), env.type_env(), facts)
+    });
+    let checked_source = retained_parent.is_some() || stored_stream;
+    let mut expr = if stored_stream {
+        let source = if source_optional_sequence {
+            stream_result_boundary(
+                receiver_method_call_projection_exact(
+                    source,
+                    "ok_or_else",
+                    vec![RustExpr::Closure {
+                        is_move: false,
+                        params: Vec::new(),
+                        return_type: None,
+                        body: RustClosureBody::Expr(Box::new(function_call_projection(
+                            RustExpr::path(["JavaException", "new"]),
+                            vec![
+                                rust_string_literal_projection("NullPointerException"),
+                                receiver_method_call_projection_exact(
+                                    rust_string_literal_projection("null stream"),
+                                    "to_string",
+                                    Vec::new(),
+                                ),
+                            ],
+                        ))),
+                    }],
+                ),
+                ctx,
+            )
+        } else {
+            source
+        };
+        stream_result_boundary(
+            receiver_method_call_projection_exact(source, "into_iter_once_result", Vec::new()),
+            ctx,
+        )
+    } else if let Some(parent) = &retained_parent {
         let stream = crate::coercion::retained_native_stream_projection(
             source,
             parent,

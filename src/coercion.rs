@@ -342,6 +342,10 @@ pub enum Coercion {
         trait_name: String,
     },
     EraseObject,
+    EraseNativeReference {
+        source: Box<RustSlotShape>,
+        adapter: crate::conversion_plan::ErasedArrayAdapter,
+    },
     CloneHierarchyToErasedObject,
     CloneDynTraitToErasedObject {
         trait_name: String,
@@ -487,8 +491,16 @@ impl ShapeCoercionPlan {
             return optional_coercions;
         }
         if matches!(self.dispatch(), DispatchCoercionPolicy::EraseObject) {
+            if self.actual().native_allocation.shared()
+                && matches!(self.actual().java_ty, JavaType::Array(_))
+            {
+                return vec![Coercion::EraseNativeReference {
+                    source: Box::new(self.actual().clone()),
+                    adapter: self.erased_array_adapter(),
+                }];
+            }
             plan.extend(self.ownership().coercions());
-            plan.extend(self.dispatch().coercions());
+            plan.push(Coercion::EraseObject);
             return non_identity_or_identity(plan);
         }
         if matches!(
@@ -5843,7 +5855,10 @@ pub(crate) fn string_get_bytes_result_projection(
 }
 
 pub(crate) fn string_to_char_array_projection(receiver: RustExpr) -> RustExpr {
-    typed_collect_projection(zero_arg_method_projection(receiver, "chars"), "Vec<char>")
+    function_call_projection(
+        RustExpr::path(["java_string_to_char_array"]),
+        vec![force_shared_borrow_projection(receiver)],
+    )
 }
 
 pub(crate) fn sequence_index_of_projection(receiver: RustExpr, needle: RustExpr) -> RustExpr {
@@ -7588,15 +7603,9 @@ pub(crate) fn arrays_equals_range_projection(
     right_from: RustExpr,
     right_to: RustExpr,
 ) -> RustExpr {
-    arrays_dual_range_runtime_call_projection(
-        "java_arrays_equals",
-        left,
-        left_from,
-        left_to,
-        right,
-        right_from,
-        right_to,
-    )
+    unwrap_result_or_panic_uncaught_java_exception(arrays_equals_range_result_projection(
+        left, left_from, left_to, right, right_from, right_to,
+    ))
 }
 
 pub(crate) fn arrays_equals_range_result_projection(
@@ -7607,14 +7616,16 @@ pub(crate) fn arrays_equals_range_result_projection(
     right_from: RustExpr,
     right_to: RustExpr,
 ) -> RustExpr {
-    arrays_dual_range_runtime_call_result_projection(
-        "java_arrays_equals",
-        left,
-        left_from,
-        left_to,
-        right,
-        right_from,
-        right_to,
+    function_call_projection(
+        RustExpr::path(["java_arrays_equals_range_result"]),
+        vec![
+            force_shared_borrow_projection(left),
+            left_from,
+            left_to,
+            force_shared_borrow_projection(right),
+            right_from,
+            right_to,
+        ],
     )
 }
 
@@ -9822,6 +9833,13 @@ pub(crate) fn clone_native_allocation_reference_for_evaluation(
     // a method named `clone` into scope. Qualify the Rust trait and handle
     // type: plain Clone::clone could clone an extra reference layer instead
     // of its allocation when the source is a borrowed nullable handle.
+    if shape.view == ViewShape::ReferenceArray {
+        return clone_reference_carrier_for_evaluation(
+            value,
+            shape,
+            RustExpr::path(["JavaReferenceArrayView", "clone"]),
+        );
+    }
     let payload_clone = RustExpr::TraitAssociatedPath {
         ty: RustType::Generic {
             base: if shape.native_allocation.sync() {
@@ -14365,6 +14383,32 @@ fn rendered_deref_string_view_projection(rendered: &str) -> Option<RustExpr> {
 
 pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
     match check {
+        InstanceOfCheck::ErasedIterable { optional }
+        | InstanceOfCheck::ErasedReferenceArray { optional } => {
+            let as_any = |value| zero_arg_method_projection(value, "as_ref");
+            let input = if *optional {
+                method_call_projection(
+                    zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
+                    "map",
+                    vec![single_param_closure_expr(
+                        "value",
+                        as_any(RustExpr::Var("value".into())),
+                    )],
+                )
+            } else {
+                option_some_projection(as_any(parenthesize_raw_method_receiver(expr)))
+            };
+            unwrap_result_or_panic_uncaught_java_exception(function_call_projection(
+                RustExpr::path(
+                    [if matches!(check, InstanceOfCheck::ErasedIterable { .. }) {
+                        "java_erased_iterable_type_test_result"
+                    } else {
+                        "java_reference_array_type_test_result"
+                    }],
+                ),
+                vec![input],
+            ))
+        }
         InstanceOfCheck::OptionalPayload { check } => method_call_projection(
             zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
             "is_some_and",
@@ -17223,6 +17267,33 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             vec![expr],
         ),
         Coercion::EraseObject => erased_object_box_projection(expr),
+        Coercion::EraseNativeReference { source, adapter } => function_call_projection(
+            RustExpr::path([match adapter {
+                crate::conversion_plan::ErasedArrayAdapter::Primitive => {
+                    "java_erase_primitive_array_reference"
+                }
+                crate::conversion_plan::ErasedArrayAdapter::FinalReference => {
+                    if source.native_allocation.sync() {
+                        "java_erase_shared_final_reference_array"
+                    } else {
+                        "java_erase_local_final_reference_array"
+                    }
+                }
+                crate::conversion_plan::ErasedArrayAdapter::ErasedObject => {
+                    if source.native_allocation.sync() {
+                        "java_erase_shared_object_array"
+                    } else {
+                        "java_erase_local_object_array"
+                    }
+                }
+                crate::conversion_plan::ErasedArrayAdapter::IdentityOnly => {
+                    "java_erase_native_reference"
+                }
+            }]),
+            vec![clone_native_allocation_reference_for_evaluation(
+                expr, source,
+            )],
+        ),
         Coercion::CloneHierarchyToErasedObject => zero_arg_method_projection(
             parenthesize_raw_method_receiver(expr),
             "__java_clone_to_any",
@@ -24257,23 +24328,10 @@ mod tests {
         );
         let arrays_equals_range_rendered = emit::emit_expr(&arrays_equals_range);
         assert!(
-            arrays_equals_range_rendered.contains("let __java_arrays_left = &left")
-                && arrays_equals_range_rendered.contains("let __java_arrays_right = &right")
+            arrays_equals_range_rendered.contains("java_arrays_equals_range_result(&left, left_from, left_to, &right, right_from, right_to)")
                 && arrays_equals_range_rendered.contains("uncaught Java exception")
-                && arrays_equals_range_rendered
-                    .contains("JavaException::new(\"IllegalArgumentException\"")
-                && arrays_equals_range_rendered
-                    .contains("JavaException::new(\"ArrayIndexOutOfBoundsException\"")
-                && arrays_equals_range_rendered.contains("java_arrays_equals(&__java_arrays_left")
-                && arrays_equals_range_rendered.contains("&__java_arrays_right")
         );
-        assert!(matches!(
-            arrays_equals_range,
-            RustExpr::Block {
-                tail: Some(tail),
-                ..
-            } if matches!(*tail, RustExpr::Call { .. })
-        ));
+        assert!(rust_expr_is_result_panic_recovered(&arrays_equals_range));
         let arrays_binary_search = arrays_binary_search_projection(
             RustExpr::Var("values".to_string()),
             RustExpr::Var("key".to_string()),
@@ -27432,40 +27490,14 @@ mod tests {
             }
         );
         let chars = string_to_char_array_projection(RustExpr::Var("value".to_string()));
+        assert_eq!(emit::emit_expr(&chars), "java_string_to_char_array(&value)");
+        assert!(matches!(chars, RustExpr::Call { args, .. } if args.len() == 1));
+        let call = string_to_char_array_projection(RustExpr::Raw("make_value()".to_string()));
         assert_eq!(
-            emit::emit_expr(&chars),
-            "value.chars().collect::<Vec<char>>()"
+            emit::emit_expr(&call),
+            "java_string_to_char_array(&make_value())"
         );
-        assert_eq!(
-            chars,
-            RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("value".to_string())),
-                    method: "chars".to_string(),
-                    args: Vec::new(),
-                }),
-                method: "collect::<Vec<char>>".to_string(),
-                args: Vec::new(),
-            }
-        );
-        assert_eq!(
-            emit::emit_expr(&string_to_char_array_projection(RustExpr::Raw(
-                "make_value()".to_string()
-            ))),
-            "make_value().chars().collect::<Vec<char>>()"
-        );
-        assert_eq!(
-            string_to_char_array_projection(RustExpr::Raw("make_value()".to_string())),
-            RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw("make_value()".to_string())),
-                    method: "chars".to_string(),
-                    args: Vec::new(),
-                }),
-                method: "collect::<Vec<char>>".to_string(),
-                args: Vec::new(),
-            }
-        );
+        assert!(matches!(call, RustExpr::Call { args, .. } if args.len() == 1));
     }
 
     #[test]

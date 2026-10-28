@@ -100,6 +100,7 @@ fn parse_imports(root: tree_sitter::Node, source: &str) -> Vec<ImportDecl> {
 
 fn qualify_java_sql_imported_types(types: &mut [TypeDecl], imports: &[ImportDecl]) {
     let imported = JavaSqlImports::from_imports(imports);
+    let imported = imported.without_names(types.iter().map(|ty| ty.name.as_str()));
     if imported.is_empty() {
         return;
     }
@@ -122,6 +123,38 @@ struct JavaSqlImports {
 }
 
 impl JavaSqlImports {
+    fn without_names<'a>(self, names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut scoped = if self.wildcard {
+            Self {
+                wildcard: false,
+                connection: true,
+                statement: true,
+                prepared_statement: true,
+                result_set: true,
+                result_set_metadata: true,
+                database_metadata: true,
+                sql_exception: true,
+                driver_manager: true,
+            }
+        } else {
+            self
+        };
+        for name in names {
+            match name {
+                "Connection" => scoped.connection = false,
+                "Statement" => scoped.statement = false,
+                "PreparedStatement" => scoped.prepared_statement = false,
+                "ResultSet" => scoped.result_set = false,
+                "ResultSetMetaData" => scoped.result_set_metadata = false,
+                "DatabaseMetaData" => scoped.database_metadata = false,
+                "SQLException" => scoped.sql_exception = false,
+                "DriverManager" => scoped.driver_manager = false,
+                _ => {}
+            }
+        }
+        scoped
+    }
+
     fn from_imports(imports: &[ImportDecl]) -> Self {
         let mut imported = Self::default();
         for import in imports.iter().filter(|import| !import.is_static) {
@@ -180,6 +213,17 @@ impl JavaSqlImports {
 }
 
 fn qualify_java_sql_type_decl(ty: &mut TypeDecl, imported: &JavaSqlImports) {
+    let imported = imported.without_names(
+        ty.type_params
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(ty.name.as_str()))
+            .chain(ty.members.iter().filter_map(|member| match member {
+                Member::Type(nested) => Some(nested.name.as_str()),
+                _ => None,
+            })),
+    );
+    let imported = &imported;
     for bound in &mut ty.type_param_bounds {
         if let Some(bound) = bound {
             qualify_java_sql_type(bound, imported);
@@ -199,6 +243,8 @@ fn qualify_java_sql_member(member: &mut Member, imported: &JavaSqlImports) {
             }
         }
         Member::Method(method) => {
+            let imported = imported.without_names(method.type_params.iter().map(String::as_str));
+            let imported = &imported;
             for bound in &mut method.type_param_bounds {
                 if let Some(bound) = bound {
                     qualify_java_sql_type(bound, imported);
@@ -216,6 +262,8 @@ fn qualify_java_sql_member(member: &mut Member, imported: &JavaSqlImports) {
             }
         }
         Member::Constructor(ctor) => {
+            let imported = imported.without_names(ctor.type_params.iter().map(String::as_str));
+            let imported = &imported;
             for bound in &mut ctor.type_param_bounds {
                 if let Some(bound) = bound {
                     qualify_java_sql_type(bound, imported);
@@ -237,8 +285,12 @@ fn qualify_java_sql_member(member: &mut Member, imported: &JavaSqlImports) {
 }
 
 fn qualify_java_sql_block(block: &mut Block, imported: &JavaSqlImports) {
+    let mut scoped = *imported;
     for stmt in &mut block.statements {
-        qualify_java_sql_stmt(stmt, imported);
+        if let Stmt::LocalType(ty) = stmt {
+            scoped = scoped.without_names([ty.name.as_str()]);
+        }
+        qualify_java_sql_stmt(stmt, &scoped);
     }
 }
 
@@ -3221,6 +3273,11 @@ fn java_type_name_suffix(src: &str) -> String {
 }
 
 fn preserve_explicit_runtime_type_name(src: &str) -> bool {
+    // SQL imports are qualified by a lexical pass. Preserve an explicit owner
+    // first, so `java.sql.ResultSet` cannot collapse into a same-named binder.
+    if src.starts_with("java.sql.") {
+        return true;
+    }
     // The same intrinsic carrier registry owns both clone semantics and
     // qualification. Do not erase a platform owner before lexical binding.
     if src.starts_with("java.")
@@ -3778,6 +3835,78 @@ fn java_type_suffix_name(name: &str) -> String {
 
 #[cfg(test)]
 mod naming_tests {
+    #[test]
+    fn sql_qualification_respects_lexical_types_and_explicit_owners() {
+        use super::*;
+        let named = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![],
+        };
+        for imports in ["import java.sql.ResultSet;", "import java.sql.*;"] {
+            let parsed = parse_java_source(&format!(
+                r#"{imports}
+class Probe<ResultSet> {{
+    ResultSet local;
+    java.sql.ResultSet jdbc;
+    <Connection> Probe(Connection value) {{}}
+    <ResultSetMetaData> ResultSetMetaData method(ResultSet value) {{
+        class Statement {{}}
+        Statement local = null;
+        java.sql.Statement jdbc = null;
+        return null;
+    }}
+}}
+"#
+            ));
+            assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+            let owner = &parsed.program.types[0];
+            for member in &owner.members {
+                match member {
+                    Member::Field(field) if field.name == "local" => {
+                        assert_eq!(field.ty, named("ResultSet"))
+                    }
+                    Member::Field(field) if field.name == "jdbc" => {
+                        assert_eq!(field.ty, named("java.sql.ResultSet"))
+                    }
+                    Member::Constructor(ctor) => assert_eq!(ctor.params[0].ty, named("Connection")),
+                    Member::Method(method) => {
+                        assert_eq!(method.return_type, named("ResultSetMetaData"));
+                        assert_eq!(method.params[0].ty, named("ResultSet"));
+                        let body = method.body.as_ref().unwrap();
+                        for stmt in &body.statements {
+                            if let Stmt::VarDecl { name, ty, .. } = stmt {
+                                assert_eq!(
+                                    *ty,
+                                    named(if name == "local" {
+                                        "Statement"
+                                    } else {
+                                        "java.sql.Statement"
+                                    })
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let parsed = parse_java_source(
+            "import java.sql.*; class ResultSet {} class Uses { ResultSet local; java.sql.ResultSet jdbc; }",
+        );
+        for member in &parsed.program.types[1].members {
+            if let Member::Field(field) = member {
+                assert_eq!(
+                    field.ty,
+                    named(if field.name == "local" {
+                        "ResultSet"
+                    } else {
+                        "java.sql.ResultSet"
+                    })
+                );
+            }
+        }
+    }
+
     #[test]
     fn hierarchy_arguments_preserve_qualified_arrays_and_wildcard_bounds() {
         use super::*;

@@ -286,6 +286,11 @@ impl<'a> ResolvedNativeContracts<'a> {
                     let effective = crate::effective_facts::EffectiveFacts::new(self.facts);
                     crate::slot_render::native_allocation_has_outer_carrier(&child, &effective)
                         || effective.native_functional_carrier(&child).is_some()
+                        // Native cursors already own canonical local cursor
+                        // state; their reference copy has no outer Rc shell.
+                        // This is not evidence for a synchronized cursor.
+                        || (effective.native_cursor_element_type(&child).is_some()
+                            && !required.placement.sync())
                 })
             {
                 diagnostic(
@@ -294,7 +299,7 @@ impl<'a> ResolvedNativeContracts<'a> {
                     None,
                     "selected_requirement",
                     "native_contract_non_native_position",
-                    "allocation evidence addresses a concrete nonnative leaf, not a supported native outer allocation or implicit functional environment",
+                    "allocation evidence addresses a concrete nonnative leaf, not a supported native outer allocation or intrinsic reference environment",
                 );
             } else if !satisfies(placement_at(shape, &required.slot.path), required.placement) {
                 diagnostic(

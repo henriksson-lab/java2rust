@@ -1319,12 +1319,36 @@ fn collect_constructor_inner_identity_requirements(
         semantic_facts: &FactSet,
         types: &mut BTreeMap<String, TypeStorageFacts>,
     ) {
-        let constructor_needs_identity = ty.members.iter().any(|member| {
-            let Member::Constructor(ctor) = member else {
-                return false;
-            };
-            constructor_reaches_inner_construction(ty, ctor, semantic_facts)
-        });
+        let initializers = Block {
+            statements: ty
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                        field.initializer.clone().map(Stmt::Expr)
+                    }
+                    _ => None,
+                })
+                .collect(),
+        };
+        let initializer_needs_identity =
+            crate::inner_class_capture::block_constructs_inner_for_outer(
+                &initializers,
+                &ty.name,
+                semantic_facts,
+            ) || block_calls_inner_constructing_self_method(
+                ty,
+                &initializers,
+                semantic_facts,
+                &mut BTreeSet::new(),
+            );
+        let constructor_needs_identity = initializer_needs_identity
+            || ty.members.iter().any(|member| {
+                let Member::Constructor(ctor) = member else {
+                    return false;
+                };
+                constructor_reaches_inner_construction(ty, ctor, semantic_facts)
+            });
         if constructor_needs_identity && let Some(storage) = types.get_mut(&ty.name) {
             storage.constructor_self_escapes = true;
         }

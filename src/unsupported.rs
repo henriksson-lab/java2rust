@@ -14,7 +14,7 @@ pub(crate) fn compile_error_expr(message: &str) -> RustExpr {
 
 pub(crate) fn collection_array_destination_expr() -> RustExpr {
     compile_error_expr(
-        "typed Collection.toArray requires an exact compatible fresh reference-array destination; destination identity and runtime component checks are not represented for this call",
+        "typed Collection.toArray requires a compatible fresh reference-array destination or a retained destination with a proved exact final component; this call lacks a supported identity/component contract",
     )
 }
 

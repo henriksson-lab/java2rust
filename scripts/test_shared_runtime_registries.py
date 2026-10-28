@@ -9,6 +9,74 @@ SCRIPT = Path(__file__).with_name("merge-shared-support-facades.py")
 merge = runpy.run_path(str(SCRIPT))["merge_additive_runtime_registries"]
 
 
+class SharedSnapshotTests(unittest.TestCase):
+    def test_source_shadow_cleanup_refreshes_seed_offsets_before_replacing_tail_impl(self):
+        runtime = """pub struct Live { value: i32 }
+impl Live {
+    pub fn new() -> Self { Self { value: 9 } }
+    pub fn value(&self) -> i32 { self.value }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix="java-seed-snapshot-") as temp:
+            root = Path(temp)
+            generated = root / "generated"
+            generated.mkdir()
+            for name in ("A", "B"):
+                (generated / f"{name}.rs").write_text(runtime + f"pub struct {name};\n")
+            shared = root / "shared.rs"
+            shared.write_text("pub struct A;\npub struct Live;\nimpl Live {\n    pub fn value(&self) -> i32 { 0 }\n}\n")
+            types = root / "types.tsv"
+            types.write_text("A\nLive\n")
+            result = subprocess.run([
+                "python3", str(SCRIPT), "--generated-dir", str(generated),
+                "--shared-support", str(shared), "--shared-types", str(types),
+                "--conflicts", str(root / "conflicts.tsv"),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("pub struct A", shared.read_text())
+            self.assertEqual(shared.read_text().count("pub fn value"), 1)
+            source = root / "main.rs"
+            source.write_text('#[path="shared.rs"] mod shared;\npub use shared::*;\n#[path="generated/A.rs"] mod a;\n#[path="generated/B.rs"] mod b;\nfn main() { assert_eq!(Live::new().value(), 9); }\n')
+            binary = root / "probe"
+            result = subprocess.run(["rustc", "--edition=2024", str(source), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            subprocess.run([str(binary)], check=True)
+
+
+class SpecializedInherentTests(unittest.TestCase):
+    def test_nested_specialization_is_shared_once_and_trait_impls_remain_distinct(self):
+        runtime = """
+pub struct Cursor<T> { marker: std::marker::PhantomData<T> }
+pub trait Factory<T> {}
+impl<T> Factory<Option<Box<T>>> for Cursor<T> {}
+impl Cursor<Option<Box<dyn std::any::Any>>> {
+    pub fn from_erased_view() -> Self { Self { marker: std::marker::PhantomData } }
+}
+"""
+        with tempfile.TemporaryDirectory(prefix='java-specialized-impl-') as temp:
+            root = Path(temp)
+            generated = root / 'generated'
+            generated.mkdir()
+            for name in ['A', 'B']:
+                (generated / f'{name}.rs').write_text(runtime + f'\npub struct Use{name};\n')
+            shared = root / 'shared.rs'
+            result = subprocess.run([
+                'python3', str(SCRIPT), '--generated-dir', str(generated),
+                '--shared-support', str(shared), '--shared-types', str(root / 'types.tsv'),
+                '--conflicts', str(root / 'conflicts.tsv'),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(shared.read_text().count('pub fn from_erased_view'), 1)
+            for name in ['A', 'B']:
+                self.assertNotIn('pub fn from_erased_view', (generated / f'{name}.rs').read_text())
+            source = root / 'main.rs'
+            source.write_text('#[path="shared.rs"] mod shared;\npub use shared::*;\n#[path="generated/A.rs"] mod a;\n#[path="generated/B.rs"] mod b;\nfn main() { let _: Cursor<Option<Box<dyn std::any::Any>>> = Cursor::from_erased_view(); }\n')
+            binary = root / 'probe'
+            result = subprocess.run(['rustc', '--edition=2024', str(source), '-o', str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            subprocess.run([str(binary)], check=True)
+
+
 class AssociatedConstantTests(unittest.TestCase):
     def test_private_and_restricted_constants_keep_complete_initializers(self):
         extract = runpy.run_path(str(SCRIPT))["extract_consts"]
@@ -101,6 +169,50 @@ impl Kernel {
             self.assertEqual(result.returncode, 0, result.stderr)
             source = root / 'check.rs'
             source.write_text(shared.read_text() + '\nmod child { pub fn read() -> u32 { crate::Kernel::visit() } }\nfn main() { assert_eq!(child::read(), 1); assert_eq!(Kernel::visit(), 2); }\n')
+            binary = root / 'check'
+            compiled = subprocess.run(['rustc', '--edition=2021', str(source), '-o', str(binary)], capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            subprocess.run([str(binary)], check=True)
+
+    def test_single_module_tls_promotes_private_nominal_dependencies(self):
+        runtime = '''
+struct HiddenPayload { count: u32 }
+struct HiddenState { payload: HiddenPayload }
+std::thread_local! {
+    static STATE: std::cell::RefCell<HiddenState> = std::cell::RefCell::new(
+        HiddenState { payload: HiddenPayload { count: 0 } });
+}
+pub struct Kernel;
+impl Kernel {
+    pub fn visit() -> u32 {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.payload.count += 1;
+            state.payload.count
+        })
+    }
+}
+pub struct A;
+'''
+        with tempfile.TemporaryDirectory(prefix='java-tls-nominal-support-') as temp:
+            root = Path(temp)
+            generated = root / 'generated'
+            generated.mkdir()
+            (generated / 'A.rs').write_text(runtime)
+            shared = root / 'shared.rs'
+            types = root / 'types.tsv'
+            types.write_text('Kernel\n')
+            result = subprocess.run([
+                'python3', str(SCRIPT), '--generated-dir', str(generated),
+                '--shared-support', str(shared), '--shared-types', str(types),
+                '--conflicts', str(root / 'conflicts.tsv'),
+            ], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = shared.read_text()
+            self.assertIn('struct HiddenState', text)
+            self.assertIn('struct HiddenPayload', text)
+            source = root / 'check.rs'
+            source.write_text(text + '\nfn main() { assert_eq!(Kernel::visit(), 1); assert_eq!(Kernel::visit(), 2); }\n')
             binary = root / 'check'
             compiled = subprocess.run(['rustc', '--edition=2021', str(source), '-o', str(binary)], capture_output=True, text=True)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)

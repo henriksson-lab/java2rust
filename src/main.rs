@@ -15,7 +15,7 @@ fn main() -> ExitCode {
             "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir [--primary-file relative/or/absolute.java ...] [--emit-primary-file relative/or/absolute.java ...] --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>\n       new-java2rust count-invalid-patterns <file.rs>"
         );
         eprintln!(
-            "       new-java2rust emit-runtime-support <floating-point-display|lossless-java-text>"
+            "       new-java2rust emit-runtime-support <floating-point-display|lossless-java-text|checked-iterator>"
         );
         eprintln!(
             "       new-java2rust representation-cost <rust-file|src-directory|-> [--baseline path] [--weights file] [--sites]"
@@ -2509,6 +2509,12 @@ impl Other {
             parse(&["emit-runtime-support", "floating-point-display"]),
             Some(Args::EmitRuntimeSupport {
                 kind: new_java2rust::RuntimeSupport::FloatingPointDisplay
+            })
+        );
+        assert_eq!(
+            parse(&["emit-runtime-support", "checked-iterator"]),
+            Some(Args::EmitRuntimeSupport {
+                kind: new_java2rust::RuntimeSupport::CheckedIterator
             })
         );
         assert_eq!(parse(&["emit-runtime-support"]), None);

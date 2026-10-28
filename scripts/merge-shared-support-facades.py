@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import cache
 from pathlib import Path
 
-from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_target_name, is_dyn_trait_target, rust_delimiter_scan, top_level_macro_items
+from rust_item_utils import attached_outer_item_start, expand_inherent_impl_alias, has_associated_definitions, impl_target_name, inherent_impl_target_name, is_dyn_trait_target, rust_delimiter_scan, top_level_macro_items
 
 
 # Private helper types can be representation dependencies of a public support
@@ -23,10 +23,6 @@ TRAIT_DECL_RE = re.compile(
 ALIAS_RE = re.compile(
     r"^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"
     r"(?:\s*<[^=;]+>)?\s*=\s*(.+?)\s*;\s*$"
-)
-INHERENT_IMPL_RE = re.compile(
-    r"^\s*impl(?:\s*<.*>)?\s+(?:dyn\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
 )
 TRAIT_IMPL_RE = re.compile(
     r"^\s*impl(?:\s*<.*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)"
@@ -643,9 +639,9 @@ def parse_items(
                 index = end
                 continue
 
-            inherent_match = INHERENT_IMPL_RE.match(header)
-            if inherent_match and inherent_match.group(1) in selected:
-                name = inherent_match.group(1)
+            inherent_match = inherent_impl_target_name(header)
+            if inherent_match and inherent_match in selected:
+                name = inherent_match
                 end = item_end(lines, index)
                 items.append(
                     {
@@ -790,9 +786,9 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
                 index = end
                 continue
 
-            inherent_match = INHERENT_IMPL_RE.match(header)
-            if inherent_match and inherent_match.group(1) in selected:
-                name = inherent_match.group(1)
+            inherent_match = inherent_impl_target_name(header)
+            if inherent_match and inherent_match in selected:
+                name = inherent_match
                 end = item_end(lines, index)
                 items.append(
                     {
@@ -1100,9 +1096,9 @@ def remove_duplicate_source_owned_nested_stubs(path: Path) -> None:
                 name = type_match.group(2)
                 start = attached_start(lines, index)
             else:
-                inherent_match = INHERENT_IMPL_RE.match(impl_header_text(lines, index))
+                inherent_match = inherent_impl_target_name(impl_header_text(lines, index))
                 if inherent_match:
-                    name = inherent_match.group(1)
+                    name = inherent_match
             if name in last_decl_start_by_name and start < last_decl_start_by_name[name]:
                 end = item_end(lines, index)
                 for remove_index in range(start, end):
@@ -1151,7 +1147,7 @@ def remove_duplicate_inherent_methods(path: Path) -> None:
     while index < len(lines):
         line = lines[index]
         if depth == 0 and (
-            impl_match := INHERENT_IMPL_RE.match(impl_header_text(lines, index))
+            impl_match := inherent_impl_target_name(impl_header_text(lines, index))
         ):
             impl_end = item_end(lines, index)
             methods_by_name = defaultdict(list)
@@ -2065,14 +2061,14 @@ def remove_protected_names_from_shared_support(path: Path, names: set[str]) -> N
         type_match = TYPE_RE.match(line)
         trait_match = TRAIT_DECL_RE.match(line)
         header = impl_header_text(lines, index)
-        inherent_match = INHERENT_IMPL_RE.match(header)
+        inherent_match = inherent_impl_target_name(header)
         impl_match = TRAIT_IMPL_RE.match(header)
         alias_match = ALIAS_RE.match(line)
         if type_match and type_match.group(2) in names:
             end = item_end(lines, index)
         elif trait_match and trait_match.group(1) in names:
             end = item_end(lines, index)
-        elif inherent_match and inherent_match.group(1) in names:
+        elif inherent_match and inherent_match in names:
             end = item_end(lines, index)
         elif impl_match:
             trait_name = impl_match.group(1).strip()
@@ -2213,10 +2209,11 @@ def main() -> int:
             )
             destination[item["name"]].append(item_with_path)
 
-    initially_selected_functions = top_level_function_dependency_closure(
+    initially_selected_functions, initially_selected_values = top_level_item_dependency_closure(
         [existing_shared_text]
         + [text_without_top_level_functions(path) for path in rust_paths],
         top_level_functions_by_name,
+        top_level_values_by_name,
     )
 
     selected = {
@@ -2416,6 +2413,14 @@ def main() -> int:
             for name in initially_selected_functions
             for item in top_level_functions_by_name[name]
         )
+        # A promoted static/TLS item can be the only user of a private
+        # representation type. Its declaration is just as much part of the
+        # shared nominal contract as a promoted function's signature/body.
+        selected_item_texts.extend(
+            item["text"]
+            for name in initially_selected_values
+            for item in top_level_values_by_name[name]
+        )
         for path in merge_input_paths:
             selected_item_texts.extend(
                 item["text"]
@@ -2479,6 +2484,25 @@ def main() -> int:
         Path(args.shared_types),
         protected_source_owned_nested_names | source_shadowing_declared_types,
     )
+
+    # Source-shadow cleanup mutates the seed. All subsequent inventories and
+    # line ranges must describe those same bytes, especially tail impl ranges.
+    # An old snapshot can otherwise cut unrelated declarations or run beyond EOF.
+    existing_shared_text = shared_support_path.read_text() if shared_support_path.exists() else ""
+    existing_shared_declared_type_names = declared_type_names_from_text(existing_shared_text)
+    existing_shared_types = read_existing_shared_types(Path(args.shared_types)) | existing_shared_declared_type_names
+    existing_shared_from_impl_keys = from_impl_keys_from_text(existing_shared_text)
+    existing_shared_alias_names = {
+        match.group(1) for line in existing_shared_text.splitlines()
+        if (match := ALIAS_RE.match(line))
+    }
+    existing_shared_functions = {
+        item["name"]: item for item in parse_top_level_functions_from_text(existing_shared_text)
+    }
+    existing_shared_function_names = set(existing_shared_functions)
+    existing_shared_value_names = {
+        item["name"] for item in parse_top_level_values_from_text(existing_shared_text)
+    }
 
     conflict_lines = ["type\tkind\tdetail\n"]
     if not selected and not initially_selected_functions:

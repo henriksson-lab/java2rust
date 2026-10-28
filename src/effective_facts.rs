@@ -694,6 +694,7 @@ impl<'a> EffectiveFacts<'a> {
         self.native_cursor_element_type_for_names(
             java_ty,
             &[
+                "Spliterator",
                 "Iterator",
                 "java.util.Iterator",
                 "JavaIterator",
@@ -1125,6 +1126,10 @@ mod type_fact_lookup_session_tests {
             "SplittableRandom",
             "java.util.SplittableRandom",
             "StringBuffer",
+            "StringWriter",
+            "java.io.OutputStreamWriter",
+            "Writer",
+            "java.lang.Appendable",
         ] {
             assert!(query(name, &facts), "{name}");
         }
@@ -1138,6 +1143,12 @@ mod type_fact_lookup_session_tests {
         // owner. The mixed source/native regression exercises both together.
         assert!(query("java.util.SplittableRandom", &facts));
         assert!(query("StringBuffer", &facts));
+        let mut source = facts.type_capability_overrides[0].clone();
+        source.type_name = "Appendable".into();
+        source.provenance = FactProvenance::ParsedSource;
+        facts.type_capability_overrides.push(source);
+        assert!(!query("Appendable", &facts));
+        assert!(query("java.lang.Appendable", &facts));
     }
 
     #[test]

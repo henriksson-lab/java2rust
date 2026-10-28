@@ -1141,7 +1141,16 @@ pub fn optional_java_type(element_ty: JavaType) -> JavaType {
 }
 
 pub fn stream_element_type(source_ty: &JavaType) -> Option<JavaType> {
-    sequence_element_type(source_ty).map(normalize_stream_element_type)
+    let element = match source_ty {
+        JavaType::Named { name, args }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream"
+                && args.len() == 1 =>
+        {
+            args.first().cloned()
+        }
+        _ => sequence_element_type(source_ty),
+    };
+    element.map(normalize_stream_element_type)
 }
 
 fn normalize_stream_element_type(ty: JavaType) -> JavaType {

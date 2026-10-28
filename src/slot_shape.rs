@@ -45,6 +45,8 @@ pub enum ViewShape {
     Native,
     /// Identity-preserving List interface operations, independent of payload storage.
     ListInterface,
+    /// Canonical Object[] operations retaining the original covariant owner.
+    ReferenceArray,
     /// Native hash collection using Java key equality instead of Rust Eq/Hash.
     JavaSemanticHash,
     Str,

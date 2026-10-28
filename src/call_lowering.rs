@@ -374,6 +374,9 @@ fn apply_native_java_instance_method(
                 tail: Some(Box::new(RustExpr::Var(stream_name.to_string()))),
             }
         }
+        NativeJavaInstanceMethod::EnumName => {
+            receiver_method_call_projection(receiver, "name", args)
+        }
         NativeJavaInstanceMethod::StringLen => function_call_projection(
             RustExpr::path(["java_string_length"]),
             vec![force_shared_borrow_projection(
@@ -1119,6 +1122,28 @@ fn apply_native_java_static_method(
                 vec![arg],
             )
         }
+        NativeJavaStaticMethod::CharacterToString => {
+            if args.len() != 1 {
+                return compile_error_call("Character.toString requires one argument");
+            }
+            let result =
+                function_call_projection(RustExpr::path(["java_character_to_string_result"]), args);
+            let text = crate::coercion::unwrap_result_or_panic_uncaught_java_exception(result);
+            let scalar = receiver_method_call_projection_exact(text, "scalar_string", Vec::new());
+            receiver_method_call_projection_exact(
+                scalar,
+                "expect",
+                vec![rust_string_literal_projection(
+                    "Character text requires a lossless Java String carrier",
+                )],
+            )
+        }
+        NativeJavaStaticMethod::CharacterIsWhitespace => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Character.isWhitespace requires one argument");
+            };
+            function_call_projection(RustExpr::path(["java_character_is_whitespace"]), vec![arg])
+        }
         NativeJavaStaticMethod::CharacterPredicate {
             java_name,
             rust_method,
@@ -1302,6 +1327,14 @@ fn apply_native_collection_static_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
+        NativeCollectionStaticMethod::SpliteratorUnknownSize => function_call_projection(
+            RustExpr::path(["JavaIteratorSpliterator", "unknown_size_result"]),
+            args,
+        ),
+        NativeCollectionStaticMethod::StreamFromSpliterator => function_call_projection(
+            RustExpr::path(["JavaStream", "from_spliterator_result"]),
+            args,
+        ),
         NativeCollectionStaticMethod::ArraysAsList => arrays_as_list_projection(args),
         NativeCollectionStaticMethod::ArraysEquals => {
             let left = args.first().cloned().unwrap_or_else(unit_expr);
@@ -3799,13 +3832,14 @@ fn apply_native_collection_new_target(
                         Vec::new(),
                     )
                 }),
+            NativeCollectionNewTarget::CaseInsensitiveStringMap { .. } => function_call_projection(
+                RustExpr::path(["JavaSemanticHashMap", "new_case_insensitive_strings"]),
+                Vec::new(),
+            ),
             NativeCollectionNewTarget::FromSingleArg { .. }
                 if matches!(kind, crate::stdlib::JavaCollectionKind::SortedMap) =>
             {
-                function_call_projection(
-                    RustExpr::path(["JavaSemanticHashMap", "new_case_insensitive_strings"]),
-                    Vec::new(),
-                )
+                compile_error_call("unsupported comparator-backed Java map constructor")
             }
             NativeCollectionNewTarget::FromSingleArg { .. } => args.pop().unwrap_or_else(|| {
                 function_call_projection(RustExpr::path(["JavaSemanticHashMap", "new"]), Vec::new())
@@ -3868,7 +3902,8 @@ fn apply_native_collection_new_target(
                         )
                     })
                 }
-                NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
+                NativeCollectionNewTarget::CaseInsensitiveStringMap { .. }
+                | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
                     priority_queue_comparator_constructor_unsupported_projection()
                 }
                 NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. } => args
@@ -3940,7 +3975,8 @@ fn apply_native_collection_new_target(
                 .unwrap_or_else(|| {
                     function_call_projection(RustExpr::path([semantic_set_name, "new"]), Vec::new())
                 }),
-            NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
+            NativeCollectionNewTarget::CaseInsensitiveStringMap { .. }
+            | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
                 priority_queue_comparator_constructor_unsupported_projection()
             }
             NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. } => args
@@ -4026,6 +4062,10 @@ fn apply_native_collection_new_target(
         NativeCollectionNewTarget::FromSingleArg { kind } => args
             .pop()
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+        NativeCollectionNewTarget::CaseInsensitiveStringMap { .. } => function_call_projection(
+            RustExpr::path(["JavaSemanticHashMap", "new_case_insensitive_strings"]),
+            Vec::new(),
+        ),
         NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
             priority_queue_comparator_constructor_unsupported_projection()
         }
@@ -4264,6 +4304,7 @@ fn native_collection_new_target_kind(
         | NativeCollectionNewTarget::WithCapacity { kind }
         | NativeCollectionNewTarget::FromSource { kind, .. }
         | NativeCollectionNewTarget::FromSingleArg { kind }
+        | NativeCollectionNewTarget::CaseInsensitiveStringMap { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorFacade { kind }

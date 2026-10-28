@@ -1630,8 +1630,9 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
         owner,
         return_type,
         callable_name,
+        support_programs,
         visiting.storage_context,
-        false,
+        SourceCallableCapability::Clone,
     ) {
         return true;
     }
@@ -3603,6 +3604,7 @@ struct RetainedCallableShapeContext<'a> {
     env: crate::expr_shape::ShapeEnv,
     params: &'a [crate::signature::ParamPlan],
     locals: &'a [crate::signature::LocalPlan],
+    result: Option<&'a RustSlotShape>,
 }
 
 /// Reusable callbacks copy consumed captures, not their newly supplied
@@ -3838,6 +3840,7 @@ fn retained_callable_shape_context<'a>(
             env,
             params: signature.params(),
             locals: signature.locals(),
+            result: signature.return_shape(),
         })
     };
     for member in &owner.members {
@@ -3860,6 +3863,7 @@ fn retained_callable_shape_context<'a>(
                     ),
                     params: signature.params(),
                     locals: signature.locals(),
+                    result: None,
                 });
             }
             _ => {}
@@ -4099,22 +4103,41 @@ fn retained_iteration_requires_parameter(
     owner: Option<&TypeDecl>,
     return_type: Option<&JavaType>,
     callable_name: Option<&str>,
+    support_programs: &[&Program],
     context: Option<CloneStorageContext<'_>>,
-    lifetime: bool,
+    capability: SourceCallableCapability,
 ) -> bool {
+    let lifetime = capability != SourceCallableCapability::Clone;
+    let synchronized_copy = capability == SourceCallableCapability::JavaSend;
     let (Some(body), Some(owner), Some(context)) = (body, owner, context) else {
         return false;
     };
     let sites = crate::exception_plan::enhanced_for_iterable_sites(body);
     let mut conversions = HashMap::new();
     let mut assignment_targets = HashMap::new();
+    fn record_assignment_target(
+        target: &Expr,
+        value: &Expr,
+        sites: &mut HashMap<*const Expr, Expr>,
+    ) {
+        sites.insert(value as *const Expr, target.clone());
+        if let Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } = value
+        {
+            record_assignment_target(target, then_expr, sites);
+            record_assignment_target(target, else_expr, sites);
+        }
+    }
     // Retaining a collection as Iterable creates the same checked cursor
     // factory as traversal does. Its payload Clone/'static obligations belong
     // to the creating callable too, even if it never traverses the value.
     let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
     crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| match stmt {
         Stmt::Assign { target, value } => {
-            assignment_targets.insert(value as *const Expr, target.clone());
+            record_assignment_target(target, value, &mut assignment_targets);
         }
         Stmt::VarDecl {
             ty,
@@ -4163,6 +4186,8 @@ fn retained_iteration_requires_parameter(
             || matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "asList" | "as_list"));
         has_native_copy_or_cursor |= matches!(expr, Expr::Call { name, args, .. }
             if args.is_empty() && matches!(name.as_str(), "hashCode" | "hash_code"));
+        has_native_copy_or_cursor |= matches!(expr, Expr::Call { name, .. }
+            if matches!(name.as_str(), "clone" | "copyOf" | "copy_of" | "copyOfRange" | "copy_of_range"));
         has_native_copy_or_cursor |= matches!(expr, Expr::Call { name, args, .. }
             if args.is_empty() && matches!(name.as_str(), "element" | "getFirst" | "get_first" | "getLast" | "get_last" | "peek" | "peekFirst" | "peek_first"));
         match expr {
@@ -4218,6 +4243,111 @@ fn retained_iteration_requires_parameter(
     else {
         return false;
     };
+    let mut retained_copy_destinations = HashSet::new();
+    fn record_destination(
+        expr: &Expr,
+        target: &RustSlotShape,
+        sites: &mut HashSet<*const Expr>,
+        synchronized: bool,
+    ) {
+        if target.native_allocation.shared() && (!synchronized || target.native_allocation.sync()) {
+            sites.insert(expr as *const Expr);
+            if let Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } = expr
+            {
+                record_destination(then_expr, target, sites, synchronized);
+                record_destination(else_expr, target, sites, synchronized);
+            }
+        }
+    }
+    crate::semantic_analysis::walk_block_stmts(body, &mut |stmt| match stmt {
+        Stmt::Return(Some(expr)) => {
+            if let Some(target) = callable.result {
+                record_destination(
+                    expr,
+                    target,
+                    &mut retained_copy_destinations,
+                    synchronized_copy,
+                );
+            }
+        }
+        Stmt::VarDecl {
+            binding: Some(binding),
+            initializer: Some(expr),
+            ..
+        } => {
+            if let Some(local) = callable
+                .locals
+                .iter()
+                .find(|local| local.binding() == binding)
+            {
+                record_destination(
+                    expr,
+                    local.shape(),
+                    &mut retained_copy_destinations,
+                    synchronized_copy,
+                );
+            }
+        }
+        _ => {}
+    });
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        let (args, plan) = match expr {
+            Expr::Call {
+                args,
+                resolved: Some(call),
+                ..
+            } => (
+                args,
+                crate::call_plan::plan_call_arguments(Some(call), args.len(), context.signatures),
+            ),
+            Expr::New {
+                args,
+                resolved: Some(ctor),
+                ..
+            } => (
+                args,
+                crate::call_plan::plan_constructor_arguments(
+                    Some(ctor),
+                    args.len(),
+                    context.signatures,
+                ),
+            ),
+            _ => return,
+        };
+        use crate::call_plan::ArgumentLoweringPlan;
+        match plan {
+            ArgumentLoweringPlan::Shaped(shapes) => {
+                for (arg, shape) in args.iter().zip(shapes) {
+                    record_destination(
+                        arg,
+                        &shape,
+                        &mut retained_copy_destinations,
+                        synchronized_copy,
+                    );
+                }
+            }
+            ArgumentLoweringPlan::Slotted(slots) => {
+                for (arg, slot) in args.iter().zip(slots) {
+                    if let crate::conversion_plan::Slot::Argument(shape)
+                    | crate::conversion_plan::Slot::Assignment(shape)
+                    | crate::conversion_plan::Slot::Return(shape) = slot
+                    {
+                        record_destination(
+                            arg,
+                            &shape,
+                            &mut retained_copy_destinations,
+                            synchronized_copy,
+                        );
+                    }
+                }
+            }
+            ArgumentLoweringPlan::Unshaped { .. } => {}
+        }
+    });
     let (env, locals) = (callable.env, callable.locals);
     let ctx = crate::expr_shape::ExprShapeContext::new(
         Some(context.signatures),
@@ -4258,6 +4388,89 @@ fn retained_iteration_requires_parameter(
         };
         let mut found = false;
         crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+            if let Expr::Call {
+                receiver,
+                name,
+                args,
+                resolved,
+                ..
+            } = node
+            {
+                let source = if name == "clone" && args.is_empty() {
+                    receiver.as_deref().filter(|source| {
+                        let shape =
+                            crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+                        matches!(
+                            shape.optional_element_type().unwrap_or(shape.java_ty),
+                            JavaType::Array(_)
+                        )
+                    })
+                } else if !resolved.as_ref().is_some_and(|call| {
+                    unique_source_type_bound_decl_by_match_kind(
+                        &call.declaring_type,
+                        support_programs,
+                        SourceTypeBoundMatch::Exact,
+                    )
+                    .is_some()
+                }) && matches!(
+                    crate::call_plan::plan_native_collection_static_call(
+                        receiver.as_deref(),
+                        name,
+                        resolved.as_ref(),
+                        env.type_env(),
+                        context.facts,
+                    ),
+                    Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic {
+                        method: crate::call_plan::NativeCollectionStaticMethod::ArraysCopyOf
+                            | crate::call_plan::NativeCollectionStaticMethod::ArraysCopyOfRange,
+                    })
+                ) && matches!(args.len(), 2 | 3)
+                {
+                    args.first()
+                } else {
+                    None
+                };
+                if let Some(source) = source {
+                    let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+                    let retained_destination = retained_copy_destinations
+                        .contains(&(node as *const Expr))
+                        || assignment_targets
+                            .get(&(node as *const Expr))
+                            .is_some_and(|target| {
+                                let allocation = crate::expr_shape::infer_expr_shape_with_context(
+                                    target, env, ctx,
+                                )
+                                .native_allocation;
+                                if synchronized_copy {
+                                    allocation.sync()
+                                } else {
+                                    allocation.shared()
+                                }
+                            });
+                    if lifetime {
+                        found |= parent.native_allocation.shared()
+                            && retained_destination
+                            && java_type_contains_type_param(&parent.java_ty, type_param);
+                    } else if let Some(child) =
+                        crate::shape_projection::indexed_assignment_shape_with_facts(
+                            &parent,
+                            context.facts,
+                        )
+                    {
+                        found |= rust_clone_requires_parameter(
+                            &rust_type_for_slot_with_facts_and_representations(
+                                &child,
+                                context.facts,
+                                context.representations,
+                            ),
+                            type_param,
+                        );
+                    }
+                }
+            }
+            if synchronized_copy {
+                return;
+            }
             if !lifetime
                 && let Expr::Call {
                     receiver: Some(receiver),
@@ -4473,7 +4686,7 @@ fn retained_iteration_requires_parameter(
                 );
             }
         });
-        if has_stream {
+        if has_stream && !synchronized_copy {
             crate::stream_shape::visit_retained_stream_sources(expr, env, ctx, |_, parent, _| {
                 found |= requires(&parent);
             });
@@ -4908,6 +5121,7 @@ pub(crate) fn constructor_function_shell_with_facts_and_support_contexts(
             Some(ty),
             clone_cache,
             None,
+            None,
         ),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
@@ -5004,6 +5218,7 @@ pub(crate) fn function_type_params_with_required_clone_bounds_and_support_contex
         owner,
         None,
         return_type,
+        None,
     )
 }
 
@@ -5019,6 +5234,7 @@ fn function_type_params_with_clone_cache(
     owner: Option<&TypeDecl>,
     clone_cache: Option<&CloneRequirementCache>,
     return_type: Option<&JavaType>,
+    method: Option<&MethodDecl>,
 ) -> Vec<String> {
     let mut params = Vec::new();
     if needs_lifetime {
@@ -5040,6 +5256,33 @@ fn function_type_params_with_clone_cache(
             .unwrap_or_default();
         let fallback_cache = CloneRequirementCache::default();
         let cache = clone_cache.unwrap_or(&fallback_cache);
+        if let (Some(context), Some(owner), Some(method)) = (cache.storage_context, owner, method)
+            && let Some(index) = method
+                .type_params
+                .iter()
+                .position(|parameter| parameter == name)
+            && let Some(bound) = context
+                .signatures
+                .method_generic_bound_shape(owner, method, index)
+        {
+            let children = (0..2)
+                .map(|child| {
+                    let shape = crate::shape_projection::native_collection_stored_child_shape(
+                        bound,
+                        child,
+                        context.facts,
+                        context.representations,
+                    )
+                    .expect("bounded map has qualified key/value children");
+                    crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                        &shape,
+                        context.facts,
+                        context.representations,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            bounds = vec![format!("JavaMapInsert<{}, {}>", children[0], children[1])];
+        }
         let needs_clone = {
             let mut memo = cache.search.borrow_mut();
             let mut search = cache.search_with_memo(&mut memo);
@@ -5090,6 +5333,7 @@ fn function_type_params_with_clone_cache(
             bounds.push("std::any::Any".to_string());
         }
         for (capability, bound) in [
+            (SourceCallableCapability::JavaSend, "Send"),
             (
                 SourceCallableCapability::ReferenceIdentity,
                 "JavaReferenceIdentity",
@@ -5220,6 +5464,7 @@ enum SourceCallableCapability {
     JavaMapKey,
     JavaHashCode,
     JavaAny,
+    JavaSend,
     CollectionDisplay,
     RetainedDisplayCopy,
     ArrayDeepDisplay,
@@ -5235,7 +5480,7 @@ impl SourceCallableCapability {
             Self::ReferenceIdentity => TraitImplCapability::ReferenceIdentity,
             Self::CollectionDisplay => TraitImplCapability::ObjectDisplay,
             Self::ArrayDeepDisplay => TraitImplCapability::ArrayDeepDisplay,
-            Self::JavaAny | Self::RetainedDisplayCopy => return None,
+            Self::JavaAny | Self::JavaSend | Self::RetainedDisplayCopy => return None,
         })
     }
 }
@@ -5552,6 +5797,7 @@ fn native_map_reference_capability(
         return false;
     }
     match capability {
+        SourceCallableCapability::JavaSend => false,
         SourceCallableCapability::JavaAny => {
             method != Method::MapPutIfAbsent && java_type_contains_type_param(&ty, binder)
         }
@@ -5883,18 +6129,20 @@ fn callable_type_param_reaches_source_capability<'a>(
             } else {
                 (params, body, return_type, callable_name, callable_generics)
             };
-        if capability == SourceCallableCapability::JavaAny
-            && retained_iteration_requires_parameter(
-                type_param,
-                params,
-                body,
-                caller_owner,
-                return_type,
-                callable_name,
-                search.storage_context,
-                true,
-            )
-        {
+        if matches!(
+            capability,
+            SourceCallableCapability::JavaAny | SourceCallableCapability::JavaSend
+        ) && retained_iteration_requires_parameter(
+            type_param,
+            params,
+            body,
+            caller_owner,
+            return_type,
+            callable_name,
+            support_programs,
+            search.storage_context,
+            capability,
+        ) {
             return true;
         }
         if capability == SourceCallableCapability::JavaAny
@@ -5988,6 +6236,7 @@ fn callable_type_param_reaches_source_capability<'a>(
                 | SourceCallableCapability::ReferenceIdentity
                 | SourceCallableCapability::JavaHashCode
                 | SourceCallableCapability::JavaAny
+                | SourceCallableCapability::JavaSend
         ) && let Some(owner) = caller_owner
         {
             for (name, ty) in search.inherited_fields(owner, support_programs) {
@@ -9383,6 +9632,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             Some(ty),
             clone_requirement_cache,
             Some(&method.return_type),
+            Some(method),
         ),
         params: method_params_with_optional_lifetime(
             ty,
@@ -13761,7 +14011,7 @@ fn java_type_name_is_callable(name: &str) -> bool {
         .is_some_and(|simple| simple == "Callable")
 }
 
-fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {
+pub(crate) fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {
     if lifetime {
         add_lifetime_to_refs(ty)
     } else {
@@ -13783,6 +14033,13 @@ fn add_lifetime_to_refs(ty: RustType) -> RustType {
         RustType::Vec(inner) => RustType::Vec(Box::new(add_lifetime_to_refs(*inner))),
         RustType::Array2(inner) => RustType::Array2(Box::new(add_lifetime_to_refs(*inner))),
         RustType::Slice(inner) => RustType::Slice(Box::new(add_lifetime_to_refs(*inner))),
+        RustType::Generic { base, args } => RustType::Generic {
+            base,
+            args: args.into_iter().map(add_lifetime_to_refs).collect(),
+        },
+        RustType::Tuple(items) => {
+            RustType::Tuple(items.into_iter().map(add_lifetime_to_refs).collect())
+        }
         RustType::ImplFnTrait {
             trait_name,
             params,

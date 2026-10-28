@@ -27,7 +27,7 @@ class CharacterUse {
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "#[test] fn source_method_not_native_unboxing() { assert_eq!(CharacterUse::run(), 'x'); assert_eq!(CharacterUse::source_static_run(), 's'); assert_eq!(CharacterUse::native_run(), 'q'); }",
+            tests: "#[test] fn source_method_not_native_unboxing() { assert_eq!(CharacterUse::run().as_u16(), 'x' as u16); assert_eq!(CharacterUse::source_static_run().as_u16(), 's' as u16); assert_eq!(CharacterUse::native_run().as_u16(), 'q' as u16); }",
         }],
     );
 }
@@ -113,7 +113,7 @@ class SourceHolder {
 "#,
     );
     assert!(
-        translation.rust.contains("ImmutablePair<String>"),
+        translation.rust.contains("ImmutablePair<JavaString>"),
         "{}",
         translation
             .rust

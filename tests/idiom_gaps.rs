@@ -57412,17 +57412,20 @@ mod generated_tests {
     #[test]
     fn uses_java_array_equality() {
         let fixture = JavaArraysEqualsUse {};
-        assert!(fixture.same(&[1.0, f64::NAN], &[1.0, f64::NAN]));
-        assert!(!fixture.same(&[-0.0], &[0.0]));
-        assert!(fixture.ints(&[1, 2], &[1, 2]));
-        assert!(!fixture.ints(&[1, 2], &[1, 3]));
+        fn array<T>(values: Vec<T>) -> std::rc::Rc<std::cell::RefCell<Vec<T>>> {
+            std::rc::Rc::new(std::cell::RefCell::new(values))
+        }
+        assert!(fixture.same(&array(vec![1.0, f64::NAN]), &array(vec![1.0, f64::NAN])));
+        assert!(!fixture.same(&array(vec![-0.0]), &array(vec![0.0])));
+        assert!(fixture.ints(&array(vec![1, 2]), &array(vec![1, 2])));
+        assert!(!fixture.ints(&array(vec![1, 2]), &array(vec![1, 3])));
         assert!(java_arrays_equals::<i32, _, _>(None::<Vec<i32>>, None::<Vec<i32>>));
         assert!(!java_arrays_equals(None::<Vec<i32>>, Some(vec![1])));
         assert!(java_arrays_equals(Some(vec![1, 2]), Some(vec![1, 2])));
-        assert!(fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 2, 6], 1, 3));
-        assert!(!fixture.range(&[9, 1, 2, 8], 1, 3, &[7, 1, 3, 6], 1, 3));
-        assert!(std::panic::catch_unwind(|| fixture.bad_left_range(&[1, 2, 3], &[1, 2, 3])).is_err());
-        assert!(std::panic::catch_unwind(|| fixture.bad_right_range(&[1, 2, 3], &[1, 2, 3])).is_err());
+        assert!(fixture.range(&array(vec![9, 1, 2, 8]), 1, 3, &array(vec![7, 1, 2, 6]), 1, 3));
+        assert!(!fixture.range(&array(vec![9, 1, 2, 8]), 1, 3, &array(vec![7, 1, 3, 6]), 1, 3));
+        assert!(std::panic::catch_unwind(|| fixture.bad_left_range(&array(vec![1, 2, 3]), &array(vec![1, 2, 3]))).is_err());
+        assert!(std::panic::catch_unwind(|| fixture.bad_right_range(&array(vec![1, 2, 3]), &array(vec![1, 2, 3]))).is_err());
     }
 }
 "#,
@@ -59970,7 +59973,7 @@ class JavaArraysCompareMismatchRangeCatchUse {
                 .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
             && translation
                 .rust
-                .contains("Ok(java_arrays_equals(&__java_arrays_left")
+                .contains("java_arrays_equals_range_result(")
             && translation
                 .rust
                 .contains("Ok(java_arrays_compare(&__java_arrays_left")
@@ -60083,7 +60086,7 @@ mod generated_tests {
         assert_eq!(fixture.bools(&[true, false]), 40359);
         assert_eq!(fixture.doubles(&[f64::NAN]), 2146959391);
         assert_eq!(
-            fixture.names(&[Some("a".to_string()), Some("b".to_string())]),
+            fixture.names(&[Some("a".into()), Some("b".into())]),
             4066
         );
     }
@@ -60116,7 +60119,7 @@ class JavaArraysToStringUse {
     );
 
     assert!(
-        translation.rust.contains("java_arrays_to_string(values)")
+        translation.rust.contains("java_arrays_to_text(values)")
             && !translation.rust.contains("Arrays::to_string")
             && !translation.rust.contains("JavaUtilArrays::to_string"),
         "{}",
@@ -60136,12 +60139,12 @@ mod generated_tests {
     #[test]
     fn formats_arrays_with_java_delimiters() {
         let fixture = JavaArraysToStringUse {};
-        assert_eq!(fixture.ints(&[1, 2, 3]), "[1, 2, 3]");
+        assert_eq!(fixture.ints(&[1, 2, 3]).scalar_string().unwrap(), "[1, 2, 3]");
         assert_eq!(
-            fixture.names(&[Some("alpha".to_string()), Some("beta".to_string())]),
+            fixture.names(&[Some("alpha".into()), Some("beta".into())]).scalar_string().unwrap(),
             "[alpha, beta]"
         );
-        assert_eq!(fixture.empty(&[]), "[]");
+        assert_eq!(fixture.empty(&[]).scalar_string().unwrap(), "[]");
         assert_eq!(
             java_arrays_to_string::<Option<String>, _>(None::<Vec<Option<String>>>),
             "null"
@@ -60177,7 +60180,9 @@ class JavaArraysSetAllUse {
 
     assert!(
         translation.rust.contains("java_arrays_set_all(")
-            && translation.rust.contains("java_arrays_set_all_result(")
+            && translation
+                .rust
+                .contains("pub fn java_arrays_set_all_result<")
             && !translation.rust.contains("Arrays::set_all"),
         "{}",
         translation.rust
@@ -60195,10 +60200,11 @@ mod generated_tests {
 
     #[test]
     fn fills_from_each_java_index() {
-        assert_eq!(JavaArraysSetAllUse::ints(), vec![0, 2, 4]);
+        assert_eq!(*JavaArraysSetAllUse::ints().borrow(), vec![0, 2, 4]);
+        let input = std::rc::Rc::new(std::cell::RefCell::new(vec![Some(JavaString::intern_literal("a")), None]));
         assert_eq!(
-            JavaArraysSetAllUse::copy(vec![Some("a".to_string()), None]).unwrap(),
-            vec![Some("a".to_string()), None]
+            *JavaArraysSetAllUse::copy(input).borrow(),
+            vec![Some(JavaString::intern_literal("a")), None]
         );
     }
 }

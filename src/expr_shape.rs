@@ -14,7 +14,7 @@ use crate::shape_projection::{
 use crate::signature::{
     ConstructorSignaturePlan, LocalPlan, MethodSignaturePlan, ParamPlan, SignaturePlan,
 };
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1482,6 +1482,8 @@ pub struct ExprShapeContext<'a> {
     representations: Option<&'a RepresentationPlan>,
     facts: Option<&'a FactSet>,
     external_index: Option<&'a ExternalFactLookupIndex<'a>>,
+    source_symbols: Option<&'a crate::resolve::SourceSymbols>,
+    current_type: Option<&'a str>,
 }
 
 impl<'a> ExprShapeContext<'a> {
@@ -1495,6 +1497,8 @@ impl<'a> ExprShapeContext<'a> {
             representations,
             facts,
             external_index: None,
+            source_symbols: None,
+            current_type: None,
         }
     }
 
@@ -1504,6 +1508,16 @@ impl<'a> ExprShapeContext<'a> {
     /// repeated whole-fact-set work.
     pub fn with_external_index(mut self, external_index: &'a ExternalFactLookupIndex<'a>) -> Self {
         self.external_index = Some(external_index);
+        self
+    }
+
+    pub(crate) fn with_source_context(
+        mut self,
+        symbols: &'a crate::resolve::SourceSymbols,
+        current_type: Option<&'a str>,
+    ) -> Self {
+        self.source_symbols = Some(symbols);
+        self.current_type = current_type;
         self
     }
 
@@ -1597,6 +1611,12 @@ fn infer_expr_shape_with_context_and_external_index(
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
+    if let Some(shape) = native_iterator_stream_factory_shape(expr, env, ctx) {
+        return shape;
+    }
+    if let Some(shape) = native_enum_constants_result_shape(expr, env, ctx) {
+        return shape;
+    }
     if matches!(expr, Expr::This)
         && let Some(shape) = env.local_shape("this")
     {
@@ -2023,6 +2043,107 @@ fn resolved_call_return_shape_by_java_key(
     })
 }
 
+pub(crate) fn native_cursor_shape_with_element(
+    owner: &str,
+    mut child: RustSlotShape,
+) -> RustSlotShape {
+    child.ownership = OwnershipShape::Owned;
+    if matches!(child.view, ViewShape::Str | ViewShape::Slice) {
+        child.view = ViewShape::Native;
+    }
+    let mut shape = RustSlotShape::for_storage(JavaType::Named {
+        name: owner.into(),
+        args: vec![child.java_ty.clone()],
+    });
+    if child.native_allocation.shared() {
+        shape.require_native_allocation_at(&[0], child.native_allocation);
+    }
+    for (path, allocation) in &child.nested_native_allocations {
+        let mut path = path.clone();
+        path.insert(0, 0);
+        shape.require_native_allocation_at(&path, *allocation);
+    }
+    shape.nested_collection_views = child.nested_collection_views.clone();
+    if child.view != ViewShape::Native {
+        shape.nested_collection_views.push((
+            child
+                .optional_element_type()
+                .unwrap_or_else(|| child.java_ty.clone()),
+            child.view,
+        ));
+    }
+    shape
+}
+
+pub(crate) fn native_iterator_stream_factory_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    use crate::call_plan::{CallTargetPlan, NativeCollectionStaticMethod};
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let facts = ctx.facts?;
+    let CallTargetPlan::NativeCollectionStatic { method } =
+        crate::call_plan::plan_native_collection_static_call(
+            receiver.as_deref(),
+            name,
+            resolved.as_ref(),
+            env.type_env(),
+            facts,
+        )?
+    else {
+        return None;
+    };
+    let owner = match method {
+        NativeCollectionStaticMethod::SpliteratorUnknownSize => "java.util.Spliterator",
+        NativeCollectionStaticMethod::StreamFromSpliterator => "java.util.stream.Stream",
+        _ => return None,
+    };
+    if args.len() != 2 {
+        return None;
+    }
+    let parent = infer_expr_shape_with_context(&args[0], env, ctx);
+    let child = if crate::effective_facts::EffectiveFacts::new(facts)
+        .native_cursor_element_type(&parent.java_ty)
+        .is_some()
+    {
+        let ty = RustSlotShape::native_child_type_at_path(&parent.java_ty, &[0])?;
+        let mut child =
+            crate::shape_projection::storage_shape_for_java_type(ctx.representations?, ty);
+        child.inherit_native_collection_child(&parent, 0);
+        child
+    } else if method == NativeCollectionStaticMethod::SpliteratorUnknownSize {
+        let call = crate::resolve::resolve_source_call_with_types(
+            Some(&args[0]),
+            "next",
+            &[],
+            ctx.current_type.unwrap_or_default(),
+            ctx.source_symbols?,
+            env.type_env(),
+            facts,
+        )?;
+        resolved_call_return_shape_by_java_key(
+            &call,
+            "next",
+            0,
+            ctx.signatures?,
+            ctx.representations,
+        )?
+    } else {
+        return None;
+    };
+    Some(native_cursor_shape_with_element(owner, child))
+}
+
 fn native_java_call_expr_shape(
     receiver: Option<&Expr>,
     name: &str,
@@ -2227,6 +2348,40 @@ fn native_java_call_expr_shape(
     }
     crate::call_plan::native_java_call_lowered_type(&target)
         .map(|lowered| lowered.into_slot_shape())
+}
+
+/// Reflection creates a fresh reference array with a runtime component class
+/// more precise than its generic use-site view. Retain that allocation and
+/// model the nullable result independently of receiver nullability.
+pub(crate) fn native_enum_constants_result_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let element = crate::call_plan::native_class_enum_constants_element(
+        &infer_expr_type(receiver, env.type_env()),
+        name,
+        args.len(),
+        env.type_env(),
+        ctx.facts?,
+    )?;
+    let mut result = RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::Array(
+        Box::new(element),
+    )));
+    result.require_native_allocation_at(
+        &[],
+        crate::storage_strategy::StoragePlacement::new(true, true, false),
+    );
+    Some(result)
 }
 
 /// Native SAM invocation uses the instantiated carrier's result contract,

@@ -22,8 +22,54 @@ pub(crate) fn visit_retained_stream_sources(
         {
             let source = plan.source().expr();
             let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
-            if crate::call_plan::retained_native_iteration_element_type(&parent, facts).is_some() {
+            if crate::call_plan::retained_native_iteration_element_type(&parent, facts).is_some()
+                || crate::stream::native_stored_stream_source(source, env.type_env(), facts)
+            {
                 visit(source, parent, true);
+            }
+        }
+        if let Expr::Call {
+            receiver: Some(source),
+            name,
+            args,
+            ..
+        } = node
+            && matches!(name.as_str(), "map" | "filter")
+            && args.len() == 1
+            && crate::stream::native_stored_stream_source(source, env.type_env(), facts)
+        {
+            visit(
+                source,
+                crate::expr_shape::infer_expr_shape_with_context(source, env, ctx),
+                true,
+            );
+            let callback = crate::expr_shape::infer_expr_shape_with_context(&args[0], env, ctx);
+            if callback.optional_element_type().is_some()
+                || matches!(&args[0], Expr::Literal(crate::java_ir::Literal::Null))
+            {
+                visit(&args[0], callback, false);
+            }
+        }
+        if let Expr::Call {
+            receiver: Some(owner),
+            name,
+            args,
+            ..
+        } = node
+            && let Expr::Var(owner) = owner.as_ref()
+            && ((name == "of"
+                && crate::stdlib::canonical_external_receiver_type_key(owner) == "Stream")
+                || (name == "stream"
+                    && crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays"))
+            && !crate::call_plan::java_type_owner_is_parsed_source(owner, env.type_env(), facts)
+            && let [source] = args.as_slice()
+        {
+            let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+            let ty = parent
+                .optional_element_type()
+                .unwrap_or_else(|| parent.java_ty.clone());
+            if matches!(ty, JavaType::Array(_)) {
+                visit(source, parent, false);
             }
         }
         if let Expr::Call {

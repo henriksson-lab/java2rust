@@ -25,6 +25,17 @@ impl From<JavaCodeUnit> for i32 {
     }
 }
 
+/// Character.isWhitespace accepts either a Java char or an int code point.
+/// Java excludes non-breaking spaces and includes the four file/group/record/
+/// unit separators, unlike Rust's Unicode White_Space predicate. No scalar
+/// decoding is needed, so isolated surrogate code units simply return false.
+pub fn java_character_is_whitespace(value: impl Into<i32>) -> bool {
+    matches!(value.into(),
+        0x0009..=0x000d | 0x001c..=0x0020 | 0x1680 |
+        0x2000..=0x2006 | 0x2008..=0x200a | 0x2028..=0x2029 | 0x205f | 0x3000
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JavaTextBounds {
     Index { index: i32, length: i32 },
@@ -218,6 +229,36 @@ impl JavaTextView for [JavaCodeUnit] {
 impl JavaTextView for Vec<JavaCodeUnit> {
     fn java_text_view(&self) -> std::borrow::Cow<'_, JavaUtf16> {
         self.as_slice().java_text_view()
+    }
+}
+
+pub fn java_string_to_char_array(value: impl JavaTextView) -> Vec<JavaCodeUnit> {
+    value
+        .java_text_view()
+        .units()
+        .iter()
+        .copied()
+        .map(JavaCodeUnit)
+        .collect()
+}
+
+// A text operation snapshots char[] at the operation boundary. The owned
+// UTF-16 view releases the backing loan before its consumer runs.
+impl JavaTextView for std::rc::Rc<std::cell::RefCell<Vec<JavaCodeUnit>>> {
+    fn java_text_view(&self) -> std::borrow::Cow<'_, JavaUtf16> {
+        let units = self.borrow();
+        std::borrow::Cow::Owned(JavaUtf16::from_units(
+            units.iter().map(|unit| unit.as_u16()).collect(),
+        ))
+    }
+}
+
+impl JavaTextView for std::sync::Arc<std::sync::Mutex<Vec<JavaCodeUnit>>> {
+    fn java_text_view(&self) -> std::borrow::Cow<'_, JavaUtf16> {
+        let units = self.lock().expect("Java character array mutex poisoned");
+        std::borrow::Cow::Owned(JavaUtf16::from_units(
+            units.iter().map(|unit| unit.as_u16()).collect(),
+        ))
     }
 }
 

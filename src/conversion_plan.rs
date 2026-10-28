@@ -3476,8 +3476,8 @@ fn java_collection_conversion_policy(
     })
 }
 
-/// Native retained sets share one physical carrier even when the Java
-/// declaration names a different set interface/implementation. Equality and
+/// Native retained containers share one physical carrier within their family
+/// even when Java names an interface or its implementation. Equality and
 /// encounter order belong to the allocation, not a value conversion at an
 /// assignment boundary. Collection accepts either family, while List and Set
 /// remain distinct. Preserve source
@@ -3497,8 +3497,8 @@ fn shared_native_collection_abi_matches(
         return false;
     }
     let (Some(actual_kind), Some(target_kind)) = (
-        facts.retained_native_collection_kind(&actual.java_ty),
-        facts.retained_native_collection_kind(&target.java_ty),
+        facts.retained_native_container_kind(&actual.java_ty),
+        facts.retained_native_container_kind(&target.java_ty),
     ) else {
         return false;
     };
@@ -3508,10 +3508,22 @@ fn shared_native_collection_abi_matches(
     ) else {
         return false;
     };
-    crate::stdlib::is_known_java_platform_subtype(actual_name, target_name)
-        && (actual_kind == target_kind
-            || (actual_kind.is_set_like() && target_kind.is_set_like())
-            || crate::stdlib::canonical_subtype_name(target_name) == "Collection")
+    if !crate::stdlib::is_known_java_platform_subtype(actual_name, target_name) {
+        return false;
+    }
+    if actual_kind.is_map_like() || target_kind.is_map_like() {
+        // The canonical map owns equality/encounter order. An interface
+        // widening copies its handle, never Into<HashMap<..>> of its payload.
+        // Both stored children must have the same solved physical contracts.
+        return actual_kind.is_map_like()
+            && target_kind.is_map_like()
+            && crate::stdlib::java_map_type_args(&actual.java_ty)
+                == crate::stdlib::java_map_type_args(&target.java_ty)
+            && actual.nested_native_allocations == target.nested_native_allocations;
+    }
+    (actual_kind == target_kind
+        || (actual_kind.is_set_like() && target_kind.is_set_like())
+        || crate::stdlib::canonical_subtype_name(target_name) == "Collection")
         && crate::types::sequence_element_type(&actual.java_ty)
             == crate::types::sequence_element_type(&target.java_ty)
 }
@@ -3519,6 +3531,66 @@ fn shared_native_collection_abi_matches(
 #[cfg(test)]
 mod retained_collection_family_tests {
     use super::*;
+
+    #[test]
+    fn retained_map_widening_requires_matching_children_and_source_provenance() {
+        let facts = FactSet::default();
+        let effective = EffectiveFacts::new(&facts);
+        for sync in [false, true] {
+            let shape = |name: &str| {
+                let mut shape = RustSlotShape::for_storage(JavaType::Named {
+                    name: name.into(),
+                    args: vec![JavaType::String, crate::parser::parse_type("String[]")],
+                });
+                shape.native_allocation =
+                    crate::storage_strategy::StoragePlacement::new(true, true, sync);
+                shape
+            };
+            let source = shape("java.util.LinkedHashMap");
+            let target = shape("java.util.Map");
+            assert!(shared_native_collection_abi_matches(
+                &source, &target, &effective
+            ));
+            assert!(!shared_native_collection_abi_matches(
+                &target, &source, &effective
+            ));
+            let mut different = target.clone();
+            different.require_native_allocation_at(
+                &[1],
+                crate::storage_strategy::StoragePlacement::new(true, true, sync),
+            );
+            assert!(!shared_native_collection_abi_matches(
+                &source, &different, &effective
+            ));
+            let mut nullable = target.clone();
+            if let JavaType::Named { args, .. } = &mut nullable.java_ty {
+                args[1] = crate::types::optional_java_type(args[1].clone());
+            }
+            assert!(!shared_native_collection_abi_matches(
+                &source, &nullable, &effective
+            ));
+            let mut shadowed = facts.clone();
+            shadowed
+                .type_capability_overrides
+                .push(crate::facts::TypeCapabilityOverride {
+                    type_name: "Map".into(),
+                    copy: None,
+                    clone: None,
+                    string_like: None,
+                    sequence_like: None,
+                    implements: Vec::new(),
+                    extends: None,
+                    final_type: None,
+                    object_safe_trait: None,
+                    provenance: crate::facts::FactProvenance::ParsedSource,
+                });
+            assert!(!shared_native_collection_abi_matches(
+                &source,
+                &shape("Map"),
+                &EffectiveFacts::new(&shadowed)
+            ));
+        }
+    }
 
     #[test]
     fn retained_collection_upcasts_preserve_runtime_family() {
@@ -3577,6 +3649,15 @@ pub struct ShapeCoercionPlan {
     ownership: OwnershipCoercionPolicy,
     primitive_widening: Option<PrimitiveWideningPolicy>,
     native_allocation: NativeAllocationCoercionPolicy,
+    erased_array_adapter: ErasedArrayAdapter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErasedArrayAdapter {
+    IdentityOnly,
+    Primitive,
+    FinalReference,
+    ErasedObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3619,13 +3700,20 @@ pub fn shape_coercion_plan_with_facts(
         let base = shape
             .optional_element_type()
             .unwrap_or_else(|| shape.java_ty.clone());
-        let native_sam = effective.native_functional_carrier(&base).is_some()
-            || shape.view == ViewShape::ListInterface;
+        let native_sam = effective.native_functional_carrier(&base).is_some();
         let retained_view = matches!(shape.view, ViewShape::Slice | ViewShape::JavaSemanticHash)
             && effective
                 .retained_native_collection_kind(&shape.java_ty)
                 .is_some();
-        let allocation = if native_sam {
+        let allocation = if matches!(
+            shape.view,
+            ViewShape::ListInterface | ViewShape::ReferenceArray
+        ) {
+            // This operation view owns its receiver reference internally.
+            // A synchronized receiver does not add an outer Arc/Mutex or
+            // change the local view's ABI.
+            Default::default()
+        } else if native_sam {
             if shape.native_allocation.sync() {
                 crate::storage_strategy::StoragePlacement::new(true, false, true)
             } else {
@@ -3666,7 +3754,7 @@ pub fn shape_coercion_plan_with_facts(
     let target = canonical_target;
     let actual = actual.as_ref();
     let target = target.as_ref();
-    ShapeCoercionPlan::new(
+    let mut plan = ShapeCoercionPlan::new(
         actual.clone(),
         target.clone(),
         dispatch_coercion_policy_with_facts(actual, target, facts),
@@ -3675,7 +3763,19 @@ pub fn shape_coercion_plan_with_facts(
         ownership_coercion_policy(actual, target, facts),
         primitive_widening_policy(&actual.java_ty, &target.java_ty)
             .filter(|policy| policy.widens()),
-    )
+    );
+    if let JavaType::Array(element) = &actual.java_ty {
+        let element =
+            crate::types::optional_element_type(element).unwrap_or_else(|| (**element).clone());
+        if let JavaType::Named { name, args } = &element
+            && args.is_empty()
+            && matches!(name.as_str(), "Object" | "java.lang.Object")
+            && EffectiveFacts::new(facts).allows_platform_hierarchy_fallback(name)
+        {
+            plan.erased_array_adapter = ErasedArrayAdapter::ErasedObject;
+        }
+    }
+    plan
 }
 
 impl ShapeCoercionPlan {
@@ -3700,11 +3800,23 @@ impl ShapeCoercionPlan {
         ownership: OwnershipCoercionPolicy,
         primitive_widening: Option<PrimitiveWideningPolicy>,
     ) -> Self {
+        let erased_array_adapter = if let JavaType::Array(element) = &actual.java_ty {
+            match crate::types::optional_element_type(element)
+                .unwrap_or_else(|| (**element).clone())
+            {
+                JavaType::Primitive(_) => ErasedArrayAdapter::Primitive,
+                JavaType::String => ErasedArrayAdapter::FinalReference,
+                _ => ErasedArrayAdapter::IdentityOnly,
+            }
+        } else {
+            ErasedArrayAdapter::IdentityOnly
+        };
         let native_allocation = if actual.native_allocation == target.native_allocation
             || (!actual.native_allocation.shared() && !target.native_allocation.shared())
             // Erasure boxes the existing carrier; the Object slot has no
             // collection allocation to convert to. Preserve its identity.
-            || matches!(dispatch, DispatchCoercionPolicy::EraseObject)
+            || matches!(dispatch, DispatchCoercionPolicy::EraseObject
+                | DispatchCoercionPolicy::NativeIterableListView { .. })
         {
             NativeAllocationCoercionPolicy::Preserve
         } else {
@@ -3722,11 +3834,16 @@ impl ShapeCoercionPlan {
             ownership,
             primitive_widening,
             native_allocation,
+            erased_array_adapter,
         }
     }
 
     pub fn actual(&self) -> &RustSlotShape {
         &self.actual
+    }
+
+    pub fn erased_array_adapter(&self) -> ErasedArrayAdapter {
+        self.erased_array_adapter
     }
 
     pub fn target(&self) -> &RustSlotShape {
@@ -3972,6 +4089,12 @@ fn syntax_slot_coercion_policy_from_content(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfCheck {
+    ErasedIterable {
+        optional: bool,
+    },
+    ErasedReferenceArray {
+        optional: bool,
+    },
     ThrowableType {
         class_name: String,
         optional: bool,
@@ -4171,6 +4294,31 @@ pub fn plan_instanceof_check_with_facts(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> InstanceOfCheck {
+    if actual.dispatch == DispatchShape::ErasedObject {
+        let effective = EffectiveFacts::new(facts);
+        if let JavaType::Named { name, args } = &target.java_ty
+            && matches!(name.as_str(), "Iterable" | "java.lang.Iterable")
+            && effective.allows_platform_hierarchy_fallback(name)
+            && (args.is_empty()
+                || args
+                    .iter()
+                    .all(|arg| matches!(arg, JavaType::Wildcard(None))))
+        {
+            return InstanceOfCheck::ErasedIterable {
+                optional: actual.optional_element_type().is_some(),
+            };
+        }
+        if let JavaType::Array(element) = &target.java_ty
+            && let JavaType::Named { name, args } = element.as_ref()
+            && matches!(name.as_str(), "Object" | "java.lang.Object")
+            && args.is_empty()
+            && effective.allows_platform_hierarchy_fallback(name)
+        {
+            return InstanceOfCheck::ErasedReferenceArray {
+                optional: actual.optional_element_type().is_some(),
+            };
+        }
+    }
     if EffectiveFacts::new(facts)
         .native_iterable_list_projection_element(&actual.java_ty, &target.java_ty)
         .is_some()
@@ -5913,6 +6061,30 @@ mod tests {
     }
 
     #[test]
+    fn erased_iterable_type_test_requires_a_platform_reifiable_target() {
+        use super::*;
+        let mut actual = RustSlotShape::for_storage(crate::parser::parse_type("Object"));
+        actual.dispatch = DispatchShape::ErasedObject;
+        let target = RustSlotShape::for_storage(crate::parser::parse_type("Iterable<?>"));
+        assert!(matches!(
+            plan_instanceof_check_with_facts(&actual, &target, &FactSet::default()),
+            InstanceOfCheck::ErasedIterable { .. }
+        ));
+        let parsed = crate::parser::parse_java_source("class Iterable<T> {}");
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(!matches!(
+            plan_instanceof_check_with_facts(&actual, &target, &resolved.facts),
+            InstanceOfCheck::ErasedIterable { .. }
+        ));
+        let bounded =
+            RustSlotShape::for_storage(crate::parser::parse_type("Iterable<? extends String>"));
+        assert!(!matches!(
+            plan_instanceof_check_with_facts(&actual, &bounded, &FactSet::default()),
+            InstanceOfCheck::ErasedIterable { .. }
+        ));
+    }
+
+    #[test]
     fn native_array_erasure_preserves_handle_but_array_storage_changes_are_rejected() {
         use super::*;
         let mut actual = RustSlotShape::for_storage(crate::parser::parse_type("int[]"));
@@ -5932,6 +6104,38 @@ mod tests {
             plan.native_allocation(),
             NativeAllocationCoercionPolicy::UnsupportedPlacementChange { .. }
         ));
+    }
+
+    #[test]
+    fn erased_object_array_adapter_requires_native_component_provenance() {
+        let mut actual = RustSlotShape::for_storage(crate::parser::parse_type("Object[]"));
+        actual.native_allocation =
+            crate::storage_strategy::StoragePlacement::new(true, true, false);
+        let mut target = RustSlotShape::for_storage(crate::parser::parse_type("java.lang.Object"));
+        target.dispatch = DispatchShape::ErasedObject;
+        let mut facts = FactSet::default();
+        assert_eq!(
+            shape_coercion_plan_with_facts(&actual, &target, &facts).erased_array_adapter(),
+            ErasedArrayAdapter::ErasedObject
+        );
+        facts
+            .type_capability_overrides
+            .push(crate::facts::TypeCapabilityOverride {
+                type_name: "Object".into(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: None,
+                final_type: Some(true),
+                object_safe_trait: None,
+                provenance: crate::facts::FactProvenance::ParsedSource,
+            });
+        assert_eq!(
+            shape_coercion_plan_with_facts(&actual, &target, &facts).erased_array_adapter(),
+            ErasedArrayAdapter::IdentityOnly
+        );
     }
 
     use super::*;

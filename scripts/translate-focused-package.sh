@@ -2767,59 +2767,6 @@ impl<T: Default> Enumeration<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct JavaIterator<T> {
-    items: Vec<T>,
-    index: usize,
-}
-
-impl<T: Clone> JavaIterator<T> {
-    pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaIterator<T> {
-        JavaIterator { items: items.into_iter().collect(), index: 0 }
-    }
-
-    pub fn has_next(&self) -> bool {
-        self.index < self.items.len()
-    }
-
-    pub fn next(&mut self) -> T {
-        self.next_result()
-            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
-    }
-
-    pub fn next_result(&mut self) -> Result<T, JavaException> {
-        let value = self.items.get(self.index).cloned().ok_or_else(|| {
-            JavaException::new(
-                "NoSuchElementException",
-                "Java iterator has no more elements".to_string(),
-            )
-        })?;
-        self.index += 1;
-        Ok(value)
-    }
-
-    pub fn for_each_remaining<F>(&mut self, mut f: F)
-    where
-        F: FnMut(T),
-    {
-        while self.has_next() {
-            f(self.next());
-        }
-    }
-
-    pub fn remove(&mut self) {
-        self.remove_result()
-            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
-    }
-
-    pub fn remove_result(&mut self) -> Result<(), JavaException> {
-        Err(JavaException::new(
-            "UnsupportedOperationException",
-            "Java snapshot iterator mutation is not supported".to_string(),
-        ))
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct AtomicInteger {
     value: std::cell::Cell<i32>,
@@ -3140,6 +3087,12 @@ pub mod logger {
 }
 
 RUST
+  # Iterator ownership and callback protocols are producer contracts, just like
+  # reflection and text. A facade field-count heuristic cannot choose between
+  # canonical shared state and an obsolete copied-position reconstruction.
+  focused_emit_runtime_support "$translation_producer_binary" "$translation_producer_sha256" \
+    checked-iterator "$out_dir/producer-runtime-checked-iterator.rs" \
+    >> "$shared_support_path" || exit 1
   printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nAtomicInteger\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
@@ -3246,7 +3199,7 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --merge-input-dir "$raw_generated_backup_dir" \
   --shared-support "$shared_support_path" \
   --shared-types "$shared_support_types_path" \
-  --conflicts "$shared_support_conflicts_path"
+  --conflicts "$shared_support_conflicts_path" || exit 1
 
 # Facade merging can promote a helper function without promoting a nominal
 # type.  Modules still need an explicit crate import for such helpers.

@@ -178,6 +178,13 @@ pub(crate) fn report_observable_aliases(
         if alias.native_allocation_preserved
             || direct_local_alias_mutation_is_represented(&alias, facts)
             || source_map_entry_alias_mutation_is_represented(&alias, program, representations)
+            || source_same_type_reference_copy_is_represented(&alias, representations)
+            || source_iterator_alias_mutation_is_represented(
+                &alias,
+                program,
+                facts,
+                representations,
+            )
         {
             continue;
         }
@@ -197,6 +204,85 @@ pub(crate) fn report_observable_aliases(
             None,
         );
     }
+}
+
+fn source_iterator_alias_mutation_is_represented(
+    alias: &ObservableAlias,
+    program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> bool {
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    let target = crate::types::optional_element_type(alias.aliased_ty())
+        .unwrap_or_else(|| alias.aliased_ty().clone());
+    if effective.native_cursor_element_type(&target).is_none()
+        || !matches!(&target, JavaType::Named { name, .. }
+            if matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(), "Iterator" | "java.util.Iterator"))
+    {
+        return false;
+    }
+    let Some(original) = alias.original_ty.as_ref() else {
+        return false;
+    };
+    let original =
+        crate::types::optional_element_type(original).unwrap_or_else(|| original.clone());
+    let JavaType::Named { name, .. } = &original else {
+        return false;
+    };
+    let placement = representations.storage_placement_for(name);
+    if !placement.shared()
+        || !placement.is_implemented()
+        || !facts.hierarchy_subtype_policy(&original, &target).reaches()
+    {
+        return false;
+    }
+    fn find<'a>(ty: &'a TypeDecl, name: &str) -> Option<&'a TypeDecl> {
+        if ty.name == name {
+            return Some(ty);
+        }
+        ty.members.iter().find_map(|member| match member {
+            Member::Type(nested) => find(nested, name),
+            _ => None,
+        })
+    }
+    let Some(decl) = program.types.iter().find_map(|ty| find(ty, name)) else {
+        return false;
+    };
+    // The live source adapter retains this implemented canonical owner and
+    // calls its actual methods. Do not grant this proof to payload copies or
+    // inherited-only protocols that the adapter cannot currently construct.
+    crate::stdlib::source_iterator_live_methods(decl).is_some()
+}
+
+fn source_same_type_reference_copy_is_represented(
+    alias: &ObservableAlias,
+    representations: &RepresentationPlan,
+) -> bool {
+    let Some(original) = alias.original_ty.as_ref() else {
+        return false;
+    };
+    if original != alias.aliased_ty() {
+        return false;
+    }
+    let JavaType::Named { name, .. } = original else {
+        return false;
+    };
+    if !representations
+        .type_representation(name)
+        .is_some_and(|entry| {
+            matches!(
+                entry.representation(),
+                crate::representation::ObjectRepresentation::ConcreteStruct
+            )
+        })
+    {
+        return false;
+    }
+    // The emitted source carrier, rather than a declaration-only FactSet,
+    // owns this proof. A stored array/field reference copies this canonical
+    // handle. Plain payloads and unproved subtype conversions stay rejected.
+    let placement = representations.storage_placement_for(name);
+    placement.shared() && placement.interior_mutable() && placement.is_implemented()
 }
 
 fn source_map_entry_alias_mutation_is_represented(
@@ -470,8 +556,11 @@ fn collect_in_type(
                             })
                         })
                         .unwrap_or_default();
-                    let type_env =
+                    let mut type_env =
                         aliasing_type_env(ty, &method.type_params, &method.type_param_bounds);
+                    for param in &method.params {
+                        type_env.insert_local(param.name.clone(), param.ty.clone());
+                    }
                     collect_in_body(
                         body,
                         &format!("{}.{}", ty.name, method.name),
@@ -501,11 +590,14 @@ fn collect_in_type(
                                 })
                         })
                         .unwrap_or_default();
-                    let type_env = aliasing_type_env(
+                    let mut type_env = aliasing_type_env(
                         ty,
                         &constructor.type_params,
                         &constructor.type_param_bounds,
                     );
+                    for param in &constructor.params {
+                        type_env.insert_local(param.name.clone(), param.ty.clone());
+                    }
                     let constructor_usage = usage.source_constructor_usage(ty, constructor);
                     collect_in_body(
                         body,
@@ -533,6 +625,11 @@ fn aliasing_type_env(
     let mut env = TypeEnv::new();
     insert_aliasing_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
     insert_aliasing_type_param_bounds(&mut env, member_type_params, member_type_param_bounds);
+    for member in &ty.members {
+        if let Member::Field(field) = member {
+            env.insert_field(field.name.clone(), field.ty.clone());
+        }
+    }
     env
 }
 
@@ -565,7 +662,7 @@ fn collect_in_body(
     let mut statements = Vec::new();
     collect_statements(body, &mut statements);
 
-    let aliases = alias_points(&statements, &liveness);
+    let aliases = alias_points(&statements, &liveness, type_env);
     if aliases.is_empty() {
         return;
     }
@@ -639,6 +736,20 @@ fn collect_in_body(
                         .zip(placement_at(name))
                         .is_some_and(|(original, alias)| original == alias)
                 });
+            if matches!(point.stmt, Stmt::VarDecl { .. })
+                && matches!(point.original_ty.as_ref(), Some(JavaType::Array(_)))
+                && crate::shape_projection::java_type_is_erased_object_storage(&point.ty)
+                && !crate::effective_facts::EffectiveFacts::new(facts)
+                    .parsed_source_controls_native_carrier(&point.ty)
+                && placement_at(&point.original)
+                    .is_some_and(|placement| placement.shared() && placement.is_implemented())
+            {
+                // Erasure stores a capsule retaining this proven original
+                // array owner. Object has no native array allocation shell,
+                // so equality with the target's placement is neither needed
+                // nor valid evidence for this reference-preserving boundary.
+                alias.native_allocation_preserved = true;
+            }
             if let Stmt::Assign { target, .. } = point.stmt {
                 // The receiving place can be a nested array slot or an object
                 // field, not merely a local root. Compare the actual stored
@@ -698,7 +809,11 @@ impl AliasHandle {
 ///
 /// Restricted to declarations: the new handle is introduced here, which is what
 /// lets a liveness query stand in for "after this point".
-fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec<AliasPoint<'a>> {
+fn alias_points<'a>(
+    statements: &[&'a Stmt],
+    liveness: &LivenessAnalysis,
+    type_env: &TypeEnv,
+) -> Vec<AliasPoint<'a>> {
     let mut points = Vec::new();
     let mut local_types = HashMap::new();
     let mut live_native_map_entries = HashSet::new();
@@ -720,7 +835,11 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                         original: source.clone(),
                         alias: AliasHandle::Local(name.clone()),
                         ty: ty.clone(),
-                        original_ty: local_types.get(source).cloned(),
+                        original_ty: local_types
+                            .get(source)
+                            .or_else(|| type_env.local_type(source))
+                            .or_else(|| type_env.field_type(source))
+                            .cloned(),
                         original_is_live_native_map_entry: live_native_map_entries.contains(source),
                     });
                 }
@@ -1950,6 +2069,75 @@ mod tests {
             "#,
         );
         assert!(found.is_empty(), "primitive values copy in Java: {found:?}");
+    }
+
+    #[test]
+    fn erased_array_alias_requires_the_original_retained_owner_without_object_shell() {
+        let parsed = parse_java_source(
+            r#"
+            class ErasedArrayAlias {
+                static Object run() {
+                    String[] values = new String[] { "before" };
+                    Object alias = values;
+                    values[0] = "after";
+                    return alias;
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = &resolved.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let body = method.body.as_ref().unwrap();
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let facts = FactSet::default();
+        for retained in [false, true] {
+            let shapes = body
+                .statements
+                .iter()
+                .filter_map(|stmt| match stmt {
+                    Stmt::VarDecl {
+                        binding: Some(binding),
+                        ty,
+                        ..
+                    } => {
+                        let mut shape = crate::slot_shape::RustSlotShape::for_storage(ty.clone());
+                        if retained && matches!(ty, JavaType::Array(_)) {
+                            shape.require_native_allocation_at(
+                                &[],
+                                crate::storage_strategy::StoragePlacement::new(true, true, false),
+                            );
+                        }
+                        Some((binding, shape))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut storage = NativeAliasStorage::default();
+            for (binding, shape) in &shapes {
+                storage.record(binding, shape, &facts);
+            }
+            let mut found = vec![];
+            collect_in_body(
+                body,
+                "ErasedArrayAlias.run",
+                &usage,
+                &facts,
+                &TypeEnv::new(),
+                usage.source_method_usage(owner, method),
+                &storage,
+                &mut found,
+            );
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].native_allocation_preserved, retained, "{found:?}");
+        }
     }
 
     #[test]

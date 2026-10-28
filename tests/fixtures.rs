@@ -337,18 +337,19 @@ class LiveIteratorList {
     static int runReentrant() {
         return new LiveIteratorList().removeThroughBorrowedOwner();
     }
+
+    static int runAliases() {
+        LiveIteratorList value = new LiveIteratorList();
+        Iterator<Integer> iterator = value.iterator();
+        Iterator<Integer> alias = iterator;
+        int first = iterator.next();
+        alias.remove();
+        int second = alias.next();
+        iterator.remove();
+        return first * 100 + second * 10 + value.size();
+    }
 }
 "#,
-    );
-    assert!(
-        translation.rust.contains("JavaIterator::new_with_remove"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("flush_pending_remove_result"),
-        "{}",
-        translation.rust
     );
     cargo_test_translation(
         "iterator_remove_live_backing_list",
@@ -358,6 +359,7 @@ class LiveIteratorList {
 fn remove_updates_the_original_list_and_all_object_aliases() {
     assert_eq!(LiveIteratorList::run().unwrap(), 13);
     assert_eq!(LiveIteratorList::run_reentrant().unwrap(), 12);
+    assert_eq!(LiveIteratorList::run_aliases().unwrap(), 121);
 }
 "#,
     );

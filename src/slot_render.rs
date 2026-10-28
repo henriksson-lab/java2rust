@@ -299,6 +299,9 @@ fn rust_type_for_slot_with_effective_facts_and_representations(
     effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(rendered) = reference_array_slot_rust_type(shape) {
+        return rendered;
+    }
     if let Some(rendered) =
         synchronized_functional_slot_rust_type(shape, &effective_facts, |local| {
             rust_type_for_slot_with_effective_facts_and_representations(
@@ -667,6 +670,9 @@ pub fn rust_type_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(rendered) = reference_array_slot_rust_type(shape) {
+        return rendered;
+    }
     if let Some(rendered) = synchronized_functional_slot_rust_type(shape, facts, |local| {
         rust_type_for_slot_with_effective_facts(local, facts)
     }) {
@@ -915,8 +921,13 @@ fn project_nested_native_allocations(
     }
     let children = match &java_ty {
         JavaType::Array(element) => vec![(**element).clone()],
-        JavaType::Named { args, .. }
+        JavaType::Named { name, args }
             if crate::stdlib::java_collection_kind_for_type(&java_ty).is_some()
+                || matches!(
+                    crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                    "Stream" | "Spliterator"
+                )
+                || facts.native_cursor_element_type(&java_ty).is_some()
                 || facts.native_iterable_element_type(&java_ty).is_some()
                 || facts.native_list_cursor_element_type(&java_ty).is_some()
                 || facts.native_functional_carrier(&java_ty).is_some()
@@ -1038,6 +1049,28 @@ pub(crate) fn retained_native_collection_runtime_name(placement: StoragePlacemen
 }
 
 /// Wraps an **owned** slot of a shared type in its handle (0002/0002b).
+fn reference_array_slot_rust_type(shape: &RustSlotShape) -> Option<RustType> {
+    if shape.view != ViewShape::ReferenceArray {
+        return None;
+    }
+    let mut value = RustType::Named("JavaReferenceArrayView".into());
+    if matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        value = RustType::Ref {
+            mutable: false,
+            lifetime: None,
+            inner: Box::new(value),
+        };
+    }
+    Some(if shape.optional_element_type().is_some() {
+        RustType::Option(Box::new(value))
+    } else {
+        value
+    })
+}
+
 fn list_interface_slot_rust_type(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
@@ -1489,6 +1522,7 @@ pub fn default_expr_for_slot_with_effective_facts(
     let rendered =
         slot_default_policy_expr(&slot_default_policy_with_effective_facts(shape, facts));
     if shape.native_allocation.shared()
+        && shape.view != ViewShape::ReferenceArray
         && shape.optional_element_type().is_none()
         && matches!(
             shape.ownership,
@@ -2153,14 +2187,21 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
         );
     }
     if let JavaType::Named { name, args } = ty
-        && crate::stdlib::canonical_external_receiver_type_key(name) == "Stream"
+        && matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Stream" | "Spliterator"
+        )
     {
         let element_ty = args
             .first()
             .cloned()
             .unwrap_or_else(erased_object_java_type);
         return rust_generic_type(
-            "JavaStream",
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream" {
+                "JavaStream"
+            } else {
+                "JavaIteratorSpliterator"
+            },
             vec![rust_type_for_java_generic_arg_with_representations(
                 &element_ty,
                 &effective_facts,
@@ -2837,7 +2878,10 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             }
         }
         JavaType::Named { name, args }
-            if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream" =>
+            if matches!(
+                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "Stream" | "Spliterator"
+            ) =>
         {
             let element_ty = args
                 .first()
@@ -2845,7 +2889,11 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 .unwrap_or_else(erased_object_java_type);
             NativeJavaRustTypePolicy::Direct {
                 ty: rust_generic_type(
-                    "JavaStream",
+                    if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream" {
+                        "JavaStream"
+                    } else {
+                        "JavaIteratorSpliterator"
+                    },
                     vec![rust_type_for_java_generic_arg_with_effective_facts(
                         &element_ty,
                         facts,
@@ -2940,7 +2988,9 @@ fn external_crate_mapped_named_rust_type(
     }
 }
 
-fn class_token_arg_rust_type(arg: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
+/// A Class marker names a Java type; it does not own that type's instance
+/// storage. Literal producers and Class<T> slots must use this same policy.
+pub(crate) fn class_token_arg_rust_type(arg: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
     match arg {
         JavaType::Wildcard(None) => RustType::Unit,
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))

@@ -72,7 +72,8 @@ generated_crate="$translation_root/generated-crate"
 mkdir -p "$generated_crate/examples" "$gate_root/java-classes"
 cp "$fixture_root/commons_csv_oracle.rs" "$generated_crate/examples/commons_csv_oracle.rs"
 
-javac -d "$gate_root/java-classes" "${java_sources[@]}" "$fixture_root/CommonsCsvOracle.java"
+javac -d "$gate_root/java-classes" "${java_sources[@]}" \
+  "$fixture_root/CommonsCsvReaderOracle.java" "$fixture_root/CommonsCsvOracle.java"
 java -cp "$gate_root/java-classes" CommonsCsvOracle > "$gate_root/java.out"
 
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/.tmp/focused-cargo-target}" \

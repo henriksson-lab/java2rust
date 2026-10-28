@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+#[path = "method_generic_bounds.rs"]
+mod method_generic_bounds;
+
 use crate::binding_id::{BindingId, BindingKind};
 use crate::call_plan::{nullable_collection_element_argument_index, resolved_call_arg_target_type};
 use crate::effective_facts::EffectiveFacts;
@@ -49,6 +52,7 @@ pub type SolvedSlotShape = RustSlotShape;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SignaturePlan {
+    method_generic_bounds: HashMap<(MethodKey, usize), RustSlotShape>,
     native_contracts: crate::plan_contracts::NativeContractInventory,
     native_contract_report: Option<Arc<crate::plan_contracts::NativeContractReport>>,
     transport_optimization: crate::canonical_transport_optimizer::TransportOptimizationReport,
@@ -1675,6 +1679,9 @@ impl SignatureReportCount {
 
 #[derive(Debug, Clone, Default)]
 pub struct SignatureConstraintState {
+    method_generic_bounds: HashMap<(MethodKey, usize), method_generic_bounds::MethodGenericBound>,
+    method_generic_bound_edges: Vec<NativeCollectionStorageEdge>,
+    field_java_types: HashMap<FieldKey, JavaType>,
     methods: HashMap<MethodKey, MethodConstraintSet>,
     constructors: HashMap<ConstructorKey, ConstructorConstraintSet>,
     fields: HashMap<FieldKey, Vec<SignatureConstraint>>,
@@ -1689,6 +1696,7 @@ pub struct SignatureConstraintState {
 impl PartialEq for SignatureConstraintState {
     fn eq(&self, other: &Self) -> bool {
         self.methods == other.methods
+            && self.method_generic_bounds == other.method_generic_bounds
             && self.constructors == other.constructors
             && self.fields == other.fields
             && self.generic_binders == other.generic_binders
@@ -1789,6 +1797,10 @@ impl SignatureConstraintState {
 
 #[derive(Debug, Clone, Default)]
 pub struct MethodConstraintSet {
+    return_java_type: Option<JavaType>,
+    // Immutable body proof, distinct from propagated storage observations.
+    normal_return_proven_non_null: bool,
+    native_erased_facade_params: HashSet<usize>,
     public_api: bool,
     param_names: Vec<String>,
     param_index_by_name: HashMap<String, usize>,
@@ -1892,6 +1904,8 @@ impl MethodConstraintSet {
 impl PartialEq for MethodConstraintSet {
     fn eq(&self, other: &Self) -> bool {
         self.public_api == other.public_api
+            && self.normal_return_proven_non_null == other.normal_return_proven_non_null
+            && self.native_erased_facade_params == other.native_erased_facade_params
             && self.param_names == other.param_names
             && self.param_java_types == other.param_java_types
             && self.collection_carrier_consensus == other.collection_carrier_consensus
@@ -2252,6 +2266,12 @@ pub enum SignatureCallableKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignatureDependencyNode {
+    /// Qualified native children of a method binder, independently of the
+    /// concrete caller carrier substituted for that binder.
+    MethodGenericBound {
+        method: MethodKey,
+        index: usize,
+    },
     /// Lexically scoped source owner binder, independent of any occurrence.
     GenericParameter {
         owner: JavaOwnerKey,
@@ -2429,6 +2449,7 @@ pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
     );
     let owner_alias_topology = build_source_owner_alias_receiver_topology(&constraints);
     constraints.rebuild_method_lookup_index();
+    constraints.method_generic_bound_edges = method_generic_bounds::edges(&constraints, usage);
     install_source_generic_allocation_edges(support_program, &mut constraints);
     let collect_constraints_ms = collect_start.elapsed().as_millis();
     emit_signature_solver_progress(
@@ -2708,6 +2729,8 @@ fn collect_signature_constraints_with_optional_representations(
         );
     }
     constraints.initializer_storage_edges = initializer_storage_edges(program, &constraints);
+    constraints.method_generic_bounds = method_generic_bounds::collect(program, facts);
+    constraints.method_generic_bound_edges = method_generic_bounds::edges(&constraints, usage);
     seed_native_list_projection_slots(&mut constraints, usage);
     seed_native_external_returns(program, &mut constraints, usage, facts);
     install_source_generic_allocation_edges(program, &mut constraints);
@@ -3586,6 +3609,7 @@ fn signature_dependency_node_stores_constraints(node: &SignatureDependencyNode) 
             | SignatureDependencyNode::ConstructorLocal { .. }
             | SignatureDependencyNode::Field { .. }
             | SignatureDependencyNode::GenericParameter { .. }
+            | SignatureDependencyNode::MethodGenericBound { .. }
     )
 }
 
@@ -3689,6 +3713,15 @@ fn add_signature_slot_nodes(
             graph,
             SignatureDependencyNode::GenericParameter {
                 owner: owner.clone(),
+                index: *index,
+            },
+        );
+    }
+    for (method, index) in constraints.method_generic_bounds.keys() {
+        add_signature_dependency_node(
+            graph,
+            SignatureDependencyNode::MethodGenericBound {
+                method: method.clone(),
                 index: *index,
             },
         );
@@ -4412,6 +4445,22 @@ fn method_binding_fact_dependency_node(
     method: &MethodKey,
     binding: &BindingUseFacts,
 ) -> Option<SignatureDependencyNode> {
+    // Lambda parameters are stored as scoped locals in the signature plan,
+    // even when their BindingId kind is Param. Resolve that exact declaration
+    // before consulting the enclosing method's parameter-name table.
+    if let Some(local) = binding.binding()
+        && constraints
+            .methods
+            .get(method)?
+            .local_by_binding(local)
+            .is_some()
+    {
+        return Some(SignatureDependencyNode::MethodLocal {
+            method: method.clone(),
+            name: binding.name().to_string(),
+            binding: Some(local.clone()),
+        });
+    }
     match binding.binding().map(|binding| binding.kind()) {
         Some(BindingKind::Param) => {
             let method_constraints = constraints.methods.get(method)?;
@@ -4469,6 +4518,19 @@ fn constructor_binding_fact_dependency_node(
     constructor: &ConstructorKey,
     binding: &BindingUseFacts,
 ) -> Option<SignatureDependencyNode> {
+    if let Some(local) = binding.binding()
+        && constraints
+            .constructors
+            .get(constructor)?
+            .local_by_binding(local)
+            .is_some()
+    {
+        return Some(SignatureDependencyNode::ConstructorLocal {
+            constructor: constructor.clone(),
+            name: binding.name().to_string(),
+            binding: Some(local.clone()),
+        });
+    }
     match binding.binding().map(|binding| binding.kind()) {
         Some(BindingKind::Param) => {
             let constructor_constraints = constraints.constructors.get(constructor)?;
@@ -5223,6 +5285,12 @@ fn signature_constraint_slots(
     }
     slots.extend(constraints.fields.values());
     slots.extend(constraints.generic_binders.values());
+    slots.extend(
+        constraints
+            .method_generic_bounds
+            .values()
+            .map(|bound| &bound.constraints),
+    );
     slots
 }
 
@@ -5799,6 +5867,29 @@ fn merge_support_context_nullability_constraints(
     constraints: &mut SignatureConstraintState,
     support: SignatureConstraintState,
 ) {
+    let bounded_methods = support
+        .method_generic_bounds
+        .keys()
+        .map(|(method, _)| method.clone())
+        .collect::<HashSet<_>>();
+    let needs_bound_storage_context = !bounded_methods.is_empty();
+    let storage_requirement = |constraint: &SignatureConstraint| {
+        override_nullability_constraint(constraint)
+            || matches!(
+                constraint,
+                SignatureConstraint::RequiredNativeAllocation(_)
+                    | SignatureConstraint::RequiredNestedNativeAllocation { .. }
+            )
+    };
+    for (key, bound) in support.method_generic_bounds {
+        constraints
+            .method_generic_bounds
+            .entry(key)
+            .or_insert(bound);
+    }
+    for (key, ty) in support.field_java_types {
+        constraints.field_java_types.entry(key).or_insert(ty);
+    }
     let mut seen = constraints
         .initializer_storage_edges
         .iter()
@@ -5820,16 +5911,27 @@ fn merge_support_context_nullability_constraints(
         constraints.fields.entry(key).or_insert(context_field);
     }
     for (key, mut context_method) in support.methods {
-        for slot in &mut context_method.params {
-            slot.retain(override_nullability_constraint);
+        if !bounded_methods.contains(&key) {
+            for slot in &mut context_method.params {
+                slot.retain(override_nullability_constraint);
+            }
+            context_method
+                .return_constraints
+                .retain(override_nullability_constraint);
+            if needs_bound_storage_context {
+                // Bound children can originate in another method's local or
+                // lambda parameter. Keep its typed storage node for domain
+                // saturation, without importing Rust ownership preferences.
+                for local in &mut context_method.locals {
+                    local.constraints.retain(&storage_requirement);
+                }
+            } else {
+                context_method.locals.clear();
+                context_method.local_index_by_name.clear();
+                context_method.local_index_by_binding.clear();
+            }
+            context_method.receiver.clear();
         }
-        context_method
-            .return_constraints
-            .retain(override_nullability_constraint);
-        context_method.locals.clear();
-        context_method.local_index_by_name.clear();
-        context_method.local_index_by_binding.clear();
-        context_method.receiver.clear();
 
         if let Some(method) = constraints.methods.get_mut(&key) {
             push_unique_signature_constraints(
@@ -5841,6 +5943,19 @@ fn merge_support_context_nullability_constraints(
             }
         } else {
             constraints.methods.insert(key, context_method);
+        }
+    }
+    if needs_bound_storage_context {
+        // Constructor writes establish the same field child domains observed
+        // by bounded methods emitted in a separate primary compilation unit.
+        for (key, mut constructor) in support.constructors {
+            for param in &mut constructor.params {
+                param.retain(&storage_requirement);
+            }
+            for local in &mut constructor.locals {
+                local.constraints.retain(&storage_requirement);
+            }
+            constraints.constructors.entry(key).or_insert(constructor);
         }
     }
 }
@@ -5869,6 +5984,19 @@ fn propagate_call_site_constraints(
             if let Some(callee_constraints) = callee_constraints {
                 if call_site.result_returned() {
                     for constraint in &callee_constraints.return_constraints {
+                        if method_usage
+                            .declared_return_type()
+                            .zip(call_site.resolved().map(|call| &call.return_type))
+                            .is_some_and(|(target, source)| {
+                                erased_reference_transfer(source, target)
+                            })
+                            && !matches!(
+                                constraint,
+                                SignatureConstraint::RequiredStorageNullability(_)
+                            )
+                        {
+                            continue;
+                        }
                         if signature_shape_constraint_propagation_policy().allows(constraint) {
                             pending.push((
                                 caller_key.clone(),
@@ -6583,7 +6711,7 @@ fn source_call_argument_constraints_for_caller(
             constraints.constructors.get(key).map(|set| set.public_api)
         }
     };
-    if public_api != Some(false) {
+    if public_api.is_none() {
         return;
     }
     for site in usage.call_sites() {
@@ -6619,7 +6747,40 @@ fn source_call_argument_constraints_for_caller(
                     )
                 }
             };
+            let erased_transfer = set
+                .param_java_types
+                .get(*index)
+                .is_some_and(|target| erased_reference_transfer(binding.java_ty(), target));
             for requirement in caller_binding_constraints_for_callee_param(requirements) {
+                if public_api == Some(true)
+                    && !(set.native_erased_facade_params.contains(index)
+                        && set.param_java_types.get(*index).is_some_and(|target| {
+                            java_types_have_same_signature_boundary_identity(
+                                binding.java_ty(),
+                                target,
+                            )
+                        })
+                        && matches!(
+                            requirement,
+                            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)
+                                | SignatureConstraint::RequiredView(ViewShape::Native)
+                        ))
+                {
+                    // Forward the same typed facade through a public source
+                    // API without transferring its loan or allocation domain.
+                    continue;
+                }
+                if erased_transfer
+                    && !matches!(
+                        requirement,
+                        SignatureConstraint::RequiredStorageNullability(_)
+                    )
+                {
+                    // The callee receives an erased canonical reference, not
+                    // the caller's array/container payload or allocation shell.
+                    // Only the Java reference's null domain crosses erasure.
+                    continue;
+                }
                 if should_propagate_caller_binding_constraint_to_callee_param(
                     &requirement,
                     &set.params[*index],
@@ -7834,6 +7995,15 @@ fn call_result_storage_edges(
         edges: &mut Vec<(SignatureDependencyNode, SignatureDependencyNode)>,
     ) {
         for assigned in facts.assigned_call_results() {
+            if facts.native_list_projection_slots().iter().any(|slot| {
+                matches!(&slot.root, crate::usage::NativeCollectionStorageRoot::Binding(binding)
+                    if *binding == assigned.binding)
+            }) {
+                // An Iterable-to-List operation view retains Java identity,
+                // but its Rust storage differs from the producing facade.
+                // Dedicated projection edges already carry null/child domains.
+                continue;
+            }
             let Some(resolved) = assigned.call.resolved() else {
                 continue;
             };
@@ -7843,6 +8013,9 @@ fn call_result_storage_edges(
             let Some(binding) = facts.binding_facts_for_declaration_id(&assigned.binding) else {
                 continue;
             };
+            if erased_reference_transfer(&resolved.return_type, binding.java_ty()) {
+                continue;
+            }
             let source = match &caller {
                 SignatureCallableKey::Method(method) => {
                     method_binding_fact_dependency_node(constraints, method, binding)
@@ -7865,6 +8038,14 @@ fn call_result_storage_edges(
             // Returned calls (including conditional arms) forward the same
             // reference. Join placement demands before emitting either ABI.
             for returned in facts.returned_call_results() {
+                if facts
+                    .declared_return_type()
+                    .is_some_and(is_erased_object_alias_type)
+                {
+                    // Erasure captures the returned reference; its storage
+                    // contract is not the producer's array/collection shell.
+                    continue;
+                }
                 let Some(resolved) = returned.resolved() else {
                     continue;
                 };
@@ -7941,11 +8122,11 @@ fn propagate_assigned_call_native_allocation(
     changed
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum CollectionStorageProjection {
     Value,
     Alias,
-    MapView(usize),
+    BackingView(usize),
     CallbackCapture,
     CallbackEnvironment,
 }
@@ -8116,7 +8297,7 @@ fn collection_storage_edges(
     usage: &UsageFacts,
     kind: CollectionStorageEdgeKind,
 ) -> Vec<NativeCollectionStorageEdge> {
-    let mut edges = Vec::new();
+    let mut edges = constraints.method_generic_bound_edges.clone();
     let mut append = |facts: &MethodUsageFacts, caller: SignatureCallableKey| {
         for slot in facts
             .native_collection_retention_requirements()
@@ -8129,12 +8310,7 @@ fn collection_storage_edges(
                 // A unary retention demand is a self-edge in the same
                 // monotone storage graph; ordinary flow propagation can seed
                 // it without a second field/return-specific solver.
-                let endpoint = (
-                    node,
-                    slot.path.clone(),
-                    slot.ty.clone(),
-                    slot.root_ty.clone(),
-                );
+                let endpoint = method_generic_bounds::endpoint(constraints, node, slot);
                 edges.push((
                     endpoint.clone(),
                     endpoint,
@@ -8189,18 +8365,8 @@ fn collection_storage_edges(
                 collection_storage_slot_dependency_node(constraints, facts, &caller, right),
             ) {
                 edges.push((
-                    (
-                        left_node,
-                        left.path.clone(),
-                        left.ty.clone(),
-                        left.root_ty.clone(),
-                    ),
-                    (
-                        right_node,
-                        right.path.clone(),
-                        right.ty.clone(),
-                        right.root_ty.clone(),
-                    ),
+                    method_generic_bounds::endpoint(constraints, left_node, left),
+                    method_generic_bounds::endpoint(constraints, right_node, right),
                     retain,
                     projection,
                 ));
@@ -8226,7 +8392,7 @@ fn collection_storage_edges(
                             right.root_ty.clone(),
                         ),
                         true,
-                        CollectionStorageProjection::MapView(*child),
+                        CollectionStorageProjection::BackingView(*child),
                     ));
                 }
             }
@@ -8253,6 +8419,31 @@ fn add_collection_storage_constraint_scoped(
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     match target {
+        SignatureDependencyNode::MethodGenericBound { method, index } => {
+            if scope.is_some_and(|scope| !scope.permits(target)) {
+                return false;
+            }
+            // M already denotes the caller's complete carrier. Only its
+            // children constrain storage; its outer owner remains generic.
+            if matches!(
+                requirement,
+                SignatureConstraint::RequiredNativeAllocation(_)
+            ) {
+                return false;
+            }
+            let Some(bound) = constraints
+                .method_generic_bounds
+                .get_mut(&(method.clone(), *index))
+            else {
+                return false;
+            };
+            if bound.constraints.contains(&requirement) {
+                false
+            } else {
+                bound.constraints.push(requirement);
+                true
+            }
+        }
         SignatureDependencyNode::GenericParameter { owner, index } => {
             if scope.is_some_and(|scope| !scope.permits(target)) {
                 return false;
@@ -8423,14 +8614,6 @@ fn propagate_native_collection_child_allocations(
         for (direction, (source, target)) in
             [(&left, &right), (&right, &left)].into_iter().enumerate()
         {
-            if matches!(root_only, CollectionStorageProjection::CallbackEnvironment)
-                && direction == 0
-            {
-                // A synchronized callback requires synchronized captured
-                // state; a local callback may freely retain an Arc. The
-                // captured allocation does not force its other users to Sync.
-                continue;
-            }
             if retain {
                 if let Some(requirement) =
                     native_array_row_nullability_requirement(&target.3, &target.1)
@@ -8441,6 +8624,17 @@ fn propagate_native_collection_child_allocations(
                     target.0.clone(),
                     native_allocation_requirement(target.1.clone(), retained),
                 ));
+            }
+            if matches!(
+                root_only,
+                CollectionStorageProjection::CallbackEnvironment
+                    | CollectionStorageProjection::BackingView(_)
+            ) && direction == 0
+            {
+                // Both owners are retained above. Only propagation of their
+                // concrete domains is directional: a local view can retain an
+                // Arc, while a synchronized view needs synchronized backing.
+                continue;
             }
             for constraint in
                 collection_storage_node_constraints(constraints, &source.0).unwrap_or_default()
@@ -8457,7 +8651,7 @@ fn propagate_native_collection_child_allocations(
                 if let Some(suffix) = path.strip_prefix(source.1.as_slice()) {
                     if matches!(
                         root_only,
-                        CollectionStorageProjection::MapView(_)
+                        CollectionStorageProjection::BackingView(_)
                             | CollectionStorageProjection::CallbackCapture
                             | CollectionStorageProjection::CallbackEnvironment
                     ) && !suffix.is_empty()
@@ -8605,7 +8799,7 @@ fn propagate_collection_element_transfer_nullability(
             }
             continue;
         }
-        if let CollectionStorageProjection::MapView(view_child) = root_only {
+        if let CollectionStorageProjection::BackingView(view_child) = root_only {
             // A key view maps the qualified key child, not the legacy
             // NullableSequenceElement constraint used for a map's values.
             for (source, target) in [(&source, &target), (&target, &source)] {
@@ -8677,6 +8871,30 @@ fn propagate_collection_element_transfer_nullability(
             }
             continue;
         }
+        // Presence of the transferred reference is independent of the
+        // collection's child layout. A nullable Map field can be returned or
+        // forwarded without implying that its keys or values contain null.
+        // Alias projections above deliberately do not transfer root presence;
+        // this is the directional value edge that reads the source reference.
+        let nullable_reference = optional_element_type(&source.2).is_some()
+            || collection_storage_node_constraints(constraints, &source.0)
+                .unwrap_or_default()
+                .iter()
+                .any(|constraint| {
+                    let path = match constraint {
+                        SignatureConstraint::RequiredStorageNullability(
+                            NullabilityState::DefinitelyNull | NullabilityState::MaybeNull,
+                        ) => Some(vec![]),
+                        other => nullable_storage_constraint_path(&source.3, other),
+                    };
+                    path.as_deref() == Some(source.1.as_slice())
+                });
+        if nullable_reference && !matches!(target.2, JavaType::Primitive(_) | JavaType::Void) {
+            pending.push((
+                target.0.clone(),
+                nullable_storage_requirement(&target.3, target.1.clone()),
+            ));
+        }
         // Sequence depth constraints address map values differently from
         // structural child indexes. Leave map-key/value qualification to its
         // existing dedicated solver until that mapping is explicit here.
@@ -8686,7 +8904,14 @@ fn propagate_collection_element_transfer_nullability(
         // Projected storage can carry an intrinsic Option before a node has
         // an explicit nullable constraint (reference-array elements do).
         // Transfer that domain without reinterpreting or copying its payload.
-        if crate::types::optional_element_type(&source.2).is_some()
+        let array_reference_element = source.1.split_last().is_some_and(|(index, parent)| {
+            *index == 0
+                && RustSlotShape::native_child_type_at_path(&source.3, parent).is_some_and(|ty| {
+                    matches!(optional_element_type(&ty).unwrap_or(ty), JavaType::Array(_))
+                })
+                && !matches!(source.2, JavaType::Primitive(_) | JavaType::Void)
+        });
+        if (crate::types::optional_element_type(&source.2).is_some() || array_reference_element)
             && !matches!(target.2, JavaType::Primitive(_) | JavaType::Void)
         {
             let requirement = nullable_storage_requirement(&target.3, target.1.clone());
@@ -8705,12 +8930,13 @@ fn propagate_collection_element_transfer_nullability(
                     SignatureConstraint::RequiredStorageNullability(
                         NullabilityState::DefinitelyNull | NullabilityState::MaybeNull,
                     ) => vec![],
-                    SignatureConstraint::NullableSequenceElement => vec![0],
-                    SignatureConstraint::NullableSequenceElementAtDepth(depth) => {
-                        vec![0; depth + 1]
+                    constraint => {
+                        let Some(path) = nullable_storage_constraint_path(&source.3, constraint)
+                        else {
+                            continue;
+                        };
+                        path
                     }
-                    SignatureConstraint::NullableValueAtPath(path) => path.clone(),
-                    _ => continue,
                 };
                 let Some(suffix) = path.strip_prefix(source.1.as_slice()) else {
                     continue;
@@ -8743,6 +8969,10 @@ fn collection_storage_node_constraints<'a>(
     node: &SignatureDependencyNode,
 ) -> Option<&'a [SignatureConstraint]> {
     match node {
+        SignatureDependencyNode::MethodGenericBound { method, index } => constraints
+            .method_generic_bounds
+            .get(&(method.clone(), *index))
+            .map(|bound| bound.constraints.as_slice()),
         SignatureDependencyNode::GenericParameter { owner, index } => constraints
             .generic_binders
             .get(&(owner.clone(), *index))
@@ -9864,6 +10094,12 @@ fn propagate_call_result_constraints_to_returns(
                 returned.boundary(),
                 Some(method_key.type_name()),
             ) {
+                if method_usage
+                    .declared_return_type()
+                    .is_some_and(|ty| erased_alias_rejects_native_allocation(constraint, ty))
+                {
+                    continue;
+                }
                 pending.push((method_key.clone(), constraint.clone()));
             }
         }
@@ -9961,9 +10197,31 @@ fn internal_call_return_constraints_for_binding<'a>(
     });
     callees
         .into_iter()
-        .flat_map(|callee| callee.return_constraints.iter())
+        .flat_map(|callee| {
+            let nullable = constraints_require_nullable_storage(&callee.return_constraints);
+            callee.return_constraints.iter().filter(move |constraint| {
+                // A non-null observation from one caller is not a proof for
+                // every result of a nullable source method (including T -> T).
+                !(nullable
+                    && matches!(
+                        constraint,
+                        SignatureConstraint::RequiredStorageNullability(
+                            NullabilityState::DefinitelyNonNull
+                        )
+                    ))
+            })
+        })
         .filter(|constraint| signature_shape_constraint_propagation_policy().allows(constraint))
         .filter(|constraint| {
+            if is_erased_object_alias_type(binding.java_ty())
+                && !return_slot_is_erased_object
+                && !matches!(
+                    constraint,
+                    SignatureConstraint::RequiredStorageNullability(_)
+                )
+            {
+                return false;
+            }
             !callee_erased_object_slot_constraint_should_stay_local(
                 constraint,
                 binding.java_ty(),
@@ -10038,6 +10296,15 @@ fn propagate_method_local_alias_constraints(
                     else {
                         continue;
                     };
+                    if local_binding
+                        .as_ref()
+                        .and_then(|id| method_usage.binding_facts_for_declaration_id(id))
+                        .is_some_and(|target| {
+                            erased_reference_transfer(binding.java_ty(), target.java_ty())
+                        })
+                    {
+                        continue;
+                    }
                     for constraint in local_slot_requirements_for_assignment(
                         &method_constraints.locals,
                         local_name,
@@ -10111,6 +10378,15 @@ fn propagate_constructor_local_alias_constraints(
                 else {
                     continue;
                 };
+                if local_binding
+                    .as_ref()
+                    .and_then(|id| constructor_usage.binding_facts_for_declaration_id(id))
+                    .is_some_and(|target| {
+                        erased_reference_transfer(binding.java_ty(), target.java_ty())
+                    })
+                {
+                    continue;
+                }
                 for constraint in local_slot_requirements_for_assignment(
                     &constructor_constraints.locals,
                     local_name,
@@ -10171,6 +10447,20 @@ fn propagate_method_local_alias_source_constraints(
                 }
                 for constraint in method_binding_fact_slot_requirements(method_constraints, binding)
                 {
+                    let target_ty = local_binding
+                        .as_ref()
+                        .and_then(|id| method_usage.binding_facts_for_declaration_id(id))
+                        .map(BindingUseFacts::java_ty);
+                    if target_ty.is_some_and(|ty| {
+                        erased_alias_rejects_native_allocation(constraint, ty)
+                            || erased_reference_transfer(binding.java_ty(), ty)
+                                && !matches!(
+                                    constraint,
+                                    SignatureConstraint::RequiredStorageNullability(_)
+                                )
+                    }) {
+                        continue;
+                    }
                     pending.push((
                         method_key.clone(),
                         local_name.clone(),
@@ -10236,6 +10526,20 @@ fn propagate_constructor_local_alias_source_constraints(
                 for constraint in
                     constructor_binding_fact_slot_requirements(constructor_constraints, binding)
                 {
+                    let target_ty = local_binding
+                        .as_ref()
+                        .and_then(|id| constructor_usage.binding_facts_for_declaration_id(id))
+                        .map(BindingUseFacts::java_ty);
+                    if target_ty.is_some_and(|ty| {
+                        erased_alias_rejects_native_allocation(constraint, ty)
+                            || erased_reference_transfer(binding.java_ty(), ty)
+                                && !matches!(
+                                    constraint,
+                                    SignatureConstraint::RequiredStorageNullability(_)
+                                )
+                    }) {
+                        continue;
+                    }
                     pending.push((
                         key.clone(),
                         local_name.clone(),
@@ -10270,6 +10574,30 @@ fn propagate_constructor_local_alias_source_constraints(
     changed
 }
 
+fn erased_alias_rejects_native_allocation(
+    requirement: &SignatureConstraint,
+    ty: &JavaType,
+) -> bool {
+    if !matches!(
+        requirement,
+        SignatureConstraint::RequiredNativeAllocation(_)
+            | SignatureConstraint::RequiredNestedNativeAllocation { .. }
+    ) {
+        return false;
+    }
+    is_erased_object_alias_type(ty)
+}
+
+fn is_erased_object_alias_type(ty: &JavaType) -> bool {
+    let ty = optional_element_type(ty).unwrap_or_else(|| ty.clone());
+    matches!(ty, JavaType::Named { ref name, .. } | JavaType::Unknown(ref name)
+        if matches!(name.as_str(), "Object" | "java.lang.Object"))
+}
+
+fn erased_reference_transfer(source: &JavaType, target: &JavaType) -> bool {
+    is_erased_object_alias_type(target) && !is_erased_object_alias_type(source)
+}
+
 fn propagate_method_field_storage_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
@@ -10291,6 +10619,12 @@ fn propagate_method_field_storage_constraints(
                 for constraint in
                     field_writer_shape_requirements(constraints, method_key.type_name(), field_name)
                 {
+                    if method_usage
+                        .declared_field_type(field_name)
+                        .is_some_and(|ty| erased_reference_transfer(binding.java_ty(), ty))
+                    {
+                        continue;
+                    }
                     pending.push((method_key.clone(), binding.clone(), constraint.clone()));
                 }
             }
@@ -10330,6 +10664,12 @@ fn propagate_constructor_field_storage_constraints(
                     constructor_key.type_name(),
                     field_name,
                 ) {
+                    if constructor_usage
+                        .declared_field_type(field_name)
+                        .is_some_and(|ty| erased_reference_transfer(binding.java_ty(), ty))
+                    {
+                        continue;
+                    }
                     pending.push((key.clone(), binding.clone(), constraint.clone()));
                 }
             }
@@ -10371,9 +10711,27 @@ fn propagate_method_field_local_alias_constraints(
             else {
                 continue;
             };
+            let erases = method_usage
+                .declared_field_type(field_name)
+                .zip(
+                    local_binding
+                        .as_ref()
+                        .and_then(|id| method_usage.binding_facts_for_declaration_id(id)),
+                )
+                .is_some_and(|(source, target)| {
+                    erased_reference_transfer(source, target.java_ty())
+                });
             for constraint in
                 field_shape_requirements(constraints, method_key.type_name(), field_name)
             {
+                if erases
+                    && !matches!(
+                        constraint,
+                        SignatureConstraint::RequiredStorageNullability(_)
+                    )
+                {
+                    continue;
+                }
                 local_pending.push((
                     method_key.clone(),
                     local_name.clone(),
@@ -10386,6 +10744,9 @@ fn propagate_method_field_local_alias_constraints(
                 local_name,
                 local_binding.as_ref(),
             ) {
+                if erases {
+                    continue;
+                }
                 field_pending.push((
                     method_key.type_name().to_string(),
                     field_name.clone(),
@@ -10443,9 +10804,27 @@ fn propagate_constructor_field_local_alias_constraints(
             else {
                 continue;
             };
+            let erases = constructor_usage
+                .declared_field_type(field_name)
+                .zip(
+                    local_binding
+                        .as_ref()
+                        .and_then(|id| constructor_usage.binding_facts_for_declaration_id(id)),
+                )
+                .is_some_and(|(source, target)| {
+                    erased_reference_transfer(source, target.java_ty())
+                });
             for constraint in
                 field_shape_requirements(constraints, constructor_key.type_name(), field_name)
             {
+                if erases
+                    && !matches!(
+                        constraint,
+                        SignatureConstraint::RequiredStorageNullability(_)
+                    )
+                {
+                    continue;
+                }
                 local_pending.push((
                     constructor_key.clone(),
                     local_name.clone(),
@@ -10458,6 +10837,9 @@ fn propagate_constructor_field_local_alias_constraints(
                 local_name,
                 local_binding.as_ref(),
             ) {
+                if erases {
+                    continue;
+                }
                 field_pending.push((
                     constructor_key.type_name().to_string(),
                     field_name.clone(),
@@ -10642,6 +11024,12 @@ fn propagate_method_return_binding_constraints(
                         && list_interface_constraint_matches_type(constraint, binding.java_ty())
                 })
             {
+                if method_usage
+                    .declared_return_type()
+                    .is_some_and(|ty| erased_reference_transfer(binding.java_ty(), ty))
+                {
+                    continue;
+                }
                 pending.push((method_key.clone(), binding.clone(), constraint.clone()));
             }
         }
@@ -10694,6 +11082,16 @@ fn propagate_method_binding_return_constraints(
                 continue;
             }
             for constraint in method_binding_fact_slot_requirements(method_constraints, binding) {
+                if method_usage.declared_return_type().is_some_and(|ty| {
+                    erased_alias_rejects_native_allocation(constraint, ty)
+                        || erased_reference_transfer(binding.java_ty(), ty)
+                            && !matches!(
+                                constraint,
+                                SignatureConstraint::RequiredStorageNullability(_)
+                            )
+                }) {
+                    continue;
+                }
                 pending.push((method_key.clone(), constraint.clone()));
             }
         }
@@ -10728,6 +11126,13 @@ fn propagate_method_return_field_constraints(
             let FieldUse::Returned { field_name } = field_use else {
                 continue;
             };
+            if method_usage
+                .declared_field_type(field_name)
+                .zip(method_usage.declared_return_type())
+                .is_some_and(|(source, target)| erased_reference_transfer(source, target))
+            {
+                continue;
+            }
             if !scope_permits_field_target(scope, method_key.type_name(), field_name) {
                 continue;
             }
@@ -10786,6 +11191,17 @@ fn propagate_method_field_return_constraints(
                     |constraint| signature_shape_constraint_propagation_policy().allows(constraint),
                 )
             {
+                if method_usage
+                    .declared_field_type(field_name)
+                    .zip(method_usage.declared_return_type())
+                    .is_some_and(|(source, target)| erased_reference_transfer(source, target))
+                    && !matches!(
+                        constraint,
+                        SignatureConstraint::RequiredStorageNullability(_)
+                    )
+                {
+                    continue;
+                }
                 pending.push((method_key.clone(), constraint.clone()));
             }
         }
@@ -11416,6 +11832,18 @@ fn add_method_return_constraint(
     let Some(method_constraints) = constraints.methods.get_mut(method_key) else {
         return false;
     };
+    if method_constraints.normal_return_proven_non_null
+        && matches!(
+            constraint,
+            SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+            )
+        )
+    {
+        // A local may store null before its guard. That storage requirement
+        // cannot widen a return proven non-null on every normal exit.
+        return false;
+    }
     if owned_slot_rejects_borrowed_slice_constraint(
         &method_constraints.return_constraints,
         &constraint,
@@ -12242,6 +12670,21 @@ fn build_signature_plan_from_constraints(
         },
         ..SignaturePlan::default()
     };
+    for (key, bound) in &constraints.method_generic_bounds {
+        if let Some(shape) = solve_signature_shape_with_extra_constraints(
+            representations,
+            SignatureShapeRequest::new(
+                local_java_type_with_signature_constraints(&bound.java_bound, &bound.constraints),
+                SignatureSlotRole::Storage,
+                bound.constraints.clone(),
+                Vec::new(),
+            ),
+            Vec::new(),
+            facts,
+        ) {
+            plan.method_generic_bounds.insert(key.clone(), shape);
+        }
+    }
     for ty in &program.types {
         collect_type_signatures(
             ty,
@@ -12553,6 +12996,24 @@ fn native_contract_inventory(
             });
         }
     }
+    for ((method, index), bound) in &constraints.method_generic_bounds {
+        for requirement in &bound.constraints {
+            if let SignatureConstraint::RequiredNestedNativeAllocation { path, placement } =
+                requirement
+            {
+                inventory.requirements.push(NativeRequirement {
+                    slot: NativeSlotKey {
+                        node: SignatureDependencyNode::MethodGenericBound {
+                            method: method.clone(),
+                            index: *index,
+                        },
+                        path: path.clone(),
+                    },
+                    placement: *placement,
+                });
+            }
+        }
+    }
     inventory
         .requirements
         .sort_by_cached_key(|requirement| format!("{requirement:?}"));
@@ -12638,6 +13099,7 @@ impl SignaturePlan {
         for shape in self
             .fields
             .values()
+            .chain(self.method_generic_bounds.values())
             .chain(self.interface_return_shapes.values().flatten())
         {
             visit(shape);
@@ -12680,6 +13142,15 @@ impl SignaturePlan {
     ) -> &crate::plan_contracts::NativeContractInventory {
         &self.native_contracts
     }
+    pub(crate) fn method_generic_bound_shape(
+        &self,
+        ty: &TypeDecl,
+        method: &MethodDecl,
+        index: usize,
+    ) -> Option<&RustSlotShape> {
+        self.method_generic_bounds
+            .get(&(MethodKey::source_method(ty, method), index))
+    }
     pub(crate) fn resolved_native_contracts<'a>(
         &'a self,
         facts: &'a FactSet,
@@ -12712,6 +13183,9 @@ impl SignaturePlan {
             }
         }
         let shape = match node {
+            SignatureDependencyNode::MethodGenericBound { method, index } => {
+                self.method_generic_bounds.get(&(method.clone(), *index))
+            }
             SignatureDependencyNode::GenericParameter { owner, index } => self
                 .source_generic_allocations
                 .argument(owner.as_str(), *index),
@@ -12897,7 +13371,9 @@ impl SignaturePlan {
             (shape.native_allocation.shared()
                 && effective
                     .retained_native_collection_kind(&shape.java_ty)
-                    .is_some())
+                    .is_some()
+                || shape.native_allocation.shared()
+                    && effective.retained_native_map_kind(&shape.java_ty).is_some())
                 || shape
                     .nested_native_allocations
                     .iter()
@@ -12906,6 +13382,7 @@ impl SignaturePlan {
                             && RustSlotShape::native_child_type_at_path(&shape.java_ty, path)
                                 .is_some_and(|ty| {
                                     effective.retained_native_collection_kind(&ty).is_some()
+                                        || effective.retained_native_map_kind(&ty).is_some()
                                 })
                     })
         };
@@ -16828,6 +17305,7 @@ fn solve_signature_shape_with_extra_constraints(
             apply_required_ownership(&mut shape, OwnershipShape::Owned);
             apply_required_view(&mut shape, ViewShape::Native);
         }
+        crate::java_reference_array_plan::select_stored_view(&mut shape, facts, &type_params);
         shape
     })
 }
@@ -17267,7 +17745,10 @@ pub fn signature_constraint_provenance(
             SignatureConstraintProvenance::CopyRequirement
         }
         SignatureConstraint::RequiredView(
-            ViewShape::Native | ViewShape::JavaSemanticHash | ViewShape::ListInterface,
+            ViewShape::Native
+            | ViewShape::JavaSemanticHash
+            | ViewShape::ListInterface
+            | ViewShape::ReferenceArray,
         ) => SignatureConstraintProvenance::NativeViewRequirement,
         SignatureConstraint::RequiredView(ViewShape::Str) => {
             SignatureConstraintProvenance::StringViewRequirement
@@ -18354,6 +18835,7 @@ fn constrained_field_shape(
         facts,
         representations,
     );
+    crate::java_reference_array_plan::select_stored_view(&mut shape, facts, type_param_scope);
     shape
 }
 
@@ -18570,6 +19052,9 @@ fn collect_type_signature_constraints(
     for member in &ty.members {
         match member {
             crate::java_ir::Member::Field(field) => {
+                constraints
+                    .field_java_types
+                    .insert(FieldKey::source_field(ty, field), field.ty.clone());
                 constraints.fields.insert(
                     FieldKey::source_field(ty, field),
                     field_shape_constraints_with_usage_and_declared_source_types(
@@ -18684,6 +19169,29 @@ fn collect_type_signature_constraints(
                 constraints.methods.insert(
                     MethodKey::source_method(ty, method),
                     MethodConstraintSet {
+                        return_java_type: Some(method.return_type.clone()),
+                        normal_return_proven_non_null:
+                            method_returns_only_post_refined_non_null_locals(method),
+                        native_erased_facade_params: method
+                            .params
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, param)| {
+                                let name = java_type_name(&param.ty);
+                                !name.is_some_and(|name| {
+                                    ty.type_params
+                                        .iter()
+                                        .chain(&method.type_params)
+                                        .any(|binder| binder == name)
+                                }) && !source_declared_type_name_shadows_external_receiver(
+                                    &param.ty,
+                                    declared_source_types,
+                                ) && external_java_type_should_keep_typed_erased_facade(
+                                    &param.ty, facts,
+                                )
+                            })
+                            .map(|(index, _)| index)
+                            .collect(),
                         public_api: source_method_api_boundary_policy(ty, method).public_api(),
                         param_index_by_name: index_names(&param_names),
                         param_java_types: method
@@ -20168,6 +20676,80 @@ fn collect_source_return_nullability_states_from_stmts_with_refinements(
             states,
         );
         update_post_stmt_nullability_refinements(stmt, refinements);
+        if let Some(name) = post_if_non_null_local(stmt, scopes) {
+            refinements.insert(name.to_string());
+        }
+    }
+}
+
+/// Join only branches that can continue after an if. A nullable fallback such
+/// as `if (value == null) { value = load(); if (value == null) throw ...; }`
+/// proves the local non-null on normal continuation without making its storage
+/// non-null or changing nullable field/call contracts.
+fn post_if_non_null_local<'a>(stmt: &'a Stmt, scopes: &[SourceScope]) -> Option<&'a str> {
+    use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
+    let Stmt::If { condition, .. } = stmt else {
+        return None;
+    };
+    let TernaryNullRefinementPlan::LocalNullTest { local_name, .. } =
+        plan_ternary_null_refinement(condition)
+    else {
+        return None;
+    };
+    // Implicit field reads are also Expr::Var, but calls can mutate fields.
+    // Only a lexically resolved local/parameter is stable across those calls.
+    scoped_binding(scopes, local_name)?;
+    let mut declarations = HashMap::new();
+    collect_declared_local_name_counts(std::slice::from_ref(stmt), &mut declarations);
+    if declarations.contains_key(local_name) {
+        return None;
+    }
+    (normal_exit_local_non_null(stmt, local_name, false) == Some(true)).then_some(local_name)
+}
+
+fn normal_exit_local_non_null(stmt: &Stmt, name: &str, incoming: bool) -> Option<bool> {
+    use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
+    let block_exit = |block: &Block, mut state| {
+        for stmt in &block.statements {
+            state = normal_exit_local_non_null(stmt, name, state)?;
+        }
+        Some(state)
+    };
+    match stmt {
+        Stmt::Return(_) | Stmt::Throw(_) | Stmt::Break(_) | Stmt::Continue(_) => None,
+        Stmt::Block(block) => block_exit(block, incoming),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            let mut writes = HashSet::new();
+            collect_mutated_local_names_from_expr(condition, &mut writes);
+            let incoming = incoming && !writes.contains(name);
+            let (then_state, else_state) = match plan_ternary_null_refinement(condition) {
+                TernaryNullRefinementPlan::LocalNullTest {
+                    local_name,
+                    then_non_null,
+                    else_non_null,
+                } if local_name == name => (then_non_null, else_non_null),
+                _ => (incoming, incoming),
+            };
+            let then_exit = block_exit(then_block, then_state);
+            let else_exit = else_block
+                .as_ref()
+                .map_or(Some(else_state), |block| block_exit(block, else_state));
+            match (then_exit, else_exit) {
+                (Some(left), Some(right)) => Some(left && right),
+                (Some(state), None) | (None, Some(state)) => Some(state),
+                (None, None) => None,
+            }
+        }
+        Stmt::Unsupported(_) => Some(false),
+        _ => {
+            let mut writes = HashSet::new();
+            collect_mutated_local_names_from_stmt(stmt, &mut writes);
+            Some(incoming && !writes.contains(name))
+        }
     }
 }
 
@@ -22732,7 +23314,13 @@ fn collect_local_constraint_sets_from_expr(
         Expr::Lambda { params, body } => {
             let mut lambda_types = local_types.clone();
             for param in params {
-                if let Some(ty) = &param.ty {
+                if let Some(ty) = param.ty.as_ref().or_else(|| {
+                    param
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| usage?.binding_facts_for_declaration_id(binding))
+                        .map(|binding| binding.java_ty())
+                }) {
                     lambda_types.insert(param.name.clone(), ty.clone());
                     lambda_types.insert(param.source_name.clone(), ty.clone());
                     if let Some(binding) = &param.binding {
@@ -28286,6 +28874,180 @@ class PublicMapLookup {
     }
 
     #[test]
+    fn public_facade_forwarding_inventory_preserves_source_and_binder_authority() {
+        for (source, eligible) in [
+            (
+                "class Probe { public void use(java.sql.ResultSet value) {} }",
+                true,
+            ),
+            (
+                "class ResultSet {} class Probe { public void use(ResultSet value) {} }",
+                false,
+            ),
+            (
+                "import java.sql.ResultSet; class Probe { public <ResultSet> void use(ResultSet value) {} }",
+                false,
+            ),
+            (
+                "import java.sql.ResultSet; class Probe { public <ResultSet> void use(java.sql.ResultSet value) {} }",
+                true,
+            ),
+            ("class Probe { public void use(Object value) {} }", false),
+        ] {
+            let mut parsed = crate::parser::parse_java_source(source);
+            let mut programs = vec![&mut parsed.program];
+            let catalog = crate::scoped_type_parameters::BinderCatalog::collect_many(&mut programs);
+            for program in programs {
+                catalog.normalize(program);
+            }
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let semantic = crate::semantic_analysis::analyze_program(
+                &resolved.program,
+                &resolved.facts,
+                &FactSet::default(),
+            );
+            let constraints =
+                collect_signature_constraints(&resolved.program, &semantic.usage, &semantic.facts);
+            let owner = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == "Probe")
+                .unwrap();
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == "use" => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let set = constraints
+                .methods
+                .get(&MethodKey::source_method(owner, method))
+                .unwrap();
+            assert_eq!(
+                set.native_erased_facade_params.contains(&0),
+                eligible,
+                "{source}; ty={:?}; binders={:?}; parsed={}; native={}",
+                method.params[0].ty,
+                method.type_params,
+                EffectiveFacts::new(&semantic.facts)
+                    .parsed_source_controls_native_carrier(&method.params[0].ty),
+                external_java_type_should_keep_typed_erased_facade(
+                    &method.params[0].ty,
+                    &semantic.facts
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_iterator_next_keeps_its_non_null_result_after_saturation() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/corpus/csv/GuardedIteratorContracts.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner =
+            find_signature_type_decl(&resolved.program, "GuardedIteratorOwner.Cursor").unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "next" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let typed =
+            typed_source_method_return_nullability_constraints(owner, method, &semantic.facts);
+        assert!(
+            signature_constraints_prove_non_null_storage(&typed),
+            "{typed:?}"
+        );
+        let baseline =
+            method_return_shape_constraints(owner, method, &semantic.usage, &semantic.facts);
+        let shape = signatures.method_return_shape(owner, method).unwrap();
+        assert!(
+            shape.optional_element_type().is_none(),
+            "{shape:?}; baseline={baseline:?}"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_joins_guarded_normal_exits_without_narrowing_fields() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class GuardFlow {
+    String field;
+    String load() { return null; }
+    void touch() { field = null; }
+    String nested(String value) {
+        if (value == null) { value = load(); if (value == null) throw new IllegalStateException(); }
+        return value;
+    }
+    String reversed(String value) {
+        if (value != null) {} else { value = load(); if (value == null) throw new IllegalStateException(); }
+        return value;
+    }
+    String unchecked(String value) {
+        if (value == null) { value = load(); }
+        return value;
+    }
+    String reassigned(String value) {
+        if (value == null) throw new IllegalStateException();
+        value = null;
+        return value;
+    }
+    String returnedNull(String value) {
+        if (value == null) return null;
+        return value;
+    }
+    String mutableField() {
+        if (field == null) { field = load(); if (field == null) throw new IllegalStateException(); }
+        touch(); return field;
+    }
+    String caught(String value) {
+        if (value == null) { try { if (value == null) throw new IllegalStateException(); } catch (IllegalStateException ex) {} }
+        return value;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = &resolved.program.types[0];
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if matches!(method.name.as_str(), "load" | "touch") {
+                continue;
+            }
+            let constraints =
+                typed_source_method_return_nullability_constraints(owner, method, &resolved.facts);
+            let expected = matches!(method.name.as_str(), "nested" | "reversed");
+            assert_eq!(
+                signature_constraints_prove_non_null_storage(&constraints),
+                expected,
+                "{}: {constraints:?}",
+                method.name
+            );
+        }
+    }
+
+    #[test]
     fn source_return_nullability_field_shadow_expires_after_block() {
         let choose = BindingId::new(BindingKind::Param, "choose", 0);
         let shadow = BindingId::new(BindingKind::Local, "value", 0);
@@ -32320,8 +33082,15 @@ fn external_receiver_binding_should_keep_typed_erased_facade(
     binding: &BindingUseFacts,
     facts: &FactSet,
 ) -> bool {
+    external_java_type_should_keep_typed_erased_facade(binding.java_ty(), facts)
+}
+
+fn external_java_type_should_keep_typed_erased_facade(java_ty: &JavaType, facts: &FactSet) -> bool {
+    if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(java_ty) {
+        return false;
+    }
     let Some(receiver_type) =
-        crate::stdlib::external_api_receiver_owner_key(binding.java_ty(), &TypeEnv::new())
+        crate::stdlib::external_api_receiver_owner_key(java_ty, &TypeEnv::new())
     else {
         return false;
     };
@@ -33546,6 +34315,7 @@ fn local_plan(
         facts,
         representations,
     );
+    crate::java_reference_array_plan::select_stored_view(&mut shape, facts, type_param_scope);
     LocalPlan::new(
         binding,
         name.to_string(),
@@ -36766,6 +37536,16 @@ fn method_returns_only_post_refined_non_null_locals(method: &MethodDecl) -> bool
     let Some(body) = &method.body else {
         return false;
     };
+    // Public source methods still need a body proof when their return value
+    // crosses a generic interface boundary. Nullable local storage is not
+    // evidence of a nullable normal return after a terminating null guard.
+    if source_method_return_nullability_constraints(method)
+        == vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull,
+        )]
+    {
+        return true;
+    }
     let mut saw_return = false;
     let mut refinements = HashSet::new();
     block_returns_only_refined_non_null_locals(body, &mut refinements, &mut saw_return)
@@ -38311,6 +39091,38 @@ mod native_contract_tests {
                 .any(|d| d.code == "native_contract_generic_obligation")
         );
     }
+    #[test]
+    fn intrinsic_cursors_certify_local_reference_environments_but_not_sync_storage() {
+        for ty in ["Iterator<String>", "ListIterator<String>"] {
+            for sync in [false, true] {
+                let mut plan = SignaturePlan::default();
+                let source = slot("cursor");
+                let placement = StoragePlacement::new(true, true, sync);
+                insert(&mut plan, &source, ty, placement);
+                plan.native_contracts.requirements.push(NativeRequirement {
+                    slot: source.clone(),
+                    placement,
+                });
+                let facts = FactSet::default();
+                let report = plan.resolved_native_contracts(&facts).check();
+                if sync {
+                    assert!(
+                        report
+                            .diagnostics
+                            .iter()
+                            .any(|issue| issue.code == "native_contract_non_native_position"),
+                        "{ty}: {report:?}"
+                    );
+                    assert!(report.invalid_nodes.contains(&source.node));
+                } else {
+                    assert!(report.diagnostics.is_empty(), "{ty}: {report:?}");
+                    assert!(report.checked_nodes.contains(&source.node));
+                    assert!(plan.resolved_native_contracts(&facts).validate().is_ok());
+                }
+            }
+        }
+    }
+
     #[test]
     fn concrete_nonnative_leaf_cannot_be_certified_as_native_allocation() {
         for ty in ["String", "Node", "int"] {

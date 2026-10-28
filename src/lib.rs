@@ -20,6 +20,7 @@ mod scoped_type_parameters;
 pub enum RuntimeSupport {
     FloatingPointDisplay,
     LosslessJavaText,
+    CheckedIterator,
 }
 
 impl RuntimeSupport {
@@ -27,6 +28,7 @@ impl RuntimeSupport {
         match name {
             "floating-point-display" => Some(Self::FloatingPointDisplay),
             "lossless-java-text" => Some(Self::LosslessJavaText),
+            "checked-iterator" => Some(Self::CheckedIterator),
             _ => None,
         }
     }
@@ -35,6 +37,7 @@ impl RuntimeSupport {
         let item = match self {
             Self::FloatingPointDisplay => stdlib::java_floating_point_display_support_item(),
             Self::LosslessJavaText => stdlib::java_utf16_string_support_item(),
+            Self::CheckedIterator => stdlib::java_iterator_runtime_support_item(),
         };
         emit::emit_file(&rust_ir::RustFile { items: vec![item] })
     }
@@ -66,6 +69,7 @@ mod inner_class_capture;
 mod item_assembly;
 mod java_append_plan;
 mod java_float_parse;
+mod java_reference_array_plan;
 // Staged lossless payload; activated only with a coherent String/char consumer
 // migration. Until then the existing emitted representation is unchanged.
 mod java_hash_plan;

@@ -33419,17 +33419,17 @@ pub fn java_platform_constructor_argument_effect_for(
         });
     }
     if crate::facts::external_type_name_matches(type_name, "java.io.BufferedReader")
-        && arg_count == 2
+        && matches!(arg_count, 1 | 2)
     {
         let (parameter_type, alias_policy) = match parameter_index {
             0 => (
                 JavaType::Named {
-                    name: "java.io.InputStreamReader".to_string(),
+                    name: "java.io.Reader".to_string(),
                     args: Vec::new(),
                 },
                 ExternalArgumentAliasPolicy::Escapes,
             ),
-            1 => (
+            1 if arg_count == 2 => (
                 JavaType::Primitive(PrimitiveType::Int),
                 ExternalArgumentAliasPolicy::NoAlias,
             ),
