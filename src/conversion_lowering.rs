@@ -374,7 +374,7 @@ mod tests {
             apply_instanceof(RustExpr::Var("animal".to_string()), &instanceof_plan);
         assert_eq!(
             crate::emit::emit_expr(&instanceof_expr),
-            "matches!(animal, AnimalValue::Dog(_))"
+            "matches!(animal, AnimalValue::Dog(..))"
         );
     }
 

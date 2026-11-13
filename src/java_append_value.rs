@@ -257,3 +257,15 @@ impl JavaAppendValue for &[char] {
         self.iter().copied().collect()
     }
 }
+
+impl JavaAppendValue for JavaException {
+    fn into_java_append_string(self) -> JavaUtf16 {
+        JavaTextView::java_text_view(&self.to_string()).into_owned()
+    }
+}
+
+impl JavaAppendValue for &JavaException {
+    fn into_java_append_string(self) -> JavaUtf16 {
+        JavaTextView::java_text_view(&self.to_string()).into_owned()
+    }
+}

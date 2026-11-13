@@ -8686,6 +8686,9 @@ fn record_native_value_domain_storage(
                 // The view preserves presence of its Java receiver as well
                 // as the shared child storage domain. Nullable producers must
                 // not become required merely by being exposed as Iterable.
+                // The element domain is joined in both directions, but only
+                // when no earlier handler already recorded the same edge
+                // (for example a lambda returning its own capture).
                 facts
                     .nullable_collection_storage_flows
                     .push((source.clone(), destination.clone()));
@@ -8694,12 +8697,22 @@ fn record_native_value_domain_storage(
                 source.ty = source_element;
                 target.path.push(0);
                 target.ty = target_element;
-                facts
+                if !facts
                     .nullable_collection_storage_flows
-                    .push((source.clone(), target.clone()));
-                facts
+                    .contains(&(source.clone(), target.clone()))
+                {
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((source.clone(), target.clone()));
+                }
+                if !facts
                     .nullable_collection_storage_flows
-                    .push((target, source));
+                    .contains(&(target.clone(), source.clone()))
+                {
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((target, source));
+                }
                 return;
             }
             if source.path.is_empty() {

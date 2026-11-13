@@ -1,4 +1,36 @@
 use std::collections::BTreeSet;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
+thread_local! {
+    static EXTERNAL_RECEIVER_KEY_MEMO_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static EXTERNAL_RECEIVER_KEY_MEMO: RefCell<HashMap<(usize, String), Option<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+// Planning reads the AST through shared references, so a receiver-type key
+// memo is sound for the duration of one outermost planning query; dropping
+// it at depth zero keeps stale pointers from aliasing across queries.
+struct ExternalReceiverKeyMemoGuard;
+
+impl ExternalReceiverKeyMemoGuard {
+    fn enter() -> Self {
+        EXTERNAL_RECEIVER_KEY_MEMO_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for ExternalReceiverKeyMemoGuard {
+    fn drop(&mut self) {
+        EXTERNAL_RECEIVER_KEY_MEMO_DEPTH.with(|depth| {
+            let remaining = depth.get() - 1;
+            depth.set(remaining);
+            if remaining == 0 {
+                EXTERNAL_RECEIVER_KEY_MEMO.with(|memo| memo.borrow_mut().clear());
+            }
+        });
+    }
+}
 
 pub(crate) fn native_map_entry_accessor_index(name: &str) -> Option<usize> {
     match name {
@@ -3250,6 +3282,33 @@ fn external_receiver_expr_type_key_with_index(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> Option<String> {
+    let _guard = ExternalReceiverKeyMemoGuard::enter();
+    let key = (receiver as *const Expr as usize, method_name.to_string());
+    if let Some(cached) =
+        EXTERNAL_RECEIVER_KEY_MEMO.with(|memo| memo.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+    let result = external_receiver_expr_type_key_with_index_uncached(
+        receiver,
+        method_name,
+        facts,
+        external_index,
+        types,
+        current_type,
+    );
+    EXTERNAL_RECEIVER_KEY_MEMO.with(|memo| memo.borrow_mut().insert(key, result.clone()));
+    result
+}
+
+fn external_receiver_expr_type_key_with_index_uncached(
+    receiver: &Expr,
+    method_name: &str,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<String> {
     // Keep an explicitly imported owner qualified when selecting its API
     // contract. Otherwise a simple-name built-in fallback can outrank the
     // imported pack's precise return, exception and receiver ABI.
@@ -3968,7 +4027,9 @@ fn plan_call_target_with_external_index_impl<'a>(
     if let Some(call) = resolved
         && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
         && let Some(external_rust_name) =
-            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+            resolved_external_instance_call_rust_name_with_index(
+                call, name, arg_count, facts, external_index,
+            )
     {
         return CallTargetPlan::FallbackReceiver {
             receiver,
@@ -4025,7 +4086,9 @@ fn plan_call_target_with_external_index_impl<'a>(
     if let Some(call) = resolved
         && let (CallKind::Instance, None) = (&call.kind, receiver)
         && let Some(external_rust_name) =
-            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+            resolved_external_instance_call_rust_name_with_index(
+                call, name, arg_count, facts, external_index,
+            )
     {
         return CallTargetPlan::FallbackSelf {
             rust_name: external_rust_name,
@@ -4093,7 +4156,9 @@ fn plan_call_target_with_external_index_impl<'a>(
 
     if let Some(call) = resolved {
         if let Some(external_rust_name) =
-            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+            resolved_external_instance_call_rust_name_with_index(
+                call, name, arg_count, facts, external_index,
+            )
         {
             return match (&call.kind, receiver) {
                 (CallKind::Instance, Some(receiver)) => CallTargetPlan::FallbackReceiver {
@@ -4179,6 +4244,22 @@ pub(crate) fn resolved_external_instance_call_rust_name(
     arg_count: usize,
     facts: &FactSet,
 ) -> Option<String> {
+    resolved_external_instance_call_rust_name_with_index(
+        call,
+        java_name,
+        arg_count,
+        facts,
+        &facts.external_lookup_index(),
+    )
+}
+
+pub(crate) fn resolved_external_instance_call_rust_name_with_index(
+    call: &ResolvedCall,
+    java_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+) -> Option<String> {
     if call.kind != CallKind::Instance {
         return None;
     }
@@ -4196,8 +4277,7 @@ pub(crate) fn resolved_external_instance_call_rust_name(
         {
             return Some(external_name);
         }
-        let effect = facts
-            .external_lookup_index()
+        let effect = external_index
             .external_api_effect_for_receiver_with_arity(Some(&owner), java_name, Some(arg_count))
             .cloned()
             .or_else(|| {
