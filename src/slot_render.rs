@@ -1591,8 +1591,20 @@ pub(crate) fn storage_placement_construction_expr(
     placement: StoragePlacement,
     rendered: RustExpr,
 ) -> RustExpr {
+    storage_placement_construction_expr_with_fuel(placement, rendered, 8)
+}
+
+fn storage_placement_construction_expr_with_fuel(
+    placement: StoragePlacement,
+    rendered: RustExpr,
+    fuel: u32,
+) -> RustExpr {
     let rendered = recover_storage_placement_construction_expr(placement, rendered);
-    let rendered = relocate_result_projection_inside_storage(placement, rendered);
+    let rendered = if fuel > 0 {
+        relocate_result_projection_inside_storage(placement, rendered, fuel)
+    } else {
+        rendered
+    };
     if storage_placement_construction_expr_is_wrapped(placement, &rendered) {
         return rendered;
     }
@@ -1622,6 +1634,7 @@ pub(crate) fn storage_placement_construction_expr(
 fn relocate_result_projection_inside_storage(
     placement: StoragePlacement,
     expr: RustExpr,
+    fuel: u32,
 ) -> RustExpr {
     match expr {
         RustExpr::Shaped {
@@ -1652,7 +1665,11 @@ fn relocate_result_projection_inside_storage(
             RustExpr::Shaped {
                 shape: RustExprShape::ResultPropagated,
                 actual,
-                expr: Box::new(storage_placement_construction_expr(placement, payload)),
+                expr: Box::new(storage_placement_construction_expr_with_fuel(
+                    placement,
+                    payload,
+                    fuel - 1,
+                )),
             }
         }
         RustExpr::Try(wrapped) => {
@@ -1665,7 +1682,7 @@ fn relocate_result_projection_inside_storage(
             } else {
                 RustExpr::Try(Box::new(payload))
             };
-            storage_placement_construction_expr(placement, payload)
+            storage_placement_construction_expr_with_fuel(placement, payload, fuel - 1)
         }
         other => other,
     }

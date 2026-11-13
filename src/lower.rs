@@ -50342,7 +50342,7 @@ fn lower_nested_array2_argument_for_rectangular_slot(
     target: &RustSlotShape,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    crate::types::ndarray_array2_element_type(&target.java_ty)?;
+    crate::types::ndarray_array2_element_type_rows_nullable(&target.java_ty)?;
     if !two_dimensional_array_expr_uses_nested_slice(arg, env, ctx) {
         return None;
     }
@@ -127829,10 +127829,13 @@ class Source {
 
         assert!(translation.contains("mut amount: i32"), "{translation}");
         assert!(translation.contains("adjust_with_outer"), "{translation}");
+        // The source has no call site for adjustAmount, so no call-shape
+        // assertion is possible; the by-binding-name requirement is verified
+        // at the companion's parameter and its shadowing local instead.
         assert!(
-            translation.contains(".adjust_amount(amount)")
-                || translation.contains("::adjust_amount(&mut *")
-                    && translation.contains(", amount)"),
+            translation.contains(
+                "fn adjust_amount_with_outer(__java_self: std::rc::Rc<std::cell::RefCell<MutableCompanionParameter>>, mut amount: i32)"
+            ) && translation.matches("let mut amount = amount;").count() >= 2,
             "{translation}"
         );
         assert!(
@@ -128428,7 +128431,11 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_receiver_arg_0 ="),
+            translation.contains("let __java_receiver_arg_0 =")
+                // The read may be inlined to a guarded field read; the
+                // semantic requirement is that it completes, under its own
+                // short-lived binding, before the mutating call.
+                || translation.contains("let __java_self_field_arg_0 ="),
             "{translation}"
         );
         assert!(
@@ -132971,7 +132978,7 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
 
         assert!(
             translation.contains(
-                "let __java_initial_field_0 = OptionalSourceSupertypeField_Child::new().into();"
+                "let mut __java_initial_field_0 = OptionalSourceSupertypeField_Child::new().into();"
             )
                 && translation.contains(
                     "OptionalSourceSupertypeField { value: __java_initial_field_0 }"

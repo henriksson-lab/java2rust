@@ -92,6 +92,7 @@ pub(crate) fn support(programs: &[&Program], facts: &FactSet) -> String {
     let canonical = |name: &str| aliases.get(name).cloned().unwrap_or_else(|| name.into());
     // The same source edges feed native boundary discovery and final metadata;
     // imports and observed class literals are not a complete dependency list.
+    let hierarchy_index = facts.hierarchy_lookup_index();
     let declarations: Vec<_> = declarations
         .into_iter()
         .map(|(ty, program)| {
@@ -99,7 +100,7 @@ pub(crate) fn support(programs: &[&Program], facts: &FactSet) -> String {
                 name: ty.name.clone(),
                 args: vec![],
             };
-            let edges = facts.reachable_hierarchy_edges_for_type(&actual);
+            let edges = hierarchy_index.reachable_hierarchy_edges_for_type(&actual);
             (ty, program, actual, edges)
         })
         .collect();

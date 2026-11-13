@@ -3967,7 +3967,8 @@ impl FactSet {
     }
 
     pub fn hierarchy_reachability_domain(&self, root_type_name: &str) -> FiniteFactDomain {
-        let type_count = self.hierarchy_type_names(root_type_name).len();
+        let fact_names = self.hierarchy_fact_type_names();
+        let type_count = fact_names.len() + usize::from(!fact_names.contains(root_type_name));
         FiniteFactDomain::new(type_count, type_count)
     }
 
@@ -3998,13 +3999,21 @@ impl FactSet {
         edges
     }
 
-    fn hierarchy_type_names(&self, seed_type_name: &str) -> HashSet<String> {
-        let mut names = HashSet::from([seed_type_name.to_string()]);
-        names.extend(self.hierarchy_fact_type_names());
-        names
-    }
-
-    fn hierarchy_fact_type_names(&self) -> HashSet<String> {
+    fn hierarchy_fact_type_names(&self) -> Rc<HashSet<String>> {
+        // The name set depends only on this FactSet's override list, which is
+        // append-only during a batch; emission rebuilds it per queried type,
+        // so memoize per (facts identity, overrides length).
+        thread_local! {
+            static CACHE: std::cell::RefCell<HashMap<(usize, usize), Rc<HashSet<String>>>> =
+                std::cell::RefCell::new(HashMap::new());
+        }
+        let key = (
+            self as *const FactSet as usize,
+            self.type_capability_overrides.len(),
+        );
+        if let Some(cached) = CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+            return cached;
+        }
         let mut names = HashSet::new();
         for override_fact in &self.type_capability_overrides {
             names.insert(override_fact.type_name.clone());
@@ -4019,6 +4028,8 @@ impl FactSet {
                 }
             }
         }
+        let names = Rc::new(names);
+        CACHE.with(|cache| cache.borrow_mut().insert(key, names.clone()));
         names
     }
 

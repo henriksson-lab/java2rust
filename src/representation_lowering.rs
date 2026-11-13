@@ -12749,7 +12749,7 @@ class NullName implements Named {
         assert_eq!(
             super::interface_type_arguments_in_target(program, root, source),
             Some(vec![JavaType::Named {
-                name: "T".into(),
+                name: root.type_params[0].clone(),
                 args: vec![]
             }])
         );

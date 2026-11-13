@@ -6479,7 +6479,7 @@ fn known_argument_sensitive_external_method_return_type(
             name: "EnumSet".to_string(),
             args: vec![common_enum_set_element_type(args)],
         }),
-        (Some("EnumSet"), "allOf" | "all_of", [class_token]) => {
+        (Some("EnumSet"), "allOf" | "all_of" | "noneOf" | "none_of", [class_token]) => {
             class_token_element_type(class_token).map(|element| JavaType::Named {
                 name: "EnumSet".to_string(),
                 args: vec![element],
@@ -46541,7 +46541,11 @@ class Probe {
             "{:?}",
             runtime.diagnostics
         );
-        let iterable = external_facade_functional_closure_carrier_struct("Iterable");
+        let iterable = format!(
+            "{}\n{}",
+            external_facade_functional_closure_carrier_struct("Iterable"),
+            external_facade_eq_impl("Iterable", &no_inferred_arities())
+        );
         let hash = format!(
             "{}\n{}",
             java_checked_hash_runtime_support(),
@@ -46683,9 +46687,13 @@ pub fn exercise() {
             "{:?}",
             runtime.diagnostics
         );
-        let support = external_facade_functional_closure_carrier_struct("Iterable");
+        let support = format!(
+            "{}\n{}",
+            external_facade_functional_closure_carrier_struct("Iterable"),
+            external_facade_eq_impl("Iterable", &no_inferred_arities())
+        );
         let source = format!(
-            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator, JavaLocalCallback, JavaReferenceIdentity, JavaMapKey, JavaSemanticHashMap}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
+            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator, JavaLocalCallback, JavaReferenceIdentity, JavaMapKey, JavaSemanticHashMap, JavaErasedIterator, JavaErasedIterableView, JavaErasedValue, JavaErasedIterableProjection, JavaReferenceArrayProjection, JavaReferenceArrayView}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
             runtime.rust,
             r#"
 pub fn exercise() {

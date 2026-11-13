@@ -1,5 +1,7 @@
 // Java exception state and logical message API. The producer selects the
 // text alias and explicit formatter adapter; no scalar projection lives here.
+// The JavaAppendValue impls live with the append capability item so this
+// carrier compiles without the string-append platform facade.
 #[derive(Clone, PartialEq, Eq)]
 pub struct JavaException {
     class_name: &'static str,
@@ -8,18 +10,6 @@ pub struct JavaException {
     cause: Option<std::boxed::Box<JavaException>>,
     suppressed: Vec<JavaException>,
     null_callback_receiver: bool,
-}
-
-impl JavaAppendValue for JavaException {
-    fn into_java_append_string(self) -> JavaUtf16 {
-        JavaTextView::java_text_view(&self.to_string()).into_owned()
-    }
-}
-
-impl JavaAppendValue for &JavaException {
-    fn into_java_append_string(self) -> JavaUtf16 {
-        JavaTextView::java_text_view(&self.to_string()).into_owned()
-    }
 }
 
 impl std::fmt::Debug for JavaException {
