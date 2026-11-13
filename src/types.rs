@@ -784,6 +784,20 @@ pub fn ndarray_array2_element_type(java_ty: &JavaType) -> Option<JavaType> {
     matches!(element_ty, JavaType::Primitive(_)).then_some(element_ty)
 }
 
+/// The Array2 element type when the rows may be wrapped in Optional, as in
+/// the solved storage of a partially specified `new T[rows][]` allocation
+/// (`Array<Optional<Array<T>>>`). The declared `T[][]` answer is checked
+/// first so a genuinely ragged target is not relabelled rectangular.
+pub fn ndarray_array2_element_type_rows_nullable(java_ty: &JavaType) -> Option<JavaType> {
+    ndarray_array2_element_type(java_ty).or_else(|| match java_ty {
+        JavaType::Array(row_ty) => {
+            let row_ty = optional_element_type(row_ty).unwrap_or_else(|| (**row_ty).clone());
+            ndarray_array2_element_type(&JavaType::Array(Box::new(row_ty)))
+        }
+        _ => None,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrayLengthDimension {
     Rows,

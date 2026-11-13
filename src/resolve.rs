@@ -5340,16 +5340,19 @@ fn resolve_expr_calls(
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
             } else if let Some((receiver_ty, receiver_actual_ty)) =
-                receiver.as_deref().and_then(|receiver| {
-                    source_receiver_type_for_method(
-                        receiver,
-                        name,
-                        arg_types.len(),
-                        current_type,
-                        symbols,
-                        env,
-                    )
-                })
+                receiver.as_deref().zip(receiver_type.clone()).and_then(
+                    |(receiver, receiver_actual_ty)| {
+                        source_receiver_type_for_method_with_actual(
+                            receiver,
+                            receiver_actual_ty,
+                            name,
+                            arg_types.len(),
+                            current_type,
+                            symbols,
+                            env,
+                        )
+                    },
+                )
             {
                 let receiver_methods = symbols.methods_for_hierarchy(&receiver_ty);
                 match resolve_same_class_call_with_type_args(
@@ -5428,16 +5431,8 @@ fn resolve_expr_calls(
                 })
             }) {
                 *resolved = Some(identity_call);
-            } else if let Some(enum_call) = receiver.as_deref().and_then(|receiver| {
-                external_enum_synthetic_call(
-                    receiver,
-                    name,
-                    arg_types.len(),
-                    current_type,
-                    symbols,
-                    env,
-                    external_facts,
-                )
+            } else if let Some(enum_call) = receiver_type.clone().and_then(|receiver_ty| {
+                external_enum_synthetic_call(receiver_ty, name, arg_types.len())
             }) {
                 *resolved = Some(enum_call);
             } else {
@@ -6524,16 +6519,8 @@ fn infer_resolver_expr_type_with_facts(
             {
                 return enum_call.return_type;
             }
-            if let Some(enum_call) = receiver.as_deref().and_then(|receiver| {
-                external_enum_synthetic_call(
-                    receiver,
-                    name,
-                    arg_types.len(),
-                    current_type,
-                    symbols,
-                    env,
-                    external_facts,
-                )
+            if let Some(enum_call) = receiver_type.clone().and_then(|receiver_ty| {
+                external_enum_synthetic_call(receiver_ty, name, arg_types.len())
             }) {
                 return enum_call.return_type;
             }
@@ -6560,16 +6547,19 @@ fn infer_resolver_expr_type_with_facts(
                 }
             }
             if let Some((receiver_ty, receiver_actual_ty)) =
-                receiver.as_deref().and_then(|receiver| {
-                    source_receiver_type_for_method(
-                        receiver,
-                        name,
-                        arg_types.len(),
-                        current_type,
-                        symbols,
-                        env,
-                    )
-                })
+                receiver.as_deref().zip(receiver_type.clone()).and_then(
+                    |(receiver, receiver_actual_ty)| {
+                        source_receiver_type_for_method_with_actual(
+                            receiver,
+                            receiver_actual_ty,
+                            name,
+                            arg_types.len(),
+                            current_type,
+                            symbols,
+                            env,
+                        )
+                    },
+                )
             {
                 let receiver_methods = symbols.methods_for_hierarchy(&receiver_ty);
                 if let Ok(Some(selection)) = resolve_same_class_call(
@@ -6721,16 +6711,10 @@ fn source_enum_synthetic_call(
 }
 
 fn external_enum_synthetic_call(
-    receiver: &Expr,
+    receiver_ty: JavaType,
     name: &str,
     arg_count: usize,
-    current_type: &str,
-    symbols: &ProgramSymbols,
-    env: &TypeEnv,
-    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<ResolvedCall> {
-    let receiver_ty =
-        infer_resolver_expr_type_with_facts(receiver, current_type, symbols, env, external_facts);
     let (JavaType::Named {
         name: receiver_name,
         ..
@@ -6765,6 +6749,17 @@ fn source_receiver_type(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
 ) -> Option<(String, JavaType)> {
+    let receiver_actual_ty = infer_resolver_expr_type(receiver, current_type, symbols, env);
+    source_receiver_type_with_actual(receiver, receiver_actual_ty, current_type, symbols, env)
+}
+
+fn source_receiver_type_with_actual(
+    receiver: &Expr,
+    receiver_actual_ty: JavaType,
+    current_type: &str,
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+) -> Option<(String, JavaType)> {
     if matches!(receiver, Expr::Super) {
         let current_source = symbols.source_type_name(current_type);
         let super_ty = symbols.extends_type_by_type.get(current_source)?.clone();
@@ -6776,7 +6771,6 @@ fn source_receiver_type(
             .contains_key(&super_name)
             .then_some((super_name, super_ty));
     }
-    let receiver_actual_ty = infer_resolver_expr_type(receiver, current_type, symbols, env);
     if let JavaType::Named { name, args } = &receiver_actual_ty
         && args.is_empty()
         && let Some(bound) = env
@@ -6790,8 +6784,9 @@ fn source_receiver_type(
     source_receiver_type_from_actual(receiver_actual_ty, symbols)
 }
 
-fn source_receiver_type_for_method(
+fn source_receiver_type_for_method_with_actual(
     receiver: &Expr,
+    receiver_actual_ty: JavaType,
     method_name: &str,
     arg_count: usize,
     current_type: &str,
@@ -6813,19 +6808,27 @@ fn source_receiver_type_for_method(
             symbols,
         );
     }
-    let receiver_actual_ty = infer_resolver_expr_type(receiver, current_type, symbols, env);
+    let with_actual = || {
+        source_receiver_type_with_actual(
+            receiver,
+            receiver_actual_ty.clone(),
+            current_type,
+            symbols,
+            env,
+        )
+    };
     let JavaType::Named { name, args } = &receiver_actual_ty else {
-        return source_receiver_type(receiver, current_type, symbols, env);
+        return with_actual();
     };
     if !args.is_empty() {
-        return source_receiver_type(receiver, current_type, symbols, env);
+        return with_actual();
     }
     let Some(bound) = env
         .type_param_bound(name)
         .cloned()
         .or_else(|| symbols.type_param_bound_for(current_type, name))
     else {
-        return source_receiver_type(receiver, current_type, symbols, env);
+        return with_actual();
     };
     let mut candidates = Vec::new();
     collect_intersection_bound_candidates(&bound, &mut candidates);
@@ -6845,7 +6848,7 @@ fn source_receiver_type_for_method(
                 .then(|| (owner, candidate.clone()))
         })
         .next()
-        .or_else(|| source_receiver_type(receiver, current_type, symbols, env))
+        .or_else(with_actual)
 }
 
 fn collect_intersection_bound_candidates<'a>(bound: &'a JavaType, out: &mut Vec<&'a JavaType>) {

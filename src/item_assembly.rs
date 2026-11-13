@@ -13425,6 +13425,7 @@ fn method_params_with_optional_lifetime(
         .map(|contract| (contract.declaration_owner, contract.declaration))
         .unwrap_or((ty, method));
     let mutable_array_target_params = mutable_array_target_params(method);
+    let rebound_params = rebound_whole_variable_params(method);
     let access_names = crate::java_naming::source_binding_rust_names(
         method.params.iter().map(|param| param.source_name.as_str()),
     );
@@ -13442,14 +13443,30 @@ fn method_params_with_optional_lifetime(
                 signatures.source_callback_is_inline(callback_owner, callback_method, index);
             let submit_callable_param =
                 method_param_is_submit_callable_callback(method, source_param_name);
+            let rebound_param = method
+                .params
+                .get(index)
+                .is_some_and(|source_param| {
+                    rebound_params.contains(source_param.source_name.as_str())
+                });
+            let interior_mutable_handle_param = !rebound_param
+                && (param.shape().native_allocation.shared()
+                    || representations.is_some_and(|plan| {
+                        crate::representation_lowering::source_hierarchy_carrier_uses_only_interior_mutable_handles(
+                            &param.shape().java_ty,
+                            plan,
+                        )
+                    }));
             let mutable_optional_sequence_param = mutable_array_target_params
                 .contains(param.name())
-                && optional_sequence_slot(&param.shape());
+                && optional_sequence_slot(&param.shape())
+                && !interior_mutable_handle_param;
             let mutable_owned_binding_param = param.binding_mutable()
                 && matches!(
                     param.shape().ownership,
                     OwnershipShape::Owned | OwnershipShape::CopyValue
-                );
+                )
+                && !interior_mutable_handle_param;
             let mutable_optional_borrow_param = param.shape().optional_element_type().is_some()
                 && param.shape().ownership == OwnershipShape::MutableBorrow;
             let name = method
@@ -13560,6 +13577,76 @@ fn optional_sequence_slot(shape: &RustSlotShape) -> bool {
         sequence_element_type(&inner).is_some()
             || two_dimensional_array_element_type(&inner).is_some()
     })
+}
+
+/// Parameters rebound as whole variables anywhere in the body. A shared
+/// allocation handle (`Rc`/`Arc` over `RefCell`) mutates its elements through
+/// interior borrows, so an element write does not need a `mut` binding; only
+/// replacing the binding itself does.
+fn rebound_whole_variable_params(method: &MethodDecl) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Some(body) = &method.body {
+        collect_rebound_var_targets_in_stmts(&body.statements, &mut names);
+    }
+    let param_names = method
+        .params
+        .iter()
+        .map(|param| param.source_name.as_str())
+        .collect::<HashSet<_>>();
+    names.retain(|name| param_names.contains(name.as_str()));
+    names
+}
+
+fn collect_rebound_var_targets_in_stmts(statements: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Assign { target, .. } => {
+                if let Expr::Var(name) = target {
+                    names.insert(name.clone());
+                }
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_rebound_var_targets_in_stmts(&then_block.statements, names);
+                if let Some(else_block) = else_block {
+                    collect_rebound_var_targets_in_stmts(&else_block.statements, names);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::EnhancedFor { body, .. } => {
+                collect_rebound_var_targets_in_stmts(&body.statements, names);
+            }
+            Stmt::For { init, body, .. } => {
+                collect_rebound_var_targets_in_stmts(init, names);
+                collect_rebound_var_targets_in_stmts(&body.statements, names);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_rebound_var_targets_in_stmts(&case.statements, names);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_rebound_var_targets_in_stmts(resources, names);
+                collect_rebound_var_targets_in_stmts(&body.statements, names);
+                for catch in catches {
+                    collect_rebound_var_targets_in_stmts(&catch.body.statements, names);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_rebound_var_targets_in_stmts(&finally_block.statements, names);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn mutable_array_target_params(method: &MethodDecl) -> HashSet<String> {
