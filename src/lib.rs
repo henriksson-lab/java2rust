@@ -1406,6 +1406,35 @@ fn translate_parsed_source_with_batch_context(
     Translation { rust, diagnostics }
 }
 
+/// Run one batch file's emission so that a translator panic on that file
+/// becomes an error translation for it instead of aborting every other file in
+/// the batch. The panic message is kept as an error diagnostic and the emitted
+/// Rust is an item-level `compile_error!`, so the file stays loudly failed
+/// (`translate_status` is `errors`) and is never mistaken for usable output.
+/// Thread-local lookup sessions and memos are scoped by drop guards, which
+/// restore them while the panic unwinds. A stack overflow aborts the process
+/// and cannot be isolated here.
+fn translate_batch_file_isolating_panics(
+    path: &str,
+    translate: impl FnOnce() -> Translation,
+) -> (Translation, &'static str) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(translate)) {
+        Ok(translation) => (translation, "ok"),
+        Err(payload) => {
+            let reason = payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload".to_string());
+            let message = format!("translator panicked while emitting {path}: {reason}");
+            let mut diagnostics = DiagnosticBag::new();
+            diagnostics.error("translator_panic", message.clone());
+            let rust = format!("{}\n", unsupported::compile_error_item_text(&message));
+            (Translation { rust, diagnostics }, "panicked")
+        }
+    }
+}
+
 fn emit_batch_translations(
     parsed_primary: Vec<(usize, String, parser::ParsedProgram)>,
     context: &BatchTranslationContext,
@@ -1425,19 +1454,25 @@ fn emit_batch_translations(
             }
             events.push(start_event);
             let file_start = Instant::now();
-            let mut translation =
-                translate_parsed_source_with_batch_context(parsed, context, |phase, elapsed_ms| {
-                    let event = BatchTranslationEvent::new(
-                        phase,
-                        index + 1,
-                        path.clone(),
-                        elapsed_ms,
-                        "ok",
-                    );
-                    if let Some(event_sink) = event_sink {
-                        event_sink(event.clone());
-                    }
-                    events.push(event);
+            let (mut translation, emit_status) =
+                translate_batch_file_isolating_panics(&path, || {
+                    translate_parsed_source_with_batch_context(
+                        parsed,
+                        context,
+                        |phase, elapsed_ms| {
+                            let event = BatchTranslationEvent::new(
+                                phase,
+                                index + 1,
+                                path.clone(),
+                                elapsed_ms,
+                                "ok",
+                            );
+                            if let Some(event_sink) = event_sink {
+                                event_sink(event.clone());
+                            }
+                            events.push(event);
+                        },
+                    )
                 });
             translation.diagnostics.extend(context_diagnostics.clone());
             let translation =
@@ -1446,8 +1481,13 @@ fn emit_batch_translations(
                 completion_sink(index + 1, &translation);
             }
             let elapsed_ms = file_start.elapsed().as_millis();
-            let end_event =
-                BatchTranslationEvent::new("emit_end", index + 1, path.clone(), elapsed_ms, "ok");
+            let end_event = BatchTranslationEvent::new(
+                "emit_end",
+                index + 1,
+                path.clone(),
+                elapsed_ms,
+                emit_status,
+            );
             if let Some(event_sink) = event_sink {
                 event_sink(end_event.clone());
             }
@@ -1507,23 +1547,26 @@ fn emit_batch_translations(
                                 event_sink(start_event.clone());
                             }
                             let mut item_events = vec![start_event];
-                            let mut translation = translate_parsed_source_with_batch_context(
-                                parsed,
-                                context,
-                                |phase, elapsed_ms| {
-                                    let event = BatchTranslationEvent::new(
-                                        phase,
-                                        original_index + 1,
-                                        path.clone(),
-                                        elapsed_ms,
-                                        "ok",
-                                    );
-                                    if let Some(event_sink) = event_sink {
-                                        event_sink(event.clone());
-                                    }
-                                    item_events.push(event);
-                                },
-                            );
+                            let (mut translation, emit_status) =
+                                translate_batch_file_isolating_panics(&path, || {
+                                    translate_parsed_source_with_batch_context(
+                                        parsed,
+                                        context,
+                                        |phase, elapsed_ms| {
+                                            let event = BatchTranslationEvent::new(
+                                                phase,
+                                                original_index + 1,
+                                                path.clone(),
+                                                elapsed_ms,
+                                                "ok",
+                                            );
+                                            if let Some(event_sink) = event_sink {
+                                                event_sink(event.clone());
+                                            }
+                                            item_events.push(event);
+                                        },
+                                    )
+                                });
                             translation.diagnostics.extend(context_diagnostics.clone());
                             let translation = BatchTranslation::new(
                                 path.clone(),
@@ -1539,7 +1582,7 @@ fn emit_batch_translations(
                                 original_index + 1,
                                 path.clone(),
                                 elapsed_ms,
-                                "ok",
+                                emit_status,
                             );
                             if let Some(event_sink) = event_sink {
                                 event_sink(end_event.clone());
@@ -3066,6 +3109,48 @@ mod tests {
     use super::*;
     use crate::java_ir::{JavaType, Member, MethodDecl, TypeDecl};
     use crate::java_signature::JavaCallableKey;
+
+    #[test]
+    fn batch_file_panic_becomes_a_loud_error_translation() {
+        let (translation, status) =
+            translate_batch_file_isolating_panics("pkg/Broken.java", || {
+                panic!("resolved enum delegation required")
+            });
+        assert_eq!(status, "panicked");
+        assert!(translation.diagnostics.has_errors());
+        assert!(translation.diagnostics.has_code("translator_panic"));
+        assert!(
+            translation
+                .rust
+                .starts_with(crate::output_markers::COMPILE_ERROR_MACRO_CALL),
+            "{}",
+            translation.rust
+        );
+        assert!(
+            translation
+                .rust
+                .contains("pkg/Broken.java: resolved enum delegation required"),
+            "{}",
+            translation.rust
+        );
+
+        let formatted = 7;
+        let (translation, status) =
+            translate_batch_file_isolating_panics("pkg/Formatted.java", || {
+                panic!("formatted message {formatted}")
+            });
+        assert_eq!(status, "panicked");
+        assert!(translation.rust.contains("formatted message 7"));
+
+        let (translation, status) =
+            translate_batch_file_isolating_panics("pkg/Fine.java", || Translation {
+                rust: "pub struct Fine;\n".to_string(),
+                diagnostics: DiagnosticBag::new(),
+            });
+        assert_eq!(status, "ok");
+        assert_eq!(translation.rust, "pub struct Fine;\n");
+        assert!(translation.diagnostics.is_empty());
+    }
 
     #[test]
     fn source_owner_contract_reader_uses_source_representation_and_fact_precedence() {
